@@ -511,23 +511,23 @@ class AuroraClientApp:
     FONT_TAB_ON      = ("Pretendard", 10, "bold")
     FONT_SMALL       = ("Pretendard SemiBold", 8)
     FONT_SMALL_BOLD  = ("Pretendard SemiBold", 8)
-    FONT_INPUT       = ("JetBrains Mono", 9)
-    FONT_MONO        = ("JetBrains Mono", 9)
-    FONT_MONO_SMALL  = ("JetBrains Mono", 8)
-    FONT_MONO_BOLD   = ("JetBrains Mono SemiBold", 9)
-    FONT_COUNTDOWN   = ("JetBrains Mono SemiBold", 13)
+    # 데이터(입력·IP·로그)도 Pretendard 로 통일 — 고정폭 글꼴은 한글이 없어 대체 글꼴이 섞임
+    FONT_INPUT       = ("Pretendard", 9)
+    FONT_MONO        = ("Pretendard", 9)
+    FONT_MONO_SMALL  = ("Pretendard", 8)
+    FONT_MONO_BOLD   = ("Pretendard SemiBold", 9)
+    FONT_COUNTDOWN   = ("Pretendard SemiBold", 13)
 
     @classmethod
     def apply_font_fallback(cls):
-        """Pretendard 가 없으면 맑은 고딕/Consolas 로 대체 (tk 루트 생성 후 호출)"""
+        """Pretendard 가 없으면 맑은 고딕으로 대체 (tk 루트 생성 후 호출)"""
         if "Pretendard" in tkfont.families():
             return
         for name in [n for n in dir(cls) if n.startswith("FONT")]:
             font = getattr(cls, name)
             family, size = font[0], font[1]
             heavy = "SemiBold" in family or "bold" in font[2:]
-            new_family = "Consolas" if "JetBrains" in family else "맑은 고딕"
-            setattr(cls, name, (new_family, size, "bold") if heavy else (new_family, size))
+            setattr(cls, name, ("맑은 고딕", size, "bold") if heavy else ("맑은 고딕", size))
 
     @classmethod
     def setup_styles(cls):
