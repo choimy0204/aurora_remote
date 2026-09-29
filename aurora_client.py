@@ -7,6 +7,7 @@ Aurora Remote Controller - Client
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
+import tkinter.font as tkfont
 import threading
 import subprocess
 import re
@@ -30,7 +31,7 @@ from PIL import Image as PILImage
 from PIL import ImageTk
 import aurora_update
 
-APP_VERSION = "2.9.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.10.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -456,11 +457,35 @@ def export_list(path: str) -> list[dict]:
     items = []
     with os.scandir(path) as it:
         for e in it:
+            try:   # 탐색기 기본값처럼 숨김·시스템 항목($RECYCLE.BIN, desktop.ini 등)은 표시 안 함
+                if e.stat(follow_symlinks=False).st_file_attributes & 0x6:
+                    continue
+            except (OSError, AttributeError):
+                pass
             ent = _export_entry(e.path, e.name)
             if ent:
                 items.append(ent)
     items.sort(key=lambda x: (not x["dir"], x["name"].lower()))
     return items
+
+class _SHFILEOPSTRUCTW(ctypes.Structure):
+    _fields_ = [("hwnd", ctypes.c_void_p), ("wFunc", ctypes.c_uint),
+                ("pFrom", ctypes.c_wchar_p), ("pTo", ctypes.c_wchar_p),
+                ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", ctypes.c_int),
+                ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", ctypes.c_wchar_p)]
+
+
+def _recycle(path: str):
+    """휴지통으로 이동 (확인 창·오류 창 없이). 휴지통에 안 들어가는 큰 항목은 바로 삭제됨"""
+    FO_DELETE = 3
+    flags = 0x0004 | 0x0010 | 0x0040 | 0x0400   # SILENT | NOCONFIRMATION | ALLOWUNDO | NOERRORUI
+    op = _SHFILEOPSTRUCTW(None, FO_DELETE, path + "\0", None, flags, 0, None, None)   # 이중 NUL 종료
+    fn = ctypes.windll.shell32.SHFileOperationW
+    fn.argtypes = [ctypes.POINTER(_SHFILEOPSTRUCTW)]
+    rc = fn(ctypes.byref(op))
+    if rc or op.fAnyOperationsAborted:
+        raise OSError(f"삭제 실패 (코드 0x{rc:X}) — 사용 중인 파일이 있거나 권한이 없습니다")
+
 
 def export_walk(path: str) -> dict:
     """폴더 하위 전체 — 파일은 상대경로/크기/수정시각, 빈 폴더도 포함"""
@@ -690,6 +715,8 @@ class CommandHandler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": True})
             if parsed.path == "/fs/upload":
                 return self._recv_file(path, q)
+            if parsed.path in ("/fs/rename", "/fs/delete"):
+                return self._fs_modify(parsed.path, path, q)
             self._send_json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
@@ -727,6 +754,40 @@ class CommandHandler(BaseHTTPRequestHandler):
         if app_instance:
             app_instance.add_log(f"📥 반입: {self.client_address[0]} → {path}")
         self._send_json({"ok": True, "size": length})
+
+    def _fs_modify(self, route: str, path: str, q: dict):
+        """이름 변경 / 삭제(휴지통) — 허용 경로 안의 항목만, 허용 경로 자체는 불가"""
+        # 링크·정션이면 가리키는 대상이 아니라 링크 자체를 다루도록 부모 폴더 기준으로 경로를 다시 만듦
+        raw = os.path.abspath(q.get("path", "")).rstrip("\\/")
+        parent = export_resolve(os.path.dirname(raw))
+        if parent is None or not os.path.basename(raw):
+            return self._send_json({"error": "허용 경로 자체는 바꾸거나 지울 수 없습니다"}, 403)
+        path = os.path.join(parent, os.path.basename(raw))
+        norm = os.path.normcase(os.path.normpath(path))
+        if any(norm == os.path.normcase(os.path.normpath(os.path.realpath(r["path"])))
+               for r in export_roots()):
+            return self._send_json({"error": "허용 경로 자체는 바꾸거나 지울 수 없습니다"}, 403)
+        if not os.path.lexists(path):
+            return self._send_json({"error": "대상이 없습니다 (이미 지워졌거나 이름이 바뀜)"}, 404)
+        who = self.client_address[0]
+        if route == "/fs/rename":
+            name = q.get("name", "").strip()
+            if (not name or name in (".", "..") or name.endswith((".", " "))
+                    or re.search(r'[\\/:*?"<>|\x00-\x1f]', name)):
+                return self._send_json({"error": "사용할 수 없는 이름입니다"}, 400)
+            new = os.path.join(os.path.dirname(path), name)
+            if export_resolve(new) is None:
+                return self._send_json({"error": "허용되지 않은 경로"}, 403)
+            if os.path.lexists(new) and os.path.normcase(new) != norm:
+                return self._send_json({"error": "같은 이름의 항목이 이미 있습니다"}, 409)
+            os.rename(path, new)
+            if app_instance:
+                app_instance.add_log(f"✏ 이름 변경: {who} → {path} → {name}")
+            return self._send_json({"ok": True, "path": new})
+        _recycle(path)
+        if app_instance:
+            app_instance.add_log(f"🗑 삭제(휴지통): {who} → {path}")
+        return self._send_json({"ok": True})
 
     def _relay_put(self, parsed, q: dict):
         """via 의 첫 IP 로 업로드 본문을 그대로 흘려 보냄 (디스크 저장 없음)"""
@@ -919,6 +980,597 @@ class _Tooltip:
             self._tip = None
 
 
+# ── 파일 아이콘 ─────────────────────────────
+# 1순위: 이 PC 의 Windows 셸 아이콘(탐색기와 같은 모양, 확장자 기준)
+# 2순위: 이 PC 에 연결 프로그램이 없는 자주 쓰는 확장자는 직접 그린 아이콘 (예: Office 없는 PC 의 xlsx)
+_ICON_BADGES = {
+    **dict.fromkeys(("ppt", "pptx", "pps", "ppsx"), ("P", "#C43E1C")),
+    **dict.fromkeys(("xls", "xlsx", "xlsm", "csv"), ("X", "#1D6F42")),
+    **dict.fromkeys(("doc", "docx", "rtf"), ("W", "#2B579A")),
+    "pdf": ("PDF", "#D93025"),
+    **dict.fromkeys(("txt", "log", "ini", "cfg", "json", "xml", "md", "yaml", "yml"), ("TXT", "#5F6B7A")),
+    **dict.fromkeys(("zip", "7z", "rar", "tar", "gz"), ("ZIP", "#9A6B00")),
+    **dict.fromkeys(("png", "jpg", "jpeg", "bmp", "gif", "tif", "tiff"), ("IMG", "#7B3FB5")),
+    **dict.fromkeys(("exe", "bat", "cmd", "msi"), ("EXE", "#37474F")),
+    "lnk": ("↗", "#1A6FC9"),
+}
+
+
+class _SHFILEINFOW(ctypes.Structure):
+    _fields_ = [("hIcon", ctypes.c_void_p), ("iIcon", ctypes.c_int),
+                ("dwAttributes", ctypes.c_uint32),
+                ("szDisplayName", ctypes.c_wchar * 260), ("szTypeName", ctypes.c_wchar * 80)]
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32), ("biHeight", ctypes.c_int32),
+                ("biPlanes", ctypes.c_uint16), ("biBitCount", ctypes.c_uint16),
+                ("biCompression", ctypes.c_uint32), ("biSizeImage", ctypes.c_uint32),
+                ("biXPelsPerMeter", ctypes.c_int32), ("biYPelsPerMeter", ctypes.c_int32),
+                ("biClrUsed", ctypes.c_uint32), ("biClrImportant", ctypes.c_uint32)]
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
+                ("Data3", ctypes.c_uint16), ("Data4", ctypes.c_ubyte * 8)]
+
+
+def _shell_icon_index(name: str, is_dir: bool, real_path: bool = False) -> int | None:
+    """셸 시스템 이미지 목록의 아이콘 번호. real_path=False 면 파일이 없어도 이름(확장자)만으로 찾음"""
+    info = _SHFILEINFOW()
+    flags = 0x4000                       # SHGFI_SYSICONINDEX
+    if not real_path:
+        flags |= 0x10                    # SHGFI_USEFILEATTRIBUTES
+    attr = 0x10 if is_dir else 0x80      # FILE_ATTRIBUTE_DIRECTORY / NORMAL
+    fn = ctypes.windll.shell32.SHGetFileInfoW
+    fn.restype = ctypes.c_size_t
+    fn.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.POINTER(_SHFILEINFOW),
+                   ctypes.c_uint, ctypes.c_uint]
+    if not fn(name, attr, ctypes.byref(info), ctypes.sizeof(info), flags):
+        return None
+    return info.iIcon
+
+
+def _hicon_to_pil(hicon, size: int):
+    """HICON → RGBA 이미지. 검은/흰 배경에 각각 그려 차이로 알파를 구함 (알파 없는 옛 아이콘도 처리)"""
+    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+    gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+    gdi32.CreateDIBSection.restype = ctypes.c_void_p
+    gdi32.CreateDIBSection.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+                                       ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_uint32]
+    gdi32.SelectObject.restype = ctypes.c_void_p
+    gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+    gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+    user32.DrawIconEx.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                                  ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+    bmi = _BITMAPINFOHEADER(ctypes.sizeof(_BITMAPINFOHEADER), size, -size, 1, 32, 0, 0, 0, 0, 0, 0)
+    n = size * size * 4
+    dc = gdi32.CreateCompatibleDC(None)
+    bits = ctypes.c_void_p()
+    bmp = gdi32.CreateDIBSection(dc, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
+    old = gdi32.SelectObject(dc, bmp)
+    shots = []
+    try:
+        for fill in (0x00, 0xFF):
+            ctypes.memset(bits, fill, n)
+            user32.DrawIconEx(dc, 0, 0, hicon, size, size, 0, None, 3)   # DI_NORMAL
+            shots.append(ctypes.string_at(bits, n))
+    finally:
+        gdi32.SelectObject(dc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(dc)
+    black, white = shots
+    out = bytearray(n)
+    for i in range(0, n, 4):
+        a = 255 - (white[i + 1] - black[i + 1])      # G 채널 기준
+        if a <= 0:
+            continue
+        a = min(a, 255)
+        out[i]     = min(255, black[i + 2] * 255 // a)   # BGRA → RGBA
+        out[i + 1] = min(255, black[i + 1] * 255 // a)
+        out[i + 2] = min(255, black[i]     * 255 // a)
+        out[i + 3] = a
+    return PILImage.frombytes("RGBA", (size, size), bytes(out))
+
+
+def _shell_icon_pil(index: int, size: int):
+    """시스템 이미지 목록(48px)에서 아이콘을 꺼내 size 로 맞춤"""
+    shell32, comctl32, user32 = ctypes.windll.shell32, ctypes.windll.comctl32, ctypes.windll.user32
+    iid = _GUID(0x46EB5926, 0x582E, 0x4017, (ctypes.c_ubyte * 8)(0x9F, 0xDF, 0xE8, 0x99, 0x8D, 0xAA, 0x09, 0x50))
+    himl = ctypes.c_void_p()
+    shell32.SHGetImageList.argtypes = [ctypes.c_int, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)]
+    if shell32.SHGetImageList(2, ctypes.byref(iid), ctypes.byref(himl)) != 0 or not himl:   # SHIL_EXTRALARGE
+        return None
+    comctl32.ImageList_GetIcon.restype = ctypes.c_void_p
+    comctl32.ImageList_GetIcon.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint]
+    hicon = comctl32.ImageList_GetIcon(himl, index, 1)   # ILD_TRANSPARENT
+    if not hicon:
+        return None
+    try:
+        img = _hicon_to_pil(hicon, 48)
+    finally:
+        user32.DestroyIcon.argtypes = [ctypes.c_void_p]
+        user32.DestroyIcon(hicon)
+    return img if size == 48 else img.resize((size, size), PILImage.LANCZOS)
+
+
+def _badge_icon_pil(label: str, color: str, size: int):
+    """문서 모양 + 색 배지 아이콘을 4배로 그려 축소 (부드러운 가장자리)"""
+    from PIL import ImageDraw, ImageFont
+    s = size * 4
+    img = PILImage.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    l, t, r, b = s * 0.2, s * 0.06, s * 0.84, s * 0.94
+    fold = s * 0.2
+    d.polygon([(l, t), (r - fold, t), (r, t + fold), (r, b), (l, b)],
+              fill="#FFFFFF", outline="#9AA3AB", width=max(2, s // 40))
+    d.polygon([(r - fold, t), (r - fold, t + fold), (r, t + fold)], fill="#DDE2E6", outline="#9AA3AB")
+    bl, bt, br, bb = s * 0.04, s * 0.46, s * 0.7, s * 0.82
+    d.rounded_rectangle([bl, bt, br, bb], radius=s * 0.07, fill=color)
+    fsize = int((bb - bt) * (0.72 if len(label) == 1 else 0.5))
+    font = None
+    for f in ("malgunbd.ttf", "arialbd.ttf", "seguisym.ttf"):
+        try:
+            font = ImageFont.truetype(f, fsize)
+            break
+        except OSError:
+            continue
+    font = font or ImageFont.load_default()
+    d.text(((bl + br) / 2, (bt + bb) / 2), label, fill="#FFFFFF", font=font, anchor="mm")
+    return img.resize((size, size), PILImage.LANCZOS)
+
+
+class _FileIcons:
+    """항목 → PhotoImage (종류별 캐시). Tk 메인 스레드에서만 사용"""
+    UNKNOWN_EXT = ".aurora_unregistered_ext"
+
+    def __init__(self, size: int):
+        self.size = size
+        self._cache = {}
+        self._generic = None
+
+    def _make(self, key: str):
+        size = self.size
+        img = None
+        try:
+            if key == "dir":
+                idx = _shell_icon_index("folder", True)
+            elif key in ("drive", "desktop"):
+                local = "C:\\" if key == "drive" else _desktop_dir()
+                idx = _shell_icon_index(local, True, real_path=True)
+            else:
+                idx = _shell_icon_index("file" + key, False)
+                if self._generic is None:
+                    self._generic = _shell_icon_index("file" + self.UNKNOWN_EXT, False)
+                if idx == self._generic and key[1:] in _ICON_BADGES:
+                    idx = None           # 이 PC 에 연결 프로그램 없음 → 그린 아이콘
+            if idx is not None:
+                img = _shell_icon_pil(idx, size)
+        except Exception:
+            img = None
+        if img is None:
+            label, color = _ICON_BADGES.get(key[1:], ("", "#8A949B")) if key.startswith(".") else ("", "#E0A526")
+            img = _badge_icon_pil(label, color, size) if label else _badge_icon_pil("", color, size)
+        return ImageTk.PhotoImage(img)
+
+    def get(self, item: dict):
+        if item.get("root"):
+            key = "drive" if item["path"].rstrip("\\").endswith(":") else "desktop"
+        elif item["dir"]:
+            key = "dir"
+        else:
+            key = os.path.splitext(item["name"])[1].lower() or ".noext"
+        if key not in self._cache:
+            self._cache[key] = self._make(key)
+        return self._cache[key]
+
+
+_DROP_HOOKS = []   # 창 프로시저 콜백 — GC 되면 크래시하므로 계속 참조
+
+
+def _enable_file_drop(widget, on_drop):
+    """탐색기에서 끌어다 놓은 파일을 받음 (WM_DROPFILES). on_drop(경로 목록, x, y) — x, y 는 위젯 기준.
+    추가 라이브러리 없이 위젯 창 프로시저를 가로챔. 실패해도 조용히 무시 (드롭만 안 됨)"""
+    try:
+        from ctypes import wintypes
+        user32, shell32 = ctypes.windll.user32, ctypes.windll.shell32
+        LRESULT = ctypes.c_ssize_t
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)
+        user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+        user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        user32.CallWindowProcW.restype = LRESULT
+        user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, ctypes.c_uint,
+                                           ctypes.c_size_t, ctypes.c_ssize_t]
+        shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
+        shell32.DragQueryPoint.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.POINT)]
+        shell32.DragFinish.argtypes = [ctypes.c_void_p]
+        hwnd = widget.winfo_id()
+        WM_DROPFILES = 0x0233
+        old = [None]
+        pending = []   # 창 프로시저 안에서는 Tcl 호출 금지 (tkinter 스레드 상태가 깨져 크래시) → 모아 두고 폴링
+
+        def proc(h, msg, wp, lp):
+            if msg == WM_DROPFILES:
+                try:
+                    n = shell32.DragQueryFileW(wp, 0xFFFFFFFF, None, 0)
+                    paths = []
+                    for i in range(n):
+                        size = shell32.DragQueryFileW(wp, i, None, 0) + 1
+                        buf = ctypes.create_unicode_buffer(size)
+                        shell32.DragQueryFileW(wp, i, buf, size)
+                        paths.append(buf.value)
+                    pt = wintypes.POINT()
+                    shell32.DragQueryPoint(wp, ctypes.byref(pt))
+                    pending.append((paths, pt.x, pt.y))
+                finally:
+                    shell32.DragFinish(wp)
+                return 0
+            return user32.CallWindowProcW(old[0], h, msg, wp, lp)
+
+        def poll():
+            while pending:
+                try:
+                    on_drop(*pending.pop(0))
+                except Exception:
+                    pass
+            try:
+                widget.after(150, poll)
+            except tk.TclError:
+                pass   # 위젯 파괴됨
+
+        cb = WNDPROC(proc)
+        _DROP_HOOKS.append(cb)
+        old[0] = user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(cb, ctypes.c_void_p))   # GWLP_WNDPROC
+        # 관리자 권한으로 실행 중이어도 일반 권한 탐색기의 드롭을 받도록 허용
+        for m in (WM_DROPFILES, 0x004A, 0x0049):
+            try:
+                user32.ChangeWindowMessageFilterEx(wintypes.HWND(hwnd), m, 1, None)
+            except Exception:
+                pass
+        poll()
+        shell32.DragAcceptFiles(wintypes.HWND(hwnd), True)
+    except Exception:
+        pass
+
+
+class _FileGrid(tk.Frame):
+    """탐색기 '타일' 보기 — 아이콘 + 이름 + 크기·수정일, 창 너비에 맞춰 여러 열.
+    보이는 줄만 그려서 파일이 많아도 가벼움. 선택: 클릭/Ctrl/Shift/드래그 영역/Ctrl+A/방향키"""
+
+    def __init__(self, parent, app, on_open, on_menu, on_key):
+        super().__init__(parent, bg=app.PANEL)
+        self.app, self.on_open, self.on_menu, self.on_key = app, on_open, on_menu, on_key
+        self.icons  = _FileIcons(_px(40))
+        self.tile_w = _px(260)
+        self.tile_h = _px(60)
+        self.pad    = _px(4)
+        self.font     = tkfont.Font(font=app.FONT_INPUT)
+        self.font_sub = tkfont.Font(font=app.FONT_MONO_SMALL)
+        self.items, self.sel = [], set()
+        self.anchor = self.cursor = self.hover = None
+        self.mode = "extended"
+        self.empty_text = ""
+        self.cols, self.tw = 1, self.tile_w
+        self._band = None
+        self._edit = None
+        self._fit_cache = {}
+
+        self.cv = tk.Canvas(self, bg=app.PANEL, highlightthickness=0, bd=0, takefocus=1,
+                            yscrollincrement=_px(20))
+        self.sb = ttk.Scrollbar(self, orient="vertical", command=self._yview)
+        self.cv.configure(yscrollcommand=self.sb.set)
+        self.sb.pack(side="right", fill="y")
+        self.cv.pack(fill="both", expand=True)
+        cv = self.cv
+        cv.bind("<Configure>", lambda e: self._layout())
+        cv.bind("<Button-1>", self._click)
+        cv.bind("<Control-Button-1>", lambda e: self._click(e, ctrl=True))
+        cv.bind("<Shift-Button-1>", lambda e: self._click(e, shift=True))
+        cv.bind("<B1-Motion>", self._drag)
+        cv.bind("<ButtonRelease-1>", self._release)
+        cv.bind("<Double-Button-1>", self._double)
+        cv.bind("<Button-3>", self._right)
+        cv.bind("<Motion>", self._motion)
+        cv.bind("<Leave>", lambda e: self._set_hover(None))
+        cv.bind("<MouseWheel>", lambda e: self._scroll(-1 if e.delta > 0 else 1, 3))
+        cv.bind("<Control-a>", lambda e: self._select_all())
+        cv.bind("<Return>", lambda e: self._open_cursor())
+        for k, d in (("Left", -1), ("Right", 1), ("Up", "up"), ("Down", "down")):
+            cv.bind(f"<{k}>", lambda e, d=d: self._move(d, False))
+            cv.bind(f"<Shift-{k}>", lambda e, d=d: self._move(d, True))
+        for k in ("Delete", "F2", "BackSpace", "F5"):
+            cv.bind(f"<{k}>", lambda e, k=k: self.on_key(k))
+
+    # ── 데이터 ──
+    def set_items(self, items: list, empty_text: str = "", select_name: str | None = None):
+        self.cancel_edit()
+        self.items = items
+        self.sel.clear()
+        self.anchor = self.cursor = self.hover = None
+        self.empty_text = empty_text
+        self._fit_cache.clear()
+        if select_name:
+            for i, it in enumerate(items):
+                if it["name"].lower() == select_name.lower():
+                    self.sel = {i}
+                    self.anchor = self.cursor = i
+        self.cv.yview_moveto(0)
+        self._layout()
+        if self.cursor is not None:
+            self.see(self.cursor)
+
+    def selection(self) -> list:
+        return [self.items[i] for i in sorted(self.sel) if i < len(self.items)]
+
+    def set_mode(self, mode: str):
+        self.mode = mode
+        if mode == "browse" and len(self.sel) > 1:
+            self.sel = {self.cursor} if self.cursor is not None else set()
+            self._draw()
+
+    # ── 배치·그리기 ──
+    def _layout(self):
+        w = max(1, self.cv.winfo_width())
+        self.cols = max(1, (w - self.pad * 2) // self.tile_w)
+        self.tw = (w - self.pad * 2) / self.cols
+        self._fit_cache.clear()
+        rows = -(-len(self.items) // self.cols)
+        self.cv.configure(scrollregion=(0, 0, w, rows * self.tile_h + self.pad * 2))
+        self._draw()
+
+    def _tile_box(self, i: int):
+        r, c = divmod(i, self.cols)
+        x0 = self.pad + c * self.tw
+        y0 = self.pad + r * self.tile_h
+        return x0, y0, x0 + self.tw - _px(4), y0 + self.tile_h - _px(4)
+
+    def _fit(self, font, text: str, width: int) -> str:
+        key = (id(font), text, width)
+        if key in self._fit_cache:
+            return self._fit_cache[key]
+        out = text
+        if font.measure(text) > width:
+            lo, hi = 0, len(text)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if font.measure(text[:mid] + "…") <= width:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            out = text[:lo] + "…"
+        self._fit_cache[key] = out
+        return out
+
+    def _draw(self):
+        cv, app = self.cv, self.app
+        cv.delete("tile")
+        if not self.items:
+            if self.empty_text:
+                cv.create_text(cv.winfo_width() / 2, _px(40), text=self.empty_text,
+                               fill=app.TEXT_DIM, font=app.FONT_INPUT, tags="tile")
+            return
+        top = cv.canvasy(0)
+        h = cv.winfo_height()
+        r0 = max(0, int((top - self.pad) // self.tile_h))
+        r1 = int((top + h - self.pad) // self.tile_h) + 1
+        ic = self.icons.size
+        text_w = int(self.tw - ic - _px(28))
+        for i in range(r0 * self.cols, min(len(self.items), (r1 + 1) * self.cols)):
+            it = self.items[i]
+            x0, y0, x1, y1 = self._tile_box(i)
+            if i in self.sel:
+                cv.create_rectangle(x0, y0, x1, y1, fill=app.SELECT_BG, outline="#99C9F5", tags="tile")
+            elif i == self.hover:
+                cv.create_rectangle(x0, y0, x1, y1, fill=app.PANEL_ALT, outline=app.BORDER, tags="tile")
+            cy = (y0 + y1) / 2
+            cv.create_image(x0 + _px(8), cy, image=self.icons.get(it), anchor="w", tags="tile")
+            tx = x0 + _px(8) + ic + _px(10)
+            sub = self._sub_text(it)
+            cv.create_text(tx, cy - (_px(9) if sub else 0), anchor="w", tags="tile",
+                           text=self._fit(self.font, it["name"], text_w),
+                           fill=app.TEXT, font=self.font)
+            if sub:
+                cv.create_text(tx, cy + _px(10), anchor="w", tags="tile",
+                               text=self._fit(self.font_sub, sub, text_w),
+                               fill=app.TEXT_DIM, font=self.font_sub)
+        if self._band:
+            cv.tag_raise("band")
+
+    def _sub_text(self, it: dict) -> str:
+        if it.get("root"):
+            return it["path"]
+        mtime = datetime.fromtimestamp(it["mtime"]).strftime("%Y-%m-%d %H:%M") if it.get("mtime") else ""
+        if it["dir"]:
+            return mtime
+        size = self.app._fmt_size(it.get("size", 0))
+        return f"{size}   {mtime}" if mtime else size
+
+    def _yview(self, *args):
+        self.cv.yview(*args)
+        self._draw()
+
+    def _scroll(self, direction: int, units: int):
+        self.cv.yview_scroll(direction * units, "units")
+        self._draw()
+
+    def see(self, i: int):
+        x0, y0, x1, y1 = self._tile_box(i)
+        total = float(self.cv.cget("scrollregion").split()[3] or 1)
+        top, h = self.cv.canvasy(0), self.cv.winfo_height()
+        if y0 < top:
+            self.cv.yview_moveto(max(0, y0 - self.pad) / total)
+        elif y1 > top + h:
+            self.cv.yview_moveto((y1 + self.pad - h) / total)
+        self._draw()
+
+    # ── 좌표 → 항목 ──
+    def index_at(self, x: float, y: float) -> int | None:
+        cx, cy = self.cv.canvasx(x), self.cv.canvasy(y)
+        c = int((cx - self.pad) // self.tw)
+        r = int((cy - self.pad) // self.tile_h)
+        if c < 0 or c >= self.cols or r < 0:
+            return None
+        i = r * self.cols + c
+        if i >= len(self.items):
+            return None
+        x0, y0, x1, y1 = self._tile_box(i)
+        return i if x0 <= cx <= x1 and y0 <= cy <= y1 else None
+
+    # ── 마우스 ──
+    def _set_hover(self, i):
+        if i != self.hover:
+            self.hover = i
+            self._draw()
+
+    def _motion(self, e):
+        self._set_hover(self.index_at(e.x, e.y))
+
+    def _click(self, e, ctrl=False, shift=False):
+        self.cv.focus_set()
+        self.commit_edit()
+        i = self.index_at(e.x, e.y)
+        self._band = None
+        if i is None:
+            if not ctrl and not shift:
+                self.sel.clear()
+            if self.mode == "extended":
+                x, y = self.cv.canvasx(e.x), self.cv.canvasy(e.y)
+                self._band = (x, y, set(self.sel))
+            self._draw()
+            return
+        if self.mode == "browse":
+            self.sel = {i}
+            self.anchor = i
+        elif shift and self.anchor is not None:
+            a, b = sorted((self.anchor, i))
+            rng = set(range(a, b + 1))
+            self.sel = (self.sel | rng) if ctrl else rng
+        elif ctrl:
+            self.sel ^= {i}
+            self.anchor = i
+        else:
+            self.sel = {i}
+            self.anchor = i
+        self.cursor = i
+        self._draw()
+
+    def _drag(self, e):
+        if not self._band:
+            return
+        x0, y0, base = self._band
+        x1, y1 = self.cv.canvasx(e.x), self.cv.canvasy(e.y)
+        # 가장자리로 끌면 자동 스크롤
+        if e.y < 0:
+            self.cv.yview_scroll(-1, "units")
+        elif e.y > self.cv.winfo_height():
+            self.cv.yview_scroll(1, "units")
+        lx, rx, ty, by = min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
+        hit = set()
+        for i in range(len(self.items)):
+            bx0, by0, bx1, by1 = self._tile_box(i)
+            if by0 > by:
+                break
+            if bx0 < rx and bx1 > lx and by0 < by and by1 > ty:
+                hit.add(i)
+        self.sel = base | hit
+        self._draw()
+        self.cv.delete("band")
+        self.cv.create_rectangle(lx, ty, rx, by, outline=self.app.BRAND, fill="",
+                                 dash=(3, 2), tags=("band", "tile"))
+
+    def _release(self, e):
+        if self._band:
+            self._band = None
+            self.cv.delete("band")
+
+    def _double(self, e):
+        i = self.index_at(e.x, e.y)
+        if i is not None:
+            self.on_open(self.items[i])
+
+    def _right(self, e):
+        self.cv.focus_set()
+        self.commit_edit()
+        i = self.index_at(e.x, e.y)
+        if i is not None and i not in self.sel:
+            self.sel = {i}
+            self.anchor = self.cursor = i
+        elif i is None:
+            self.sel.clear()
+        self._draw()
+        self.on_menu(e, self.items[i] if i is not None else None)
+
+    # ── 키보드 ──
+    def _select_all(self):
+        if self.mode == "extended":
+            self.sel = set(range(len(self.items)))
+            self._draw()
+        return "break"
+
+    def _open_cursor(self):
+        if self.cursor is not None and self.cursor < len(self.items):
+            self.on_open(self.items[self.cursor])
+
+    def _move(self, d, shift: bool):
+        if not self.items:
+            return "break"
+        step = -self.cols if d == "up" else self.cols if d == "down" else d
+        cur = self.cursor if self.cursor is not None else -step if step > 0 else 0
+        i = min(len(self.items) - 1, max(0, cur + step))
+        if shift and self.mode == "extended" and self.anchor is not None:
+            a, b = sorted((self.anchor, i))
+            self.sel = set(range(a, b + 1))
+        else:
+            self.sel = {i}
+            self.anchor = i
+        self.cursor = i
+        self.see(i)
+        return "break"
+
+    # ── 이름 바꾸기 (제자리 편집) ──
+    def begin_edit(self, item: dict, on_commit):
+        self.cancel_edit()
+        try:
+            i = self.items.index(item)
+        except ValueError:
+            return
+        self.see(i)
+        x0, y0, x1, y1 = self._tile_box(i)
+        tx = x0 + _px(8) + self.icons.size + _px(8)
+        var = tk.StringVar(value=item["name"])
+        ent = tk.Entry(self.cv, textvariable=var, font=self.font, relief="solid", bd=1,
+                       highlightthickness=0, fg=self.app.TEXT, bg=self.app.PANEL)
+        win = self.cv.create_window(tx, (y0 + y1) / 2, window=ent, anchor="w",
+                                    width=int(x1 - tx - _px(6)))
+        self._edit = (ent, win, item, var, on_commit)
+        ent.focus_set()
+        stem = len(os.path.splitext(item["name"])[0]) if not item["dir"] else len(item["name"])
+        ent.selection_range(0, stem or "end")
+        ent.icursor(stem)
+        ent.bind("<Return>", lambda e: (self.commit_edit(), self.cv.focus_set()))
+        ent.bind("<Escape>", lambda e: (self.cancel_edit(), self.cv.focus_set()))
+        ent.bind("<FocusOut>", lambda e: self.commit_edit())
+
+    def commit_edit(self):
+        if not self._edit:
+            return
+        ent, win, item, var, on_commit = self._edit
+        new = var.get().strip()
+        self.cancel_edit()
+        if new and new != item["name"]:
+            on_commit(item, new)
+
+    def cancel_edit(self):
+        if not self._edit:
+            return
+        ent, win = self._edit[0], self._edit[1]
+        self._edit = None
+        self.cv.delete(win)
+        ent.destroy()
+
+
 class AuroraClientApp:
 
     # ── 라벨 설명(hint) ──────────────────
@@ -941,7 +1593,7 @@ class AuroraClientApp:
         "저장 폴더": "반출한 파일을 받을 내 PC의 폴더입니다. 실제로는 '저장 폴더\\장비이름 (IP)\\' 아래에 저장됩니다. 파일은 4개까지 동시에 받고, 취소하면 받던 파일이 .part 로 남아 다음에 이어받습니다.",
         "중계 PC": "직접 연결되지 않는 장비의 파일을 가져올 때 거치는 중계 PC(LHS)의 IP 입니다. '적용'으로 저장하며, 5초마다 연결을 확인하고 연결되면 장비를 자동으로 검색합니다. 모든 PC 의 export_key 가 같아야 연결됩니다.",
         "접속 경로": "반출 요청이 실제로 거치는 PC 순서입니다. 내 PC 에서 가져오면 내 PC → 중계 PC(LHS) → 대상 장비(CCW 등) 3대, 중계 PC(LHS)에서 직접 가져오면 LHS → 대상 장비 2대로 표시됩니다. 화살표가 초록이면 연결됨, 빨강이면 연결 안됨입니다.",
-        "보낼 항목": "반입 모드에서 내 PC 에서 장비로 보낼 파일·폴더 목록입니다. '파일 추가'/'폴더 추가'로 넣고, 폴더는 하위 전체를 보냅니다. 파일은 4개까지 동시에 보내고, 같은 이름의 파일은 확인 후 덮어씁니다.",
+        "보낼 항목": "반입 모드에서 내 PC 에서 장비로 보낼 파일·폴더 목록입니다. '파일 추가'/'폴더 추가'로 넣거나 탐색기에서 끌어다 놓고, 폴더는 하위 전체를 보냅니다. 파일은 4개까지 동시에 보내고, 같은 이름의 파일은 확인 후 덮어씁니다.",
         "반입 위치": "반입 파일이 들어갈 장비의 폴더입니다. 아래 파일 탐색에서 D 드라이브·바탕화면 안의 폴더로 이동하면 그 폴더가 반입 위치가 됩니다.",
         "장비": "중계 PC 가 자기 네트워크 대역(/24)을 스캔해 찾은 클라이언트 목록입니다. [중계]는 중계 PC 자신입니다. 장비를 고르면 허용 경로(D 드라이브·바탕화면)만 탐색할 수 있으며, '이름' 버튼으로 표시 이름을 바꿀 수 있습니다.",
     }
@@ -951,7 +1603,7 @@ class AuroraClientApp:
         "서버 연결과 Aurora 상태 확인, 서버 IP·포트 설정, 자동 시작, 수동 실행/종료를 하는 탭입니다. 설정은 D:\\RemoteConfig\\client_config.json 에 저장됩니다.",
         "Aurora 실행 경로를 지정하고, 등록한 exe 이름의 프로세스를 강제 종료하는 탭입니다.",
         "규칙(폴더·확장자·기한·ON)에 따라 오래된 파일이나 날짜 폴더를 날짜가 바뀔 때(자정) 자동 삭제하는 탭입니다.",
-        "중계 PC(LHS)를 거쳐 직접 연결되지 않는 장비와 파일을 주고받는 탭입니다. 반출 모드는 장비 → 내 PC, 반입 모드는 내 PC → 장비이며, D 드라이브와 바탕화면만 접근할 수 있습니다.",
+        "중계 PC(LHS)를 거쳐 직접 연결되지 않는 장비와 파일을 주고받는 탭입니다. 반출 모드는 장비 → 내 PC, 반입 모드는 내 PC → 장비이며, D 드라이브와 바탕화면만 접근할 수 있습니다. 오른쪽 파일 목록에서 우클릭으로 이름 바꾸기·삭제·새 폴더, 탐색기에서 끌어다 놓으면 반입합니다.",
     ]
 
     # ── 색상 ─────────────────────────────
@@ -1208,7 +1860,10 @@ class AuroraClientApp:
         self._build_export_tab(self._tab_frames[3])
         self._select_tab(0)
 
+    EXPORT_TAB = 3
+
     def _select_tab(self, index: int):
+        self._fit_window_for_tab(index)
         for i, frame in enumerate(self._tab_frames):
             selected = (i == index)
             if selected:
@@ -1219,6 +1874,29 @@ class AuroraClientApp:
                 fg=self.BLUE if selected else self.TEXT_DIM,
                 font=self.FONT_TAB_ON if selected else self.FONT_TAB)
             self._tab_lines[i].config(bg=self.BRAND if selected else self.PANEL)
+
+    def _fit_window_for_tab(self, index: int):
+        """반입/반출 탭은 파일 탐색을 오른쪽에 크게 보여 주려고 창을 넓히고 크기 조절 허용,
+        다른 탭으로 가면 원래 크기·위치로 되돌림"""
+        wide = index == self.EXPORT_TAB
+        prev = getattr(self, "_geom_before_wide", None)
+        if wide and prev is None:
+            self.root.update_idletasks()
+            self._geom_before_wide = self.root.geometry()
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            w = min(_px(1320), sw - _px(20))
+            h = self.root.winfo_height()
+            x = max(0, min(self.root.winfo_x(), sw - w - _px(10)))
+            y = max(0, min(self.root.winfo_y(), sh - h - _px(40)))
+            self.root.resizable(True, True)
+            self.root.minsize(_px(1000), _px(700))
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+        elif not wide and prev is not None:
+            self._geom_before_wide = None
+            self.root.minsize(1, 1)
+            self.root.geometry(prev)
+            self.root.resizable(False, False)
 
     def _build_main_tab(self, parent):
         # 상태 카드
@@ -1887,22 +2565,25 @@ class AuroraClientApp:
     def _build_export_tab(self, parent):
         self._exp_connected = False
         self._exp_devices   = []      # [{ip, label}] — 콤보박스 순서와 동일
-        self._exp_items     = {}      # {treeview iid: entry}
+
         self._exp_path      = ""      # "" = 루트(허용 경로 목록)
         self._exp_roots     = []
         self._exp_cancel    = threading.Event()
         self._exp_busy      = False
         self._exp_relay_host = ""     # 중계 PC 호스트명 (/info 응답)
 
-        # 로그 (하단 고정 — 먼저 pack)
-        self.export_log_text = self._log_panel(parent, "반입/반출 LOG", height=140)
+        # 이 탭만 창을 넓혀 좌(연결·실행·로그) / 우(파일 탐색) 2단 배치 — _select_tab 참고
+        left = tk.Frame(parent, bg=self.BG, width=_px(624))
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+        right = tk.Frame(parent, bg=self.BG)
+        right.pack(side="left", fill="both", expand=True, padx=(_px(16), 0))
 
         self._exp_mode      = "export"  # "export"(장비 → 내 PC) / "import"(내 PC → 장비)
         self._imp_sources   = []      # 반입할 내 PC 파일·폴더 경로
 
         # ── 저장/실행 카드 (하단) ──
-        act = self._card(parent)
-        act.pack(side="bottom", fill="x", pady=(_px(14), 0))
+        act = self._card(left)
         # 반출 모드: 저장 폴더
         row = self._exp_save_row = tk.Frame(act, bg=self.PANEL)
         row.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)))
@@ -1955,7 +2636,7 @@ class AuroraClientApp:
         self._exp_prog_lbl.pack(side="top", fill="x")
 
         # ── 모드 전환 (최상단) ──
-        mode = tk.Frame(parent, bg=self.BG)
+        mode = tk.Frame(left, bg=self.BG)
         mode.pack(fill="x", pady=(0, _px(10)))
         self._exp_mode_btns = {
             "export": self._button(mode, "⬇ 반출 모드", "secondary", lambda: self._set_transfer_mode("export")),
@@ -1969,8 +2650,10 @@ class AuroraClientApp:
         self._exp_mode_lbl.pack(side="left", padx=(_px(12), 0))
 
         # ── 연결 카드 (상단) ──
-        conn = self._card(parent)
+        conn = self._card(left)
         conn.pack(fill="x", pady=(0, _px(14)))
+        act.pack(fill="x", pady=(0, _px(14)))
+        self.export_log_text = self._log_panel(left, "반입/반출 LOG")
         r1 = tk.Frame(conn, bg=self.PANEL)
         r1.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)))
         self._field_label(r1, "중계 PC", width=8).pack(side="left", padx=(0, _px(8)))
@@ -2004,7 +2687,7 @@ class AuroraClientApp:
         self._exp_route_frame.pack(side="left", fill="x", expand=True)
 
         # ── 파일 탐색 카드 ──
-        browse = self._card(parent)
+        browse = self._card(right)
         browse.pack(fill="both", expand=True)
         nav = tk.Frame(browse, bg=self.PANEL)
         nav.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)))
@@ -2016,21 +2699,16 @@ class AuroraClientApp:
                                       "선택한 장비에서 현재 보고 있는 경로입니다. 처음에는 접근 가능한 허용 경로(D 드라이브·바탕화면)가 나오고, 그 밖의 경로는 열 수 없습니다. 폴더를 더블클릭하면 안으로 들어갑니다.")
         self._exp_path_lbl.pack(side="left", fill="x", expand=True)
 
-        tree_wrap = tk.Frame(browse, bg=self.PANEL)
-        tree_wrap.pack(fill="both", expand=True, padx=_px(20), pady=(0, _px(16)))
-        self._exp_tree = ttk.Treeview(tree_wrap, columns=("size", "mtime"),
-                                      style="Export.Treeview", selectmode="extended")
-        self._exp_tree.heading("#0", text="이름", anchor="w")
-        self._exp_tree.heading("size", text="크기", anchor="e")
-        self._exp_tree.heading("mtime", text="수정일", anchor="w")
-        self._exp_tree.column("#0", width=_px(300), anchor="w")
-        self._exp_tree.column("size", width=_px(80), anchor="e", stretch=False)
-        self._exp_tree.column("mtime", width=_px(130), anchor="w", stretch=False)
-        sb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self._exp_tree.yview)
-        self._exp_tree.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self._exp_tree.pack(fill="both", expand=True)
-        self._exp_tree.bind("<Double-1>", self._export_on_double)
+        grid_wrap = tk.Frame(browse, bg=self.PANEL, highlightthickness=1,
+                             highlightbackground=self.BORDER, highlightcolor=self.BORDER)
+        grid_wrap.pack(fill="both", expand=True, padx=_px(20), pady=(0, _px(16)))
+        self._exp_grid = _FileGrid(grid_wrap, self, on_open=self._export_open_item,
+                                   on_menu=self._export_menu, on_key=self._export_key)
+        self._exp_grid.pack(fill="both", expand=True)
+        self._exp_grid.set_items([], "장비를 선택하세요")
+        # 탐색기에서 파일·폴더를 끌어다 놓으면 반입 (폴더 타일 위 → 그 폴더, 빈 곳 → 현재 폴더)
+        _enable_file_drop(self._exp_grid.cv, self._export_on_drop)
+        _enable_file_drop(self._imp_list, lambda paths, x, y: self._import_add(paths))
 
         self._export_set_connected(False)
         self._set_transfer_mode("export")
@@ -2046,7 +2724,7 @@ class AuroraClientApp:
         self._exp_mode_lbl.config(text="내 PC → 장비 (선택한 장비의 현재 폴더로 보내기)" if is_imp
                                   else "장비 → 내 PC (선택한 파일·폴더를 저장 폴더로 가져오기)")
         self._exp_go_btn.config(text="⬆ 반입" if is_imp else "⬇ 반출")
-        self._exp_tree.config(selectmode="browse" if is_imp else "extended")
+        self._exp_grid.set_mode("browse" if is_imp else "extended")
         if is_imp:
             self._exp_save_row.pack_forget()
             self._imp_frame.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)), before=self._exp_act_row)
@@ -2264,7 +2942,8 @@ class AuroraClientApp:
                 return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
             n /= 1024
 
-    def _export_nav(self, path: str):
+    def _export_nav(self, path: str, select_name: str | None = None, then=None):
+        """path 목록 조회 → 표시. select_name 항목을 선택하고, then(항목) 을 이어서 실행 (새 폴더 이름 편집 등)"""
         target = self._export_target()
         if not target:
             return
@@ -2283,31 +2962,183 @@ class AuroraClientApp:
                 return
             if not path:
                 for it in items:
-                    it.update(dir=True, size=0, mtime=None)
-            self.root.after(0, lambda: self._export_fill(path, items))
+                    it.update(dir=True, size=0, mtime=None, root=True)
+            def _show():
+                self._export_fill(path, items, select_name)
+                sel = self._exp_grid.selection()
+                if then and sel:
+                    then(sel[0])
+            self.root.after(0, _show)
         threading.Thread(target=_do, daemon=True).start()
 
-    def _export_fill(self, path: str, items: list):
+    def _export_fill(self, path: str, items: list, select_name: str | None = None):
         self._exp_path = path
         if not path:
             self._exp_roots = [it["path"] for it in items]
         self._exp_path_lbl.config(text=path or "허용 경로 (D 드라이브 · 바탕화면 · 공용 바탕화면)",
                                   fg=self.TEXT if path else self.TEXT_DIM)
-        self._exp_tree.delete(*self._exp_tree.get_children())
-        self._exp_items = {}
-        for it in items:
-            mtime = datetime.fromtimestamp(it["mtime"]).strftime("%Y-%m-%d %H:%M") if it.get("mtime") else ""
-            iid = self._exp_tree.insert("", "end",
-                text=("📁 " if it["dir"] else "📄 ") + it["name"],
-                values=("" if it["dir"] else self._fmt_size(it["size"]), mtime))
-            self._exp_items[iid] = it
+        empty = "빈 폴더" if path else ("불러오는 중…" if self._export_target() else "장비를 선택하세요")
+        self._exp_grid.set_items(items, empty, select_name)
         self._import_update_dest()
 
-    def _export_on_double(self, event):
-        iid = self._exp_tree.identify_row(event.y)
-        it = self._exp_items.get(iid)
-        if it and it["dir"]:
+    def _export_open_item(self, it: dict):
+        if it["dir"]:
             self._export_nav(it["path"])
+
+    # 파일 탐색 우클릭 메뉴 · 단축키
+    def _export_menu(self, event, item):
+        sel = self._exp_grid.selection()
+        in_root = not self._exp_path              # 허용 경로 목록 화면 — 바꾸기·지우기·새 폴더 불가
+        editable = bool(sel) and not in_root and not self._exp_busy
+        st = lambda ok: "normal" if ok else "disabled"
+        m = tk.Menu(self.root, tearoff=0, font=self.FONT_INPUT, bg=self.PANEL, fg=self.TEXT,
+                    activebackground=self.SELECT_BG, activeforeground=self.TEXT, bd=1)
+        if item is not None:
+            if item["dir"]:
+                m.add_command(label="열기", command=lambda: self._export_nav(item["path"]))
+            if self._exp_mode == "export" and not in_root:
+                m.add_command(label=f"⬇ 반출 ({len(sel)}개)", command=self._export_start,
+                              state=st(not self._exp_busy))
+            m.add_separator()
+            m.add_command(label="이름 바꾸기", accelerator="F2", state=st(editable and len(sel) == 1),
+                          command=lambda: self._export_rename(sel[0]))
+            m.add_command(label="삭제", accelerator="Del", state=st(editable),
+                          command=lambda: self._export_delete(sel))
+            m.add_separator()
+            m.add_command(label="경로 복사", command=lambda: self._export_copy_path(sel))
+        else:
+            m.add_command(label="새 폴더", state=st(not in_root and not self._exp_busy and self._export_target()),
+                          command=self._export_new_folder)
+            if self._exp_mode == "import":
+                m.add_command(label="⬆ 여기에 반입…", state=st(not in_root and not self._exp_busy),
+                              command=self._import_add_files)
+            m.add_separator()
+            m.add_command(label="새로고침", accelerator="F5", command=lambda: self._export_nav(self._exp_path))
+            m.add_command(label="↑ 상위 폴더", accelerator="Backspace", state=st(not in_root),
+                          command=self._export_up)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _export_key(self, key: str):
+        sel = [it for it in self._exp_grid.selection() if not it.get("root")]
+        if key == "F5":
+            self._export_nav(self._exp_path)
+        elif key == "BackSpace":
+            self._export_up()
+        elif self._exp_busy or not sel or not self._exp_path:
+            return "break"
+        elif key == "Delete":
+            self._export_delete(sel)
+        elif key == "F2" and len(sel) == 1:
+            self._export_rename(sel[0])
+        return "break"
+
+    def _export_on_drop(self, paths: list, x: int, y: int):
+        """탐색기에서 끌어다 놓기 → 반입 모드로 바꾸고 놓은 항목을 바로 반입 (확인 창 거침)"""
+        if not paths:
+            return
+        if self._exp_busy:
+            messagebox.showinfo("안내", "전송 중입니다. 끝난 뒤 다시 놓아 주세요.", parent=self.root)
+            return
+        if not self._export_target():
+            messagebox.showinfo("안내", "장비를 먼저 선택하세요.", parent=self.root)
+            return
+        i = self._exp_grid.index_at(x, y)
+        hit = self._exp_grid.items[i] if i is not None else None
+        dest = hit["path"] if hit and hit["dir"] else self._exp_path
+        if not dest:
+            messagebox.showinfo("안내", "D 드라이브·바탕화면 안의 폴더로 이동한 뒤 놓거나,\n"
+                                "폴더 위에 놓아 주세요.", parent=self.root)
+            return
+        if self._exp_mode != "import":
+            self._set_transfer_mode("import")
+        self._imp_sources = []
+        self._import_add(paths)
+        self.root.lift()
+        self._import_start(dest)
+
+    def _export_copy_path(self, items: list):
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\r\n".join(it["path"] for it in items))
+
+    def _export_fs_call(self, route: str, params: dict, done, fail_msg: str):
+        """장비에 이름 변경·삭제·폴더 생성 요청 (백그라운드) → done() 을 UI 스레드에서 실행"""
+        target = self._export_target()
+        if not target:
+            return
+        def _do():
+            try:
+                r = self._export_request(route, params, target, method="PUT", data=b"")
+                err = None if r.ok else self._export_error(r)
+            except Exception as e:
+                err = str(e)
+            if err and ("not found" in err or "501" in err):
+                err += " — 장비·중계 PC 를 v2.10 이상으로 업데이트하세요"
+            def _after():
+                if err:
+                    self._export_log(f"{fail_msg}: {err}")
+                    messagebox.showerror("실패", f"{fail_msg}\n\n{err}", parent=self.root)
+                done(err)
+            self.root.after(0, _after)
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _export_rename(self, item: dict):
+        def _commit(it, new):
+            if re.search(r'[\\/:*?"<>|]', new) or new.endswith((".", " ")):
+                messagebox.showwarning("이름 바꾸기", '이름에 \\ / : * ? " < > | 는 쓸 수 없고,\n'
+                                       "마침표나 공백으로 끝날 수 없습니다.", parent=self.root)
+                return
+            def _done(err):
+                if not err:
+                    self._export_log(f"✏ 이름 변경: {it['path']} → {new}")
+                self._export_nav(self._exp_path, select_name=new if not err else it["name"])
+            self._export_fs_call("/fs/rename", {"path": it["path"], "name": new}, _done,
+                                 f"이름 변경 실패 ({it['name']})")
+        self._exp_grid.begin_edit(item, _commit)
+
+    def _export_delete(self, items: list):
+        items = [it for it in items if not it.get("root")]
+        if not items:
+            return
+        name = self._exp_dev_combo.get().replace("  [중계]", "")
+        head = f"'{items[0]['name']}'" if len(items) == 1 else f"{items[0]['name']} 외 {len(items) - 1}개"
+        if not messagebox.askyesno(
+                "삭제",
+                f"{name} 장비에서 {head} 을(를) 삭제할까요?\n\n"
+                "장비의 휴지통으로 이동합니다.\n(휴지통보다 큰 항목은 바로 삭제되어 되돌릴 수 없습니다)",
+                icon="warning", parent=self.root):
+            return
+        left = [len(items)]
+        failed = []
+        def _one(it):
+            def _done(err):
+                if err:
+                    failed.append(it["name"])
+                else:
+                    self._export_log(f"🗑 삭제(휴지통): {it['path']}")
+                left[0] -= 1
+                if left[0] == 0:
+                    self._export_nav(self._exp_path)
+            return _done
+        for it in items:
+            self._export_fs_call("/fs/delete", {"path": it["path"]}, _one(it),
+                                 f"삭제 실패 ({it['name']})")
+
+    def _export_new_folder(self):
+        if not self._exp_path:
+            return
+        names = {it["name"].lower() for it in self._exp_grid.items}
+        name, n = "새 폴더", 2
+        while name.lower() in names:
+            name, n = f"새 폴더 ({n})", n + 1
+        path = os.path.join(self._exp_path, name)
+        def _done(err):
+            if not err:
+                self._export_log(f"📁 새 폴더: {path}")
+                self._export_nav(self._exp_path, select_name=name, then=self._export_rename)
+        self._export_fs_call("/fs/mkdir", {"path": path}, _done, "새 폴더 만들기 실패")
 
     def _export_up(self):
         if not self._exp_path:
@@ -2332,7 +3163,7 @@ class AuroraClientApp:
     # 반출 실행
     def _export_start(self):
         target = self._export_target()
-        sel = [self._exp_items[i] for i in self._exp_tree.selection() if i in self._exp_items]
+        sel = [it for it in self._exp_grid.selection() if not it.get("root")]
         if not target or not sel:
             messagebox.showinfo("안내", "장비와 반출할 파일/폴더를 선택하세요.")
             return
@@ -2529,12 +3360,12 @@ class AuroraClientApp:
                 jobs.append((src, os.path.join(dest, os.path.basename(src)), st.st_size, st.st_mtime))
         return jobs, dirs
 
-    def _import_start(self):
+    def _import_start(self, dest: str | None = None):
         target = self._export_target()
         if not target:
             messagebox.showinfo("안내", "장비를 먼저 선택하세요.")
             return
-        dest = self._exp_path
+        dest = dest or self._exp_path
         if not dest:
             messagebox.showinfo("안내", "반입할 위치로 이동하세요.\n아래 파일 탐색에서 D 드라이브 또는 바탕화면 안의 폴더를 더블클릭하면 그 폴더가 반입 위치가 됩니다.")
             return
