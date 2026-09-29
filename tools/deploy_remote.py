@@ -125,6 +125,13 @@ def deploy_one(ip: str, name: str, is_server: bool, src: str, cfg: dict, args) -
             if c == "client_config.json":
                 # 실행 경로·종료 목록 등 PC 마다 다른 값은 빼고 공통 값만 → 나머지는 클라이언트 기본값 사용
                 data = {k: v for k, v in load_json(c).items() if k not in PC_SPECIFIC_KEYS}
+                # 덮어쓰기(--overwrite-config)여도 그 PC 의 실행 경로·종료 목록 등은 유지
+                try:
+                    with open(dst, encoding="utf-8-sig") as f:
+                        old = json.load(f)
+                    data.update({k: v for k, v in old.items() if k in PC_SPECIFIC_KEYS})
+                except Exception:
+                    pass
                 with open(dst, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
             else:
