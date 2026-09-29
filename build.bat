@@ -37,6 +37,8 @@ del "%ROOT%build_server.done" "%ROOT%build_client.done" 2>nul
 set FAIL=0
 if not "%RC_S: =%"=="0" ( echo [FAIL] AuroraServer - log: & type "%ROOT%build_server.log" & set FAIL=1 )
 if not "%RC_C: =%"=="0" ( echo [FAIL] AuroraClient - log: & type "%ROOT%build_client.log" & set FAIL=1 )
+rem 사용 매뉴얼을 배포 폴더에 함께 넣어 항상 최신으로 유지
+if "%FAIL%"=="0" copy /y "%ROOT%Aurora_사용매뉴얼.md" "%ROOT%dist\" >nul
 if "%FAIL%"=="0" echo Done! Check: %ROOT%dist\
 if /i not "%~1"=="nopause" pause
 exit /b %FAIL%
