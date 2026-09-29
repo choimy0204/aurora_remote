@@ -8,6 +8,9 @@ EXCLUDES = [
     'PIL._avif', 'PIL.AvifImagePlugin', 'PIL._webp', 'PIL.WebPImagePlugin',
     'PIL.ImageQt', 'PIL.ImageMath', 'PIL.ImageCms', 'PIL._imagingcms', 'PIL._imagingmath',
     'gi', 'Xlib', 'pystray._gtk', 'pystray._xorg', 'pystray._appindicator', 'pystray._darwin',
+    # PyInstaller 가 이 목록에 '__main__' 을 직접 추가해 캐시에 저장하므로 미리 넣어둔다
+    # (없으면 매 빌드마다 'excludes changed' 로 캐시가 무효화되어 전체 재분석)
+    '__main__',
 ]
 
 
