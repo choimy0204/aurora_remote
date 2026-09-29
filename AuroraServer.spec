@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['D:\\업무\\02_프로젝트\\Aurora\\aurora_server.py'],
+    ['aurora_server.py'],
     pathex=[],
     binaries=[],
-    datas=[('D:\\업무\\02_프로젝트\\Aurora\\aurora_server.ico', '.')],
+    datas=[('aurora_server.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['D:\\업무\\02_프로젝트\\Aurora\\aurora_server.ico'],
+    icon=['aurora_server.ico'],
 )
