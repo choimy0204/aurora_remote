@@ -6,7 +6,7 @@ Aurora Remote Controller - Client
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 import threading
 import subprocess
 import re
@@ -20,7 +20,10 @@ import shutil
 import sys
 import ctypes
 import winreg
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import ipaddress
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs, urlencode
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date, timedelta
 import pystray
 from PIL import Image as PILImage
@@ -95,6 +98,12 @@ DEFAULT_CONFIG = {
     "kill_processes":    [],
     "auto_delete_rules": [],
     "ping_mode":         "manual",
+    # ── 반출(다른 PC 파일 가져오기) ──
+    "export_key":        "aurora-export",   # 모든 PC 가 같은 값이어야 서로 요청 가능
+    "export_relay":      "192.168.110.152", # 중계 PC (LHS)
+    "export_peer_port":  9001,              # 다른 PC 클라이언트의 수신 포트
+    "export_save_dir":   os.path.join(os.path.expanduser("~"), "Downloads", "AuroraExport"),
+    "export_devices":    {},                # {ip: 표시 이름}
 }
 
 def load_config() -> dict:
@@ -367,6 +376,147 @@ def auto_delete_watchdog(log_fn=None):
 # ─────────────────────────────────────────
 app_instance = None
 
+# ─────────────────────────────────────────
+# 반출: 허용 경로(D 드라이브·바탕화면) 파일 제공 + 중계
+# ─────────────────────────────────────────
+EXPORT_KEY_HEADER = "X-Aurora-Key"
+EXPORT_CHUNK      = 1024 * 1024   # 1MB 단위 스트리밍
+EXPORT_API_VER    = 1
+
+def _desktop_dir() -> str:
+    """현재 사용자 바탕화면 경로 (OneDrive 리디렉션 포함)"""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")
+        val, _ = winreg.QueryValueEx(key, "Desktop")
+        winreg.CloseKey(key)
+        path = os.path.expandvars(val)
+        if os.path.isdir(path):
+            return path
+    except Exception:
+        pass
+    return os.path.join(os.path.expanduser("~"), "Desktop")
+
+def export_roots() -> list[dict]:
+    """반출 허용 루트 — 이 밖의 경로는 모두 거부"""
+    roots = []
+    if os.path.isdir("D:\\"):
+        roots.append({"name": "D 드라이브", "path": "D:\\"})
+    desk = _desktop_dir()
+    if os.path.isdir(desk):
+        roots.append({"name": "바탕화면", "path": desk})
+    return roots
+
+def export_resolve(path: str) -> str | None:
+    """요청 경로를 실제 경로로 정규화 후 허용 루트 안이면 반환, 아니면 None
+    (.. / 심볼릭 링크 / 정션으로 루트 밖을 가리키는 경우도 차단)"""
+    if not path:
+        return None
+    try:
+        real = os.path.normcase(os.path.realpath(path))
+    except Exception:
+        return None
+    for root in export_roots():
+        r = os.path.normcase(os.path.realpath(root["path"]))
+        try:
+            if os.path.commonpath([real, r]) == r:
+                return os.path.realpath(path)
+        except ValueError:   # 드라이브가 다름
+            continue
+    return None
+
+def _export_entry(full: str, name: str) -> dict | None:
+    try:
+        st = os.stat(full)
+    except OSError:
+        return None
+    is_dir = os.path.isdir(full)
+    return {"name": name, "path": full, "dir": is_dir,
+            "size": 0 if is_dir else st.st_size, "mtime": st.st_mtime}
+
+def export_list(path: str) -> list[dict]:
+    items = []
+    with os.scandir(path) as it:
+        for e in it:
+            ent = _export_entry(e.path, e.name)
+            if ent:
+                items.append(ent)
+    items.sort(key=lambda x: (not x["dir"], x["name"].lower()))
+    return items
+
+def export_walk(path: str) -> dict:
+    """폴더 하위 전체 — 파일은 상대경로/크기/수정시각, 빈 폴더도 포함"""
+    files, dirs = [], []
+    for cur, dnames, fnames in os.walk(path):
+        rel_dir = os.path.relpath(cur, path)
+        rel_dir = "" if rel_dir == "." else rel_dir
+        if rel_dir:
+            dirs.append(rel_dir)
+        for fn in fnames:
+            full = os.path.join(cur, fn)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            files.append({"rel": os.path.join(rel_dir, fn) if rel_dir else fn,
+                          "size": st.st_size, "mtime": st.st_mtime})
+    return {"files": files, "dirs": dirs}
+
+def _export_peer(ip: str) -> str | None:
+    """중계 대상은 사설망 IPv4 만 허용"""
+    try:
+        addr = ipaddress.ip_address(ip.strip())
+    except ValueError:
+        return None
+    if addr.version != 4 or not addr.is_private:
+        return None
+    return f"{addr}:{config.get('export_peer_port', 9001)}"
+
+_discover_cache = {"time": 0.0, "result": []}
+_discover_lock  = threading.Lock()
+
+def export_discover(force: bool = False) -> list[dict]:
+    """자기 NIC 대역(/24)을 스캔해 반출 API 가 켜진 클라이언트 목록 반환 (60초 캐시)"""
+    with _discover_lock:
+        if not force and time.time() - _discover_cache["time"] < 60:
+            return _discover_cache["result"]
+
+        my_ips, hosts = set(), set()
+        for iface in psutil.net_if_addrs().values():
+            for snic in iface:
+                if snic.family != socket.AF_INET or snic.address.startswith(("127.", "169.254.")):
+                    continue
+                my_ips.add(snic.address)
+                try:
+                    net = ipaddress.ip_network(f"{snic.address}/24", strict=False)
+                except ValueError:
+                    continue
+                hosts.update(str(h) for h in net.hosts())
+        hosts -= my_ips
+        port = config.get("export_peer_port", 9001)
+        key  = config.get("export_key", "")
+
+        found, found_lock = [], threading.Lock()
+        def _probe(ip):
+            try:
+                with socket.create_connection((ip, port), timeout=0.4):
+                    pass
+                r = requests.get(f"http://{ip}:{port}/info",
+                                 headers={EXPORT_KEY_HEADER: key}, timeout=2)
+                if r.ok:
+                    info = r.json()
+                    with found_lock:
+                        found.append({"ip": ip, "hostname": info.get("hostname", "")})
+            except Exception:
+                pass
+        with ThreadPoolExecutor(max_workers=128) as ex:
+            list(ex.map(_probe, sorted(hosts)))
+
+        found.sort(key=lambda d: [int(x) for x in d["ip"].split(".")])
+        _discover_cache.update(time=time.time(), result=found)
+        return found
+
+
 class CommandHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
 
@@ -374,6 +524,104 @@ class CommandHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
+
+    def _send_json(self, obj, code=200):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ── 반출 API (GET) ───────────────────
+    def do_GET(self):
+        import hmac
+        key = config.get("export_key", "")
+        if not key or not hmac.compare_digest(self.headers.get(EXPORT_KEY_HEADER, ""), key):
+            return self._send_json({"error": "인증 실패 (반출 키 불일치)"}, 403)
+
+        parsed = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        try:
+            if q.get("via"):
+                return self._relay(parsed, q)
+            route = parsed.path
+            if route == "/info":
+                return self._send_json({"hostname": socket.gethostname(),
+                                        "api": EXPORT_API_VER})
+            if route == "/discover":
+                return self._send_json(export_discover(force=q.get("refresh") == "1"))
+            if route == "/fs/roots":
+                return self._send_json(export_roots())
+
+            path = export_resolve(q.get("path", ""))
+            if path is None:
+                return self._send_json({"error": "허용되지 않은 경로 (D 드라이브·바탕화면만 가능)"}, 403)
+            if route == "/fs/list":
+                return self._send_json(export_list(path))
+            if route == "/fs/walk":
+                return self._send_json(export_walk(path))
+            if route == "/fs/file":
+                return self._send_file(path)
+            self._send_json({"error": "not found"}, 404)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except Exception as e:
+            try:
+                self._send_json({"error": str(e)}, 500)
+            except Exception:
+                pass
+
+    def _send_file(self, path: str):
+        if not os.path.isfile(path):
+            return self._send_json({"error": "파일이 아닙니다"}, 400)
+        size  = os.path.getsize(path)
+        start = 0
+        rng   = self.headers.get("Range", "")
+        m = re.match(r"bytes=(\d+)-$", rng)
+        if m and int(m.group(1)) < size:
+            start = int(m.group(1))
+        with open(path, "rb") as f:
+            f.seek(start)
+            self.send_response(206 if start else 200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(size - start))
+            if start:
+                self.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+            self.end_headers()
+            if app_instance and not start:
+                app_instance.add_log(f"📤 반출: {path} → {self.client_address[0]}")
+            while True:
+                chunk = f.read(EXPORT_CHUNK)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+
+    def _relay(self, parsed, q: dict):
+        """via=IP1,IP2… 의 첫 IP 로 요청을 그대로 넘기고 응답을 스트리밍 (디스크 저장 없음)"""
+        hops = [h for h in q.pop("via").split(",") if h.strip()]
+        peer = _export_peer(hops[0])
+        if peer is None:
+            return self._send_json({"error": f"중계 대상 IP 오류: {hops[0]}"}, 400)
+        if hops[1:]:
+            q["via"] = ",".join(hops[1:])
+        url = f"http://{peer}{parsed.path}?{urlencode(q)}"
+        headers = {EXPORT_KEY_HEADER: self.headers.get(EXPORT_KEY_HEADER, "")}
+        if self.headers.get("Range"):
+            headers["Range"] = self.headers["Range"]
+        try:
+            r = requests.get(url, headers=headers, stream=True, timeout=(3, 120))
+        except Exception as e:
+            return self._send_json({"error": f"{hops[0]} 연결 실패: {e}"}, 502)
+        with r:
+            self.send_response(r.status_code)
+            for h in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
+                if h in r.headers:
+                    self.send_header(h, r.headers[h])
+            self.end_headers()
+            for chunk in r.raw.stream(EXPORT_CHUNK, decode_content=False):
+                self.wfile.write(chunk)
 
     def do_POST(self):
         if self.path == "/command":
@@ -471,7 +719,9 @@ def setup_self_autostart():
 
 def run_command_server():
     port = config.get("listen_port", 9001)
-    server = HTTPServer(("0.0.0.0", port), CommandHandler)
+    # 파일 전송 중에도 명령·상태 요청을 받을 수 있도록 요청마다 스레드로 처리
+    server = ThreadingHTTPServer(("0.0.0.0", port), CommandHandler)
+    server.daemon_threads = True
     server.serve_forever()
 
 # ─────────────────────────────────────────
@@ -543,6 +793,16 @@ class AuroraClientApp:
                         troughcolor=cls.BORDER, background=cls.BRAND,
                         bordercolor=cls.BORDER, lightcolor=cls.BRAND, darkcolor=cls.BRAND,
                         borderwidth=0, thickness=_px(8))
+        style.configure("Export.Treeview", font=cls.FONT_INPUT, rowheight=_px(24),
+                        background=cls.PANEL, fieldbackground=cls.PANEL,
+                        foreground=cls.TEXT, bordercolor=cls.BORDER, borderwidth=0)
+        style.map("Export.Treeview", background=[("selected", cls.SELECT_BG)],
+                  foreground=[("selected", cls.TEXT)])
+        style.configure("Export.Treeview.Heading", font=cls.FONT_SMALL,
+                        background=cls.PANEL_ALT, foreground=cls.TEXT_DIM,
+                        relief="flat", borderwidth=0, padding=(_px(6), _px(6)))
+        style.map("Export.Treeview.Heading", background=[("active", cls.PANEL_ALT)])
+        style.configure("Export.TCombobox", padding=_px(4))
 
     def __init__(self, root: tk.Tk):
         global app_instance
@@ -686,7 +946,7 @@ class AuroraClientApp:
         self._tab_frames = []
         self._tab_labels = []
         self._tab_lines  = []
-        for i, title in enumerate(["설정", "프로세스 관리", "자동 삭제"]):
+        for i, title in enumerate(["설정", "프로세스 관리", "자동 삭제", "반출"]):
             cell = tk.Frame(tabbar, bg=self.PANEL)
             cell.pack(side="left", padx=(_px(8) if i == 0 else 0, 0))
             lbl = tk.Label(cell, text=title, font=self.FONT_TAB, fg=self.TEXT_DIM,
@@ -702,6 +962,7 @@ class AuroraClientApp:
         self._build_main_tab(self._tab_frames[0])
         self._build_process_tab(self._tab_frames[1])
         self._build_delete_tab(self._tab_frames[2])
+        self._build_export_tab(self._tab_frames[3])
         self._select_tab(0)
 
     def _select_tab(self, index: int):
@@ -1332,6 +1593,428 @@ class AuroraClientApp:
         threading.Thread(target=run, daemon=True).start()
 
     # ── 버튼 헬퍼 ────────────────────────
+    # ── 반출 탭 ──────────────────────────
+    def _build_export_tab(self, parent):
+        self._exp_connected = False
+        self._exp_devices   = []      # [{ip, label}] — 콤보박스 순서와 동일
+        self._exp_items     = {}      # {treeview iid: entry}
+        self._exp_path      = ""      # "" = 루트(허용 경로 목록)
+        self._exp_roots     = []
+        self._exp_cancel    = threading.Event()
+        self._exp_busy      = False
+
+        # 로그 (하단 고정 — 먼저 pack)
+        self.export_log_text = self._log_panel(parent, "반출 LOG", height=140)
+
+        # ── 저장/실행 카드 (하단) ──
+        act = self._card(parent)
+        act.pack(side="bottom", fill="x", pady=(_px(14), 0))
+        row = tk.Frame(act, bg=self.PANEL)
+        row.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)))
+        self._field_label(row, "저장 폴더", width=8).pack(side="left", padx=(0, _px(8)))
+        self._exp_save_var = tk.StringVar(value=config.get("export_save_dir"))
+        self._button(row, "열기", "secondary", self._export_open_save_dir).pack(side="right")
+        self._button(row, "찾아보기", "secondary",
+                     self._export_browse_save_dir).pack(side="right", padx=(0, _px(8)))
+        self._entry(row, self._exp_save_var, 30).pack(
+            side="left", fill="x", expand=True, ipady=_px(1), padx=(0, _px(8)))
+
+        row2 = tk.Frame(act, bg=self.PANEL)
+        row2.pack(fill="x", padx=_px(20), pady=(0, _px(16)))
+        self._exp_go_btn = self._button(row2, "⬇ 반출", "primary", self._export_start)
+        self._exp_go_btn.pack(side="right")
+        self._exp_cancel_btn = self._button(row2, "취소", "danger", self._export_cancel)
+        self._exp_cancel_btn.pack(side="right", padx=(0, _px(8)))
+        self._exp_cancel_btn.config(state="disabled")
+        self._exp_progress = ttk.Progressbar(row2, orient="horizontal", maximum=1, value=0,
+                                             style="Countdown.Horizontal.TProgressbar")
+        self._exp_progress.pack(side="top", fill="x", padx=(0, _px(12)), pady=(_px(4), _px(4)))
+        self._exp_prog_lbl = tk.Label(row2, text="대기", anchor="w",
+                                      font=self.FONT_MONO_SMALL, fg=self.TEXT_DIM, bg=self.PANEL)
+        self._exp_prog_lbl.pack(side="top", fill="x")
+
+        # ── 연결 카드 (상단) ──
+        conn = self._card(parent)
+        conn.pack(fill="x", pady=(0, _px(14)))
+        r1 = tk.Frame(conn, bg=self.PANEL)
+        r1.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)))
+        self._field_label(r1, "중계 PC", width=8).pack(side="left", padx=(0, _px(8)))
+        self._exp_relay_var = tk.StringVar(value=config.get("export_relay"))
+        self._entry(r1, self._exp_relay_var, 18).pack(side="left", ipady=_px(1), padx=(0, _px(8)))
+        self._button(r1, "적용", "primary", self._export_apply_relay).pack(side="left")
+        self._exp_conn_lbl = self._make_badge(r1, "○ 확인 중", self.TEXT_DIM)
+        self._exp_conn_lbl.pack(side="right")
+
+        r2 = tk.Frame(conn, bg=self.PANEL)
+        r2.pack(fill="x", padx=_px(20), pady=(0, _px(16)))
+        self._field_label(r2, "장비", width=8).pack(side="left", padx=(0, _px(8)))
+        self._exp_dev_var = tk.StringVar()
+        self._exp_dev_combo = ttk.Combobox(r2, textvariable=self._exp_dev_var, state="readonly",
+                                           font=self.FONT_INPUT, style="Export.TCombobox")
+        self._exp_dev_combo.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
+        self._exp_dev_combo.bind("<<ComboboxSelected>>", lambda e: self._export_nav(""))
+        self._button(r2, "이름", "secondary", self._export_rename_device).pack(side="right")
+        self._exp_scan_btn = self._button(r2, "장비 검색", "secondary",
+                                          lambda: self._export_discover(force=True))
+        self._exp_scan_btn.pack(side="right", padx=(0, _px(8)))
+
+        # ── 파일 탐색 카드 ──
+        browse = self._card(parent)
+        browse.pack(fill="both", expand=True)
+        nav = tk.Frame(browse, bg=self.PANEL)
+        nav.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)))
+        self._button(nav, "↑ 상위", "secondary", self._export_up, small=True).pack(side="left", padx=(0, _px(8)))
+        self._button(nav, "새로고침", "secondary",
+                     lambda: self._export_nav(self._exp_path), small=True).pack(side="right")
+        self._exp_path_lbl = tk.Label(nav, text="장비를 선택하세요", anchor="w",
+                                      font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.PANEL)
+        self._exp_path_lbl.pack(side="left", fill="x", expand=True)
+
+        tree_wrap = tk.Frame(browse, bg=self.PANEL)
+        tree_wrap.pack(fill="both", expand=True, padx=_px(20), pady=(0, _px(16)))
+        self._exp_tree = ttk.Treeview(tree_wrap, columns=("size", "mtime"),
+                                      style="Export.Treeview", selectmode="extended")
+        self._exp_tree.heading("#0", text="이름", anchor="w")
+        self._exp_tree.heading("size", text="크기", anchor="e")
+        self._exp_tree.heading("mtime", text="수정일", anchor="w")
+        self._exp_tree.column("#0", width=_px(300), anchor="w")
+        self._exp_tree.column("size", width=_px(80), anchor="e", stretch=False)
+        self._exp_tree.column("mtime", width=_px(130), anchor="w", stretch=False)
+        sb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self._exp_tree.yview)
+        self._exp_tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self._exp_tree.pack(fill="both", expand=True)
+        self._exp_tree.bind("<Double-1>", self._export_on_double)
+
+        self._export_set_connected(False)
+
+    # 로그 / 상태 표시
+    def _export_log(self, msg: str):
+        def _do():
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.export_log_text.config(state="normal")
+            self.export_log_text.insert("end", f"[{ts}] {msg}\n")
+            self.export_log_text.see("end")
+            self.export_log_text.config(state="disabled")
+        self.root.after(0, _do)
+
+    def _export_set_connected(self, ok: bool, hostname: str = ""):
+        self._exp_connected = ok
+        if ok:
+            self._set_badge(self._exp_conn_lbl, f"● 연결됨  {hostname}", self.GREEN)
+        else:   # hostname 자리에 실패 사유(예: 키 불일치)가 올 수 있음
+            self._set_badge(self._exp_conn_lbl, f"○ {hostname or '연결 안됨'}", self.RED)
+        state = "normal" if ok else "disabled"
+        self._exp_scan_btn.config(state=state)
+        self._exp_go_btn.config(state=state if not self._exp_busy else "disabled")
+        self._exp_dev_combo.config(state="readonly" if ok else "disabled")
+
+    # 중계 PC 요청
+    def _export_request(self, route: str, params: dict = None, target: str = None,
+                        timeout=(3, 30), **kw):
+        """중계 PC 경유 GET. target 이 중계 PC 자신이면 via 없이 직접 처리"""
+        relay  = config.get("export_relay", "").strip()
+        port   = config.get("export_peer_port", 9001)
+        params = dict(params or {})
+        if target and target != relay:
+            params["via"] = target
+        headers = {EXPORT_KEY_HEADER: config.get("export_key", "")}
+        headers.update(kw.pop("headers", {}))
+        return requests.get(f"http://{relay}:{port}{route}", params=params,
+                            headers=headers, timeout=timeout, **kw)
+
+    @staticmethod
+    def _export_error(r) -> str:
+        try:
+            return r.json().get("error", f"HTTP {r.status_code}")
+        except Exception:
+            return f"HTTP {r.status_code}"
+
+    def _export_monitor_loop(self):
+        """중계 PC 연결 감시 — 연결되는 순간 장비 자동 검색"""
+        while self.running:
+            ok, host = False, ""
+            if config.get("export_relay", "").strip():
+                try:
+                    r = self._export_request("/info", timeout=(2, 3))
+                    if r.ok:
+                        ok, host = True, r.json().get("hostname", "")
+                    elif r.status_code == 403:
+                        host = "키 불일치"
+                except Exception:
+                    pass
+            was = self._exp_connected
+            self.root.after(0, lambda o=ok, h=host: self._export_set_connected(o, h))
+            if ok and not was:
+                self._export_log(f"중계 PC 연결됨 ({host})")
+                self._export_discover(force=False, relay_host=host)
+            elif was and not ok:
+                self._export_log("중계 PC 연결 끊김")
+            time.sleep(5)
+
+    def _export_apply_relay(self):
+        config["export_relay"] = self._exp_relay_var.get().strip()
+        save_config(config)
+        self._exp_connected = False
+        self._export_log(f"중계 PC 변경: {config['export_relay']}")
+
+    def _export_device_label(self, ip: str, hostname: str) -> str:
+        name = config.get("export_devices", {}).get(ip) or hostname or ip
+        return f"{name}  ({ip})"
+
+    def _export_discover(self, force: bool, relay_host: str = ""):
+        def _do():
+            self._export_log("장비 검색 중…")
+            try:
+                r = self._export_request("/discover", {"refresh": "1" if force else "0"},
+                                         timeout=(3, 90))
+                if not r.ok:
+                    self._export_log(f"장비 검색 실패: {self._export_error(r)}")
+                    return
+                found = r.json()
+            except Exception as e:
+                self._export_log(f"장비 검색 실패: {e}")
+                return
+            relay = config.get("export_relay", "").strip()
+            devices = [{"ip": relay, "host": relay_host, "relay": True}]
+            devices += [{"ip": d["ip"], "host": d["hostname"], "relay": False}
+                        for d in found if d["ip"] != relay]
+            self._export_log(f"장비 {len(devices)}대 발견")
+            self.root.after(0, lambda: self._export_set_devices(devices))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _export_set_devices(self, devices: list):
+        cur_ip = self._export_target()
+        self._exp_devices = devices
+        for d in devices:
+            d["label"] = self._export_device_label(d["ip"], d["host"]) + ("  [중계]" if d["relay"] else "")
+        self._exp_dev_combo.config(values=[d["label"] for d in devices])
+        for i, d in enumerate(devices):
+            if d["ip"] == cur_ip:
+                self._exp_dev_combo.current(i)
+                return
+
+    def _export_target(self) -> str | None:
+        idx = self._exp_dev_combo.current()
+        if 0 <= idx < len(self._exp_devices):
+            return self._exp_devices[idx]["ip"]
+        return None
+
+    def _export_rename_device(self):
+        ip = self._export_target()
+        if not ip:
+            messagebox.showinfo("안내", "장비를 먼저 선택하세요.")
+            return
+        names = config.setdefault("export_devices", {})
+        name = simpledialog.askstring("장비 이름", f"{ip} 의 표시 이름 (비우면 호스트명)",
+                                      initialvalue=names.get(ip, ""), parent=self.root)
+        if name is None:
+            return
+        if name.strip():
+            names[ip] = name.strip()
+        else:
+            names.pop(ip, None)
+        save_config(config)
+        self._export_set_devices(self._exp_devices)
+
+    # 탐색
+    @staticmethod
+    def _fmt_size(n: int) -> str:
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024 or unit == "GB":
+                return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+            n /= 1024
+
+    def _export_nav(self, path: str):
+        target = self._export_target()
+        if not target:
+            return
+        def _do():
+            try:
+                if path:
+                    r = self._export_request("/fs/list", {"path": path}, target)
+                else:
+                    r = self._export_request("/fs/roots", target=target)
+                if not r.ok:
+                    self._export_log(f"목록 조회 실패: {self._export_error(r)}")
+                    return
+                items = r.json()
+            except Exception as e:
+                self._export_log(f"목록 조회 실패: {e}")
+                return
+            if not path:
+                for it in items:
+                    it.update(dir=True, size=0, mtime=None)
+            self.root.after(0, lambda: self._export_fill(path, items))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _export_fill(self, path: str, items: list):
+        self._exp_path = path
+        if not path:
+            self._exp_roots = [it["path"] for it in items]
+        self._exp_path_lbl.config(text=path or "허용 경로 (D 드라이브 · 바탕화면)",
+                                  fg=self.TEXT if path else self.TEXT_DIM)
+        self._exp_tree.delete(*self._exp_tree.get_children())
+        self._exp_items = {}
+        for it in items:
+            mtime = datetime.fromtimestamp(it["mtime"]).strftime("%Y-%m-%d %H:%M") if it.get("mtime") else ""
+            iid = self._exp_tree.insert("", "end",
+                text=("📁 " if it["dir"] else "📄 ") + it["name"],
+                values=("" if it["dir"] else self._fmt_size(it["size"]), mtime))
+            self._exp_items[iid] = it
+
+    def _export_on_double(self, event):
+        iid = self._exp_tree.identify_row(event.y)
+        it = self._exp_items.get(iid)
+        if it and it["dir"]:
+            self._export_nav(it["path"])
+
+    def _export_up(self):
+        if not self._exp_path:
+            return
+        norm = os.path.normcase(os.path.normpath(self._exp_path))
+        if any(norm == os.path.normcase(os.path.normpath(r)) for r in self._exp_roots):
+            self._export_nav("")
+        else:
+            self._export_nav(os.path.dirname(self._exp_path.rstrip("\\")) or "")
+
+    # 저장 폴더
+    def _export_browse_save_dir(self):
+        path = filedialog.askdirectory(title="저장 폴더 선택")
+        if path:
+            self._exp_save_var.set(os.path.normpath(path))
+
+    def _export_open_save_dir(self):
+        path = self._exp_save_var.get().strip()
+        os.makedirs(path, exist_ok=True)
+        os.startfile(path)
+
+    # 반출 실행
+    def _export_start(self):
+        target = self._export_target()
+        sel = [self._exp_items[i] for i in self._exp_tree.selection() if i in self._exp_items]
+        if not target or not sel:
+            messagebox.showinfo("안내", "장비와 반출할 파일/폴더를 선택하세요.")
+            return
+        save_dir = self._exp_save_var.get().strip()
+        if not save_dir:
+            messagebox.showinfo("안내", "저장 폴더를 입력하세요.")
+            return
+        config["export_save_dir"] = save_dir
+        save_config(config)
+
+        label = self._exp_dev_combo.get().replace("  [중계]", "")
+        dest_root = os.path.join(save_dir, re.sub(r'[\\/:*?"<>|]+', "_", label).strip())
+        self._exp_cancel.clear()
+        self._exp_busy = True
+        self._exp_go_btn.config(state="disabled")
+        self._exp_cancel_btn.config(state="normal")
+        threading.Thread(target=self._export_worker, args=(target, sel, dest_root),
+                         daemon=True).start()
+
+    def _export_cancel(self):
+        self._exp_cancel.set()
+        self._export_log("취소 요청됨")
+
+    def _export_worker(self, target: str, sel: list, dest_root: str):
+        # 1) 작업 목록 만들기 — 폴더는 하위 전체 조회
+        jobs = []   # (원격 경로, 로컬 경로, 크기, 수정시각)
+        try:
+            for it in sel:
+                if it["dir"]:
+                    r = self._export_request("/fs/walk", {"path": it["path"]}, target,
+                                             timeout=(3, 120))
+                    if not r.ok:
+                        raise RuntimeError(f"{it['name']}: {self._export_error(r)}")
+                    tree = r.json()
+                    base = os.path.join(dest_root, it["name"].rstrip(":\\") or "root")
+                    os.makedirs(base, exist_ok=True)
+                    for d in tree["dirs"]:
+                        os.makedirs(os.path.join(base, d), exist_ok=True)
+                    for f in tree["files"]:
+                        jobs.append((os.path.join(it["path"], f["rel"]),
+                                     os.path.join(base, f["rel"]), f["size"], f["mtime"]))
+                else:
+                    jobs.append((it["path"], os.path.join(dest_root, it["name"]),
+                                 it["size"], it["mtime"]))
+        except Exception as e:
+            self._export_log(f"❌ 목록 준비 실패: {e}")
+            return self.root.after(0, self._export_done)
+
+        total = sum(j[2] for j in jobs) or 1
+        prog  = {"done": 0, "files": 0, "fail": 0}
+        lock  = threading.Lock()
+        t0    = time.time()
+        self._export_log(f"반출 시작: {len(jobs)}개 파일, {self._fmt_size(total)} → {dest_root}")
+
+        def _ui():
+            with lock:
+                done, nf, nfail = prog["done"], prog["files"], prog["fail"]
+            speed = done / max(time.time() - t0, 0.1)
+            self._exp_progress.config(maximum=total, value=done)
+            self._exp_prog_lbl.config(
+                text=f"{nf}/{len(jobs)}개  ·  {self._fmt_size(done)} / {self._fmt_size(total)}"
+                     f"  ·  {self._fmt_size(speed)}/s" + (f"  ·  실패 {nfail}" if nfail else ""))
+
+        def _one(job):
+            remote, local, size, mtime = job
+            if self._exp_cancel.is_set():
+                return
+            part = local + ".part"
+            try:
+                os.makedirs(os.path.dirname(local), exist_ok=True)
+                start = os.path.getsize(part) if os.path.exists(part) else 0
+                hdr = {"Range": f"bytes={start}-"} if 0 < start < size else {}
+                with self._export_request("/fs/file", {"path": remote}, target,
+                                          timeout=(3, 120), stream=True, headers=hdr) as r:
+                    if r.status_code not in (200, 206):
+                        raise RuntimeError(self._export_error(r))
+                    if r.status_code == 200:
+                        start = 0   # 서버가 이어받기를 안 한 경우 처음부터
+                    with lock:
+                        prog["done"] += start
+                    with open(part, "ab" if start else "wb") as f:
+                        for chunk in r.iter_content(EXPORT_CHUNK):
+                            if self._exp_cancel.is_set():
+                                return
+                            f.write(chunk)
+                            with lock:
+                                prog["done"] += len(chunk)
+                os.replace(part, local)
+                if mtime:
+                    os.utime(local, (mtime, mtime))
+                with lock:
+                    prog["files"] += 1
+            except Exception as e:
+                with lock:
+                    prog["fail"] += 1
+                self._export_log(f"❌ {remote}: {e}")
+
+        # 2) 병렬 다운로드 + 진행률 갱신
+        stop_ui = threading.Event()
+        def _ui_loop():
+            while not stop_ui.is_set():
+                self.root.after(0, _ui)
+                time.sleep(0.3)
+        threading.Thread(target=_ui_loop, daemon=True).start()
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(_one, jobs))
+        stop_ui.set()
+        self.root.after(0, _ui)
+
+        elapsed = time.time() - t0
+        if self._exp_cancel.is_set():
+            self._export_log("⏹ 반출 취소됨 (받던 파일은 .part 로 남아 다음에 이어받기)")
+        else:
+            self._export_log(f"✅ 반출 완료: {prog['files']}/{len(jobs)}개, "
+                             f"{elapsed:.1f}초" + (f", 실패 {prog['fail']}" if prog["fail"] else ""))
+        self.root.after(0, self._export_done)
+
+    def _export_done(self):
+        self._exp_busy = False
+        self._exp_cancel_btn.config(state="disabled")
+        self._exp_go_btn.config(state="normal" if self._exp_connected else "disabled")
+
     def _button(self, parent, text, kind, cmd, small=False):
         """kind: primary / start / stop / secondary / danger
         base_bg / hover_bg 속성으로 hover 색을 관리 (상태 변경 시 함께 갱신)"""
@@ -1581,6 +2264,7 @@ class AuroraClientApp:
         threading.Thread(target=self._status_report_loop, daemon=True).start()
         threading.Thread(target=auto_delete_watchdog,
                          args=(self._delete_log,),        daemon=True).start()
+        threading.Thread(target=self._export_monitor_loop, daemon=True).start()
         setup_self_autostart()
 
         if config.get("ping_mode", "manual") == "auto":
