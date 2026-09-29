@@ -219,10 +219,13 @@ def run_auto_delete(log_fn=None):
             save_config(config)
             # UI 라벨 갱신 (메인 스레드로)
             if app_instance:
-                def _upd(idx=i, t=ts):
+                def _upd(idx=i, t=ts, p=rule.get("path", "").strip()):
                     wlist = app_instance._delete_rule_widgets
                     if idx < len(wlist):
                         wlist[idx]["last_del_lbl"].config(text=f"마지막 삭제: {t}")
+                        # 행 값도 갱신해 이후 UI 저장이 덮어쓰지 않도록 함 (config 는 위에서 이미 저장됨)
+                        wlist[idx]["last_deleted"]      = t
+                        wlist[idx]["last_deleted_path"] = p
                 app_instance.root.after(0, _upd)
 
 def _parse_folder_date(name: str):
@@ -674,13 +677,12 @@ class AuroraClientApp:
         self._field_label(hdr_row, "핑 모드").pack(side="left")
         self._ping_mode_client = config.get("ping_mode", "manual")
         self.ping_manual_btn_c = self._small_btn(
-            hdr_row, "Manual", self.BLUE if self._ping_mode_client == "manual" else self.TEXT_DIM,
-            lambda: None)
+            hdr_row, "Manual", self.TEXT_DIM, lambda: None)
         self.ping_manual_btn_c.pack(side="left", padx=(0, 4))
         self.ping_auto_btn_c = self._small_btn(
-            hdr_row, "Auto", self.BLUE if self._ping_mode_client == "auto" else self.TEXT_DIM,
-            lambda: None)
+            hdr_row, "Auto", self.TEXT_DIM, lambda: None)
         self.ping_auto_btn_c.pack(side="left")
+        self._apply_ping_mode_style()
 
         self._ping_result_labels = {}
         for ip in config.get("server_ips", []):
@@ -1056,6 +1058,8 @@ class AuroraClientApp:
             "minutes": min_var, "enabled": ena_var,
             "folder_del": folder_del_var, "ext_entry": ext_entry,
             "applied": applied_init,
+            "last_deleted": rule.get("last_deleted", ""),
+            "last_deleted_path": rule.get("path", "").strip(),
             "status_lbl": status_lbl,
             "last_del_lbl": None,
         }
@@ -1153,19 +1157,18 @@ class AuroraClientApp:
                 minutes = int(w["minutes"].get())
             except ValueError:
                 minutes = 0
-            # 마지막 삭제 일자는 config 원본에서 보존
-            existing = next(
-                (r for r in config.get("auto_delete_rules", [])
-                 if r.get("path") == w["path"].get().strip()),
-                {}
-            )
+            # 마지막 삭제 일자는 행 자신의 값을 보존 (경로가 바뀌면 초기화)
+            path = w["path"].get().strip()
+            last_deleted = w["last_deleted"] if path == w["last_deleted_path"] else ""
+            w["last_deleted"]      = last_deleted
+            w["last_deleted_path"] = path
             rules.append({
-                "path":         w["path"].get().strip(),
+                "path":         path,
                 "ext":          w["ext"].get().strip().lstrip("."),
                 "minutes":      minutes,
                 "enabled":      w["enabled"].get(),
                 "applied":      w["applied"],
-                "last_deleted": existing.get("last_deleted", ""),
+                "last_deleted": last_deleted,
                 "type":         "folder" if w.get("folder_del") and w["folder_del"].get() else "file",
             })
         config["auto_delete_rules"] = rules
@@ -1393,12 +1396,18 @@ class AuroraClientApp:
                 fg = self.GREEN if ms < 10 else self.YELLOW if ms < 50 else self.RED
                 lbl.config(text=f"{ms}ms", fg=fg)
 
+    def _apply_ping_mode_style(self):
+        """현재 핑 모드 기준으로 Manual/Auto 버튼 글자색 표시 (초기화·변경 공용)"""
+        is_auto = self._ping_mode_client == "auto"
+        manual_fg = self.TEXT_DIM if is_auto else self.BLUE
+        auto_fg   = self.BLUE if is_auto else self.TEXT_DIM
+        self.ping_manual_btn_c.config(fg=manual_fg, activeforeground=manual_fg)
+        self.ping_auto_btn_c.config(fg=auto_fg, activeforeground=auto_fg)
+
     def _on_ping_mode_changed(self, mode: str):
         self._ping_mode_client = mode
-        is_auto = mode == "auto"
-        self.ping_auto_btn_c.config(bg=self.BLUE if is_auto else self.TEXT_DIM)
-        self.ping_manual_btn_c.config(bg=self.BLUE if not is_auto else self.TEXT_DIM)
-        if is_auto:
+        self._apply_ping_mode_style()
+        if mode == "auto":
             self._start_auto_ping_client()
 
     def _start_auto_ping_client(self):
