@@ -28,6 +28,9 @@ from datetime import datetime, date, timedelta
 import pystray
 from PIL import Image as PILImage
 from PIL import ImageTk
+import aurora_update
+
+APP_VERSION = "2.8.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -104,6 +107,8 @@ DEFAULT_CONFIG = {
     "export_peer_port":  9001,              # 다른 PC 클라이언트의 수신 포트
     "export_save_dir":   os.path.join(os.path.expanduser("~"), "Downloads", "AuroraExport"),
     "export_devices":    {},                # {ip: 표시 이름}
+    # 사용자가 직접 자동 시작을 끈 경우에만 True — 기본은 자동 시작 ON
+    "autostart_off":     False,
 }
 
 def load_config() -> dict:
@@ -703,9 +708,12 @@ def handle_command(cmd: str):
 # 부팅 시 자동 실행 (클라이언트 자신)
 # ─────────────────────────────────────────
 def setup_self_autostart():
-    """AuroraClient.exe 자체를 레지스트리 자동 실행에 등록"""
+    """AuroraClient.exe 자체를 레지스트리 자동 실행에 등록 (기본 ON)
+    사용자가 '자동 시작' 을 직접 OFF 로 바꾼 경우(autostart_off)에만 등록하지 않는다"""
     if not getattr(sys, "frozen", False):
         return   # 개발 환경(py 직접 실행)에선 등록 안 함
+    if config.get("autostart_off"):
+        return
     try:
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
@@ -798,7 +806,8 @@ class AuroraClientApp:
         "핑 모드": "등록된 서버 IP별 핑 응답 시간을 보여 줍니다. Manual/Auto 모드는 서버가 변경하며 이 화면에서는 바꿀 수 없습니다. Auto 는 5초마다 측정하고, Manual 은 서버가 ping 명령을 보낼 때만 측정합니다.",
         "서버 포트": "서버로 상태를 보고할 때 쓰는 서버 쪽 포트입니다(기본 9000). 1024~65535 범위이며 '적용' 후 프로그램을 다시 시작해야 반영됩니다.",
         "수신 포트": "서버 명령(start/stop/setpath/ping/setpingmode)과 반출 요청을 받는 이 PC의 포트입니다(기본 9001). 1024~65535 범위이며 '적용' 후 프로그램을 다시 시작해야 반영됩니다.",
-        "자동 시작": "PC에 로그인할 때 이 클라이언트를 자동 실행하도록 현재 사용자(HKCU)의 Run 레지스트리에 등록하거나 해제합니다. 패키징된 exe 는 시작할 때마다 스스로 다시 등록하므로, OFF 로 해도 다음 실행 때 등록될 수 있습니다.",
+        "자동 시작": "PC에 로그인할 때 이 클라이언트를 자동 실행하도록 현재 사용자(HKCU)의 Run 레지스트리에 등록하거나 해제합니다. 기본값은 ON 이며, 직접 OFF 로 바꾼 경우에만 꺼진 상태가 유지됩니다.",
+        "버전": "현재 실행 중인 클라이언트 버전입니다. D:\\RemoteConfig\\Update 폴더에 새 버전(AuroraClient.exe + version.json)을 넣어두면 켜질 때 자동으로 업데이트 후 재시작합니다. '최신 버전 확인' 을 누르면 바로 확인해 새 버전이면 업데이트 후 재시작합니다.",
         "수동 제어": "서버 명령과 별개로 이 PC에서 Aurora 를 직접 실행·종료하는 긴급용 영역입니다. 실행은 이미 켜져 있으면 하지 않고, 종료는 실행 경로의 exe 와 이름이 같은 프로세스를 모두 강제 종료합니다.",
         "LOG": "명령 수신, 서버 추가·삭제, 포트·경로 변경 등 클라이언트 동작 기록입니다. 최근 40줄만 표시합니다.",
         "실행 프로그램": "서버 명령이나 수동 제어로 실행·종료할 Aurora 프로그램을 지정하는 영역입니다.",
@@ -809,6 +818,7 @@ class AuroraClientApp:
         "반출 LOG": "중계 PC 연결 상태, 장비 검색, 파일 반출 진행·완료·실패·취소 내역을 기록합니다.",
         "저장 폴더": "반출한 파일을 받을 내 PC의 폴더입니다. 실제로는 '저장 폴더\\장비이름 (IP)\\' 아래에 저장됩니다. 파일은 4개까지 동시에 받고, 취소하면 받던 파일이 .part 로 남아 다음에 이어받습니다.",
         "중계 PC": "직접 연결되지 않는 장비의 파일을 가져올 때 거치는 중계 PC(LHS)의 IP 입니다. '적용'으로 저장하며, 5초마다 연결을 확인하고 연결되면 장비를 자동으로 검색합니다. 모든 PC 의 export_key 가 같아야 연결됩니다.",
+        "접속 경로": "반출 요청이 실제로 거치는 PC 순서입니다. 내 PC 에서 가져오면 내 PC → 중계 PC(LHS) → 대상 장비(CCW 등) 3대, 중계 PC(LHS)에서 직접 가져오면 LHS → 대상 장비 2대로 표시됩니다. 화살표가 초록이면 연결됨, 빨강이면 연결 안됨입니다.",
         "장비": "중계 PC 가 자기 네트워크 대역(/24)을 스캔해 찾은 클라이언트 목록입니다. [중계]는 중계 PC 자신입니다. 장비를 고르면 허용 경로(D 드라이브·바탕화면)만 탐색할 수 있으며, '이름' 버튼으로 표시 이름을 바꿀 수 있습니다.",
     }
 
@@ -909,6 +919,7 @@ class AuroraClientApp:
         self.log_entries = []
         self._log_shown  = 0
         self.running     = True
+        self.quit_app    = root.destroy   # main() 에서 트레이 종료까지 포함한 함수로 교체
         self._delete_rule_widgets = []   # [{frame, path_var, ext_var, days_var, ena_var}, ...]
         self._cached_all_ips = self._get_local_ips()
         self._cached_ips_time = time.time()
@@ -1034,6 +1045,9 @@ class AuroraClientApp:
             name_padx = (0, 0)
         tk.Label(header, text="Aurora Client",
                  font=self.FONT_HEAD, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=name_padx)
+        self._tip(tk.Label(header, text=f"v{APP_VERSION}", font=self.FONT_SMALL,
+                           fg=self.TEXT_DIM, bg=self.IDLE_BG, padx=_px(6), pady=_px(1)),
+                  self.LABEL_HINTS["버전"]).pack(side="left", padx=(_px(8), 0))
         self._tip(tk.Label(header, text=self.my_ip,
                            font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.PANEL),
                   "이 PC의 IP 입니다. 첫 번째 등록 서버로 연결할 때 사용되는 로컬 주소이며, 프로그램 시작 시 한 번 확인합니다. 확인하지 못하면 '알 수 없음'으로 표시됩니다."
@@ -1196,7 +1210,7 @@ class AuroraClientApp:
 
         # ── PC 시작 시 자동 실행 ─────────────
         auto_row = tk.Frame(cfg, bg=self.PANEL)
-        auto_row.pack(fill="x", padx=_px(20), pady=(_px(10), _px(16)))
+        auto_row.pack(fill="x", padx=_px(20), pady=(_px(10), 0))
         self._field_label(auto_row, "자동 시작", width=8).pack(side="left", padx=(0, _px(8)))
         self._autostart_btn = self._button(
             auto_row, "OFF ○", "secondary", self._toggle_autostart)
@@ -1205,6 +1219,20 @@ class AuroraClientApp:
         self._tip(tk.Label(auto_row, text="  PC 시작 시 클라이언트 자동 실행",
                            font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
                   self.LABEL_HINTS["자동 시작"]).pack(side="left")
+
+        # ── 버전 / 업데이트 ─────────────────
+        upd_row = tk.Frame(cfg, bg=self.PANEL)
+        upd_row.pack(fill="x", padx=_px(20), pady=(_px(10), _px(16)))
+        self._field_label(upd_row, "버전", width=8).pack(side="left", padx=(0, _px(8)))
+        tk.Label(upd_row, text=f"v{APP_VERSION}", font=self.FONT_BOLD,
+                 fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=(0, _px(12)))
+        self._update_btn = self._button(upd_row, "최신 버전 확인", "secondary",
+                                        lambda: self._check_update(manual=True))
+        self._update_btn.pack(side="left")
+        self._update_lbl = self._tip(tk.Label(upd_row, text="", anchor="w", font=self.FONT,
+                                              fg=self.TEXT_DIM, bg=self.PANEL),
+                                     self.LABEL_HINTS["버전"])
+        self._update_lbl.pack(side="left", fill="x", expand=True, padx=(_px(10), 0))
 
         # 수동 제어
         mf = self._card(parent)
@@ -1740,6 +1768,7 @@ class AuroraClientApp:
         self._exp_roots     = []
         self._exp_cancel    = threading.Event()
         self._exp_busy      = False
+        self._exp_relay_host = ""     # 중계 PC 호스트명 (/info 응답)
 
         # 로그 (하단 고정 — 먼저 pack)
         self.export_log_text = self._log_panel(parent, "반출 LOG", height=140)
@@ -1786,17 +1815,25 @@ class AuroraClientApp:
         self._exp_conn_lbl.pack(side="right")
 
         r2 = tk.Frame(conn, bg=self.PANEL)
-        r2.pack(fill="x", padx=_px(20), pady=(0, _px(16)))
+        r2.pack(fill="x", padx=_px(20), pady=(0, _px(10)))
         self._field_label(r2, "장비", width=8).pack(side="left", padx=(0, _px(8)))
         self._exp_dev_var = tk.StringVar()
         self._exp_dev_combo = ttk.Combobox(r2, textvariable=self._exp_dev_var, state="readonly",
                                            font=self.FONT_INPUT, style="Export.TCombobox")
         self._exp_dev_combo.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
-        self._exp_dev_combo.bind("<<ComboboxSelected>>", lambda e: self._export_nav(""))
+        self._exp_dev_combo.bind("<<ComboboxSelected>>",
+                                 lambda e: (self._export_update_route(), self._export_nav("")))
         self._button(r2, "이름", "secondary", self._export_rename_device).pack(side="right")
         self._exp_scan_btn = self._button(r2, "장비 검색", "secondary",
                                           lambda: self._export_discover(force=True))
         self._exp_scan_btn.pack(side="right", padx=(0, _px(8)))
+
+        # 접속 경로: 내 PC → 중계 PC → 대상 장비 (중계 PC 에서 실행 중이면 2대)
+        r3 = tk.Frame(conn, bg=self.PANEL)
+        r3.pack(fill="x", padx=_px(20), pady=(0, _px(16)))
+        self._field_label(r3, "접속 경로", width=8).pack(side="left", padx=(0, _px(8)))
+        self._exp_route_frame = tk.Frame(r3, bg=self.PANEL)
+        self._exp_route_frame.pack(side="left", fill="x", expand=True)
 
         # ── 파일 탐색 카드 ──
         browse = self._card(parent)
@@ -1829,6 +1866,65 @@ class AuroraClientApp:
 
         self._export_set_connected(False)
 
+    # 접속 경로 표시
+    def _export_relay_is_self(self) -> bool:
+        relay = config.get("export_relay", "").strip()
+        return relay in ("127.0.0.1", "localhost") or relay in self._cached_all_ips
+
+    def _export_route_nodes(self) -> list:
+        """[(역할, 이름, IP)] — 실제 요청이 거치는 PC 순서"""
+        relay  = config.get("export_relay", "").strip()
+        me     = (socket.gethostname(), self.my_ip)
+        target = None
+        idx = self._exp_dev_combo.current()
+        if 0 <= idx < len(self._exp_devices):
+            d = self._exp_devices[idx]
+            name = config.get("export_devices", {}).get(d["ip"]) or d["host"] or d["ip"]
+            target = (name, d["ip"])
+        if self._export_relay_is_self():
+            # 이 PC 가 곧 중계 PC (예: LHS 에서 CCW 반출) → 2대
+            nodes = [("내 PC · 중계", me[0], relay)]
+        else:
+            nodes = [("내 PC", *me),
+                     ("중계 PC", self._exp_relay_host or "—", relay or "미설정")]
+        if target and target[1] != relay:
+            nodes.append(("대상 장비", *target))
+        return nodes
+
+    def _export_route_text(self) -> str:
+        return " → ".join(f"{n} ({ip})" for _, n, ip in self._export_route_nodes())
+
+    def _export_update_route(self):
+        f = self._exp_route_frame
+        for w in f.winfo_children():
+            w.destroy()
+        nodes = self._export_route_nodes()
+        tip = ("반출 요청이 실제로 거치는 PC 순서입니다. 내 PC → 중계 PC(LHS) → 대상 장비(CCW 등) 순으로 연결되며, "
+               "중계 PC 에서 직접 실행하면 중계 PC → 대상 장비 2대만 표시됩니다. 대상으로 중계 PC 자신을 고르면 중계 PC 까지만 표시됩니다. "
+               "화살표 색: 초록=연결됨, 빨강=연결 안됨, 회색=장비 미선택.")
+        for i, (role, name, ip) in enumerate(nodes):
+            if i:
+                # 첫 구간(내 PC→중계)은 연결 감시 결과, 이후 구간은 중계 PC 가 찾은 장비이므로 연결 상태를 따름
+                self._tip(tk.Label(f, text="→", font=self.FONT_HEAD, bg=self.PANEL,
+                                   fg=self.GREEN if self._exp_connected else self.RED),
+                          tip).pack(side="left", padx=_px(6))
+            fg = self.BLUE if role == "대상 장비" else (self.GREEN if self._exp_connected else self.TEXT_DIM)
+            chip = tk.Frame(f, bg=self._badge_bg(fg) if fg != self.BLUE else self.SELECT_BG,
+                            highlightthickness=1, highlightbackground=self.BORDER)
+            chip.pack(side="left")
+            name = name if len(name) <= 16 else name[:15] + "…"
+            for n, (text, font, color) in enumerate(((role, self.FONT_SMALL, self.TEXT_DIM),
+                                                      (name, self.FONT_BOLD, fg),
+                                                      (ip, self.FONT_MONO_SMALL, self.TEXT_DIM))):
+                self._tip(tk.Label(chip, text=text, font=font, fg=color, bg=chip.cget("bg"),
+                                   anchor="w"), tip).pack(fill="x", padx=_px(8),
+                                                          pady=(_px(3) if n == 0 else 0, _px(3) if n == 2 else 0))
+        if nodes[-1][0] != "대상 장비" and not (self._export_target()):
+            self._tip(tk.Label(f, text="  → 장비 선택", font=self.FONT, fg=self.DISABLED_TEXT,
+                               bg=self.PANEL), tip).pack(side="left")
+        self._tip(tk.Label(f, text=f"총 {len(nodes)}대", font=self.FONT_SMALL, fg=self.TEXT_DIM,
+                           bg=self.PANEL), tip).pack(side="right")
+
     # 로그 / 상태 표시
     def _export_log(self, msg: str):
         def _do():
@@ -1849,6 +1945,9 @@ class AuroraClientApp:
         self._exp_scan_btn.config(state=state)
         self._exp_go_btn.config(state=state if not self._exp_busy else "disabled")
         self._exp_dev_combo.config(state="readonly" if ok else "disabled")
+        if ok:
+            self._exp_relay_host = hostname
+        self._export_update_route()
 
     # 중계 PC 요청
     def _export_request(self, route: str, params: dict = None, target: str = None,
@@ -1885,7 +1984,10 @@ class AuroraClientApp:
                 except Exception:
                     pass
             was = self._exp_connected
-            self.root.after(0, lambda o=ok, h=host: self._export_set_connected(o, h))
+            # 상태가 바뀔 때만 갱신 (경로 칩을 5초마다 다시 그리지 않도록)
+            if (ok, host) != getattr(self, "_exp_last_state", None):
+                self._exp_last_state = (ok, host)
+                self.root.after(0, lambda o=ok, h=host: self._export_set_connected(o, h))
             if ok and not was:
                 self._export_log(f"중계 PC 연결됨 ({host})")
                 self._export_discover(force=False, relay_host=host)
@@ -1897,6 +1999,9 @@ class AuroraClientApp:
         config["export_relay"] = self._exp_relay_var.get().strip()
         save_config(config)
         self._exp_connected = False
+        self._exp_relay_host = ""
+        self._exp_last_state = None
+        self._export_update_route()
         self._export_log(f"중계 PC 변경: {config['export_relay']}")
 
     def _export_device_label(self, ip: str, hostname: str) -> str:
@@ -1933,7 +2038,8 @@ class AuroraClientApp:
         for i, d in enumerate(devices):
             if d["ip"] == cur_ip:
                 self._exp_dev_combo.current(i)
-                return
+                break
+        self._export_update_route()
 
     def _export_target(self) -> str | None:
         idx = self._exp_dev_combo.current()
@@ -2046,6 +2152,7 @@ class AuroraClientApp:
 
         label = self._exp_dev_combo.get().replace("  [중계]", "")
         dest_root = os.path.join(save_dir, re.sub(r'[\\/:*?"<>|]+', "_", label).strip())
+        self._export_log(f"경로: {self._export_route_text()}")
         self._exp_cancel.clear()
         self._exp_busy = True
         self._exp_go_btn.config(state="disabled")
@@ -2255,6 +2362,9 @@ class AuroraClientApp:
         try:
             new_state = not autostart_enabled()
             set_autostart(new_state)
+            # 사용자가 직접 끈 경우만 기억 → 다음 실행 때 다시 켜지지 않음
+            config["autostart_off"] = not new_state
+            save_config(config)
             self._style_autostart_btn(new_state)
             self.add_log(f"자동 시작 {'활성화' if new_state else '비활성화'}")
         except Exception as e:
@@ -2358,6 +2468,34 @@ class AuroraClientApp:
 
             time.sleep(STATUS_INTERVAL)
 
+    # ── 자동 업데이트 (RemoteConfig\Update) ──
+    def _check_update(self, manual: bool):
+        """manual=False: 시작 시 자동 확인 (같은 버전 자동 시도는 1회만)
+        manual=True : 버튼 — 결과를 팝업으로 알림"""
+        def _do():
+            res = aurora_update.check("client", APP_VERSION)
+            self.root.after(0, lambda: self._update_lbl.config(
+                text=res["msg"], fg=self.BLUE if res["status"] == "newer" else self.TEXT_DIM))
+            if res["status"] != "newer":
+                if manual:
+                    self.root.after(0, lambda: messagebox.showinfo("업데이트", res["msg"], parent=self.root))
+                return
+            if not manual and aurora_update.auto_already_tried("client", res["version"]):
+                self.add_log(f"⚠ v{res['version']} 자동 업데이트를 이미 시도했지만 버전이 그대로입니다 — Update 폴더의 exe 확인 필요")
+                return
+            self.add_log(f"⬆ {res['msg']} — 업데이트 후 재시작합니다")
+            err = aurora_update.apply("client", res["exe"], res["version"])
+            if err:
+                self.add_log(f"업데이트 실패: {err}")
+                if manual:
+                    self.root.after(0, lambda: messagebox.showerror("업데이트 실패", err, parent=self.root))
+                return
+            self.root.after(0, self.quit_app)
+        if manual:
+            self._update_btn.config(state="disabled")
+            self.root.after(2000, lambda: self._update_btn.config(state="normal"))
+        threading.Thread(target=_do, daemon=True).start()
+
     def _manual_start(self):
         result = start_main()
         self.add_log(f"[수동] 실행 → {result}")
@@ -2411,7 +2549,9 @@ class AuroraClientApp:
         if config.get("ping_mode", "manual") == "auto":
             self._start_auto_ping_client()
 
-        self.add_log("클라이언트 시작됨")
+        self.add_log(f"클라이언트 시작됨 (v{APP_VERSION})")
+        # 켜질 때 업데이트 폴더 자동 확인 (화면이 뜬 뒤)
+        self.root.after(3000, lambda: self._check_update(manual=False))
         server_addrs = ", ".join(f"{ip}:{SERVER_PORT}" for ip in config.get("server_ips", []))
         self.add_log(f"서버 IP: {server_addrs or '없음'}")
         self.add_log(f"명령 수신 포트: {LISTEN_PORT}")
@@ -2463,6 +2603,8 @@ def main():
     def on_close():
         root.withdraw()
         app.add_log("트레이로 최소화됨 — 클라이언트는 계속 실행 중")
+
+    app.quit_app = lambda: quit_app()
 
     tray_menu = pystray.Menu(
         pystray.MenuItem("Aurora Client 열기", show_window, default=True),

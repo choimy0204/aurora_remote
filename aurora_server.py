@@ -21,6 +21,9 @@ import socket as _socket
 import shutil
 import sys
 import ctypes
+import aurora_update
+
+APP_VERSION = "2.8.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 번들 리소스(이미지) ──────────────
 def _resource_path(rel):
@@ -698,6 +701,7 @@ class AuroraServerApp:
     LABEL_HINTS = {
         # 헤더 / 사이드바
         "SERVER": "이 프로그램이 서버(관리 PC) 역할로 실행 중임을 나타내는 표시입니다.",
+        "버전": "현재 실행 중인 서버 버전입니다. D:\\RemoteConfig\\Update 폴더에 새 버전(AuroraServer.exe + version.json)을 넣어두면 켜질 때 자동으로 업데이트 후 재시작합니다. '최신 버전 확인' 을 누르면 바로 확인해 새 버전이면 업데이트 후 재시작합니다.",
         "온라인 카운트": "온라인 클라이언트 수 / 등록된 전체 클라이언트 수입니다. "
                         "클라이언트는 3초마다 상태를 보고하며, 10초 이상 보고가 없으면 오프라인으로 바뀝니다. "
                         "화면은 2초마다 갱신됩니다.",
@@ -782,6 +786,7 @@ class AuroraServerApp:
         self.root.geometry(f"{_px(1300)}x{_px(860)}")
         self.root.resizable(False, False)
         self.root.configure(bg=self.BG)
+        self.quit_app = root.destroy   # main() 에서 트레이 종료까지 포함한 함수로 교체
 
         self.client_rows        = {}
         self.deploy_check_vars  = {}
@@ -823,6 +828,10 @@ class AuroraServerApp:
                                 fg=self.TEXT_DIM, bg=self.IDLE_BG)
         server_badge.pack(side="left", padx=(_px(16), 0))
         self._tip_key(server_badge, "SERVER")
+        ver_badge = tk.Label(hdr, text=f"v{APP_VERSION}", font=self.FONT_SMALL, padx=_px(8), pady=_px(2),
+                             fg=self.TEXT_DIM, bg=self.IDLE_BG)
+        ver_badge.pack(side="left", padx=(_px(6), 0))
+        self._tip_key(ver_badge, "버전")
 
         self.online_label = tk.Label(hdr, text="온라인: 0 / 0",
                  font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL)
@@ -833,6 +842,9 @@ class AuroraServerApp:
         self.server_status_lbl.pack(side="right")
         self._tip_key(self.server_status_lbl, "서버 상태")
         self._set_badge(self.server_status_lbl, "● HTTP 서버 시작 중...", self.YELLOW)
+        self._update_btn = self._sec_btn(hdr, "최신 버전 확인", lambda: self._check_update(manual=True))
+        self._update_btn.pack(side="right", padx=(0, _px(16)))
+        self._tip_key(self._update_btn, "버전")
 
         tk.Frame(self.root, bg=self.BORDER, height=max(1, _px(1))).pack(fill="x")
 
@@ -2424,6 +2436,35 @@ class AuroraServerApp:
                         f"● HTTP 서버 실행중  :{SERVER_PORT}", self.GREEN)
         if config.get("ping_mode", "manual") == "auto":
             self._start_auto_ping()
+        add_log(f"서버 버전 v{APP_VERSION}")
+        # 켜질 때 업데이트 폴더 자동 확인 (화면이 뜬 뒤)
+        self.root.after(3000, lambda: self._check_update(manual=False))
+
+    # ── 자동 업데이트 (RemoteConfig/Update) ──
+    def _check_update(self, manual: bool):
+        """manual=False: 시작 시 자동 확인 (같은 버전 자동 시도는 1회만)
+        manual=True : 버튼 — 결과를 팝업으로 알림"""
+        def _do():
+            res = aurora_update.check("server", APP_VERSION)
+            if res["status"] != "newer":
+                if manual:
+                    self.root.after(0, lambda: messagebox.showinfo("업데이트", res["msg"], parent=self.root))
+                return
+            if not manual and aurora_update.auto_already_tried("server", res["version"]):
+                add_log(f"⚠ v{res['version']} 자동 업데이트를 이미 시도했지만 버전이 그대로입니다 — Update 폴더의 exe 확인 필요")
+                return
+            add_log(f"⬆ {res['msg']} — 업데이트 후 재시작합니다")
+            err = aurora_update.apply("server", res["exe"], res["version"])
+            if err:
+                add_log(f"업데이트 실패: {err}")
+                if manual:
+                    self.root.after(0, lambda: messagebox.showerror("업데이트 실패", err, parent=self.root))
+                return
+            self.root.after(0, self.quit_app)
+        if manual:
+            self._update_btn.config(state="disabled")
+            self.root.after(2000, lambda: self._update_btn.config(state="normal"))
+        threading.Thread(target=_do, daemon=True).start()
 
 
 # ─────────────────────────────────────────
@@ -2533,6 +2574,8 @@ def main():
     def on_close():
         root.withdraw()
         add_log("트레이로 최소화됨 — 서버는 계속 실행 중")
+
+    app.quit_app = lambda: quit_app()
 
     tray_menu = pystray.Menu(
         pystray.MenuItem("Aurora Server 열기", show_window, default=True),

@@ -1,7 +1,9 @@
 build/
 build_server/
 build_client/
-dist/
+# dist/latest(최신)·dist/old(구버전)는 커밋 대상 — 수동 산출물만 제외
+dist/*.7z
+dist/RemoteConfig/
 __pycache__/
 *.pyc
 *.done

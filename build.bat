@@ -7,15 +7,14 @@ set "ROOT=%~dp0"
 rem 병렬 빌드용 하위 호출: build.bat __build <spec이름> <작업폴더>
 if "%~1"=="__build" goto :build
 
-echo Stopping running processes...
-taskkill /f /im AuroraServer.exe >nul 2>&1
-taskkill /f /im AuroraClient.exe >nul 2>&1
-
 rem 패키지가 없을 때만 설치 (매번 pip 확인하던 시간 절약)
 "%PY%" -c "import requests, psutil, pystray, PIL, PyInstaller" >nul 2>&1 || (
     echo Installing required packages...
     "%PY%" -m pip install requests psutil pystray pillow pyinstaller --quiet
 )
+
+rem dist 에서 실행 중인 exe 만 종료 + 버전이 바뀌었으면 dist\latest → dist\old\v이전버전 으로 보관
+"%PY%" "%ROOT%tools\release.py" prepare || exit /b 1
 
 del "%ROOT%build_server.done" "%ROOT%build_client.done" 2>nul
 
@@ -37,14 +36,15 @@ del "%ROOT%build_server.done" "%ROOT%build_client.done" 2>nul
 set FAIL=0
 if not "%RC_S: =%"=="0" ( echo [FAIL] AuroraServer - log: & type "%ROOT%build_server.log" & set FAIL=1 )
 if not "%RC_C: =%"=="0" ( echo [FAIL] AuroraClient - log: & type "%ROOT%build_client.log" & set FAIL=1 )
-rem 사용 매뉴얼을 배포 폴더에 함께 넣어 항상 최신으로 유지
-if "%FAIL%"=="0" copy /y "%ROOT%Aurora_사용매뉴얼.md" "%ROOT%dist\" >nul
-if "%FAIL%"=="0" echo Done! Check: %ROOT%dist\
+rem 사용 매뉴얼 + version.json(자동 업데이트 기준)을 최신 폴더에 함께 넣음
+if "%FAIL%"=="0" copy /y "%ROOT%Aurora_사용매뉴얼.md" "%ROOT%dist\latest\" >nul
+if "%FAIL%"=="0" "%PY%" "%ROOT%tools\release.py" manifest
+if "%FAIL%"=="0" echo Done! Check: %ROOT%dist\latest\  (이 폴더 내용을 D:\RemoteConfig\Update 에 넣으면 자동 업데이트)
 if /i not "%~1"=="nopause" pause
 exit /b %FAIL%
 
 :build
-"%PY%" -m PyInstaller "%ROOT%%2.spec" --distpath "%ROOT%dist" --workpath "%ROOT%%3" --noconfirm --log-level WARN > "%ROOT%%3.log" 2>&1
+"%PY%" -m PyInstaller "%ROOT%%2.spec" --distpath "%ROOT%dist\latest" --workpath "%ROOT%%3" --noconfirm --log-level WARN > "%ROOT%%3.log" 2>&1
 rem 성공·실패 모두 종료 코드를 기록 (이전에는 실패 시 대기 루프가 끝나지 않았음)
 > "%ROOT%%3.done" echo %errorlevel%
 exit /b 0
