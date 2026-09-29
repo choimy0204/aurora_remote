@@ -173,10 +173,20 @@ def set_autostart(enable: bool):
 # ─────────────────────────────────────────
 _main_pid: int | None = None
 
+def _main_exe_path() -> str:
+    """aurora_path 설정 → 실제 실행 exe 경로 (실행·감지 공용)
+    - .exe 지정: 그대로
+    - 폴더 지정: 폴더\\폴더이름.exe 가 있으면 그것, 없으면 폴더\\Aurora.exe
+      (서버 배포는 D:\\Aurora\\Aurora_EXE_버전 폴더를 보내고, 그 안의 실행 파일은 Aurora.exe)"""
+    path = config.get("aurora_path", DEFAULT_CONFIG["aurora_path"]).strip().rstrip("\\/")
+    if path.lower().endswith(".exe"):
+        return path
+    own = os.path.join(path, os.path.basename(path) + ".exe")
+    return own if os.path.isfile(own) else os.path.join(path, "Aurora.exe")
+
 def _main_exe_name() -> str:
-    """실행/감시 대상 exe 이름 (aurora_path 설정에서 추출)"""
-    path = config.get("aurora_path", DEFAULT_CONFIG["aurora_path"])
-    return os.path.basename(path).lower()
+    """실행/감시 대상 exe 이름"""
+    return os.path.basename(_main_exe_path()).lower()
 
 def is_main_running() -> bool:
     """실행 대상 프로그램이 현재 켜져 있는지 확인 (PID 캐싱)"""
@@ -201,8 +211,7 @@ def is_main_running() -> bool:
 
 def start_main() -> str:
     """aurora_path에 지정된 프로그램을 실행"""
-    path = config.get("aurora_path", DEFAULT_CONFIG["aurora_path"]).strip()
-    exe = path if path.lower().endswith(".exe") else os.path.join(path, os.path.basename(path) + ".exe")
+    exe = _main_exe_path()
     if is_main_running():
         return "이미 실행중"
     if not os.path.exists(exe):
@@ -811,7 +820,7 @@ class AuroraClientApp:
         "수동 제어": "서버 명령과 별개로 이 PC에서 Aurora 를 직접 실행·종료하는 긴급용 영역입니다. 실행은 이미 켜져 있으면 하지 않고, 종료는 실행 경로의 exe 와 이름이 같은 프로세스를 모두 강제 종료합니다.",
         "LOG": "명령 수신, 서버 추가·삭제, 포트·경로 변경 등 클라이언트 동작 기록입니다. 최근 40줄만 표시합니다.",
         "실행 프로그램": "서버 명령이나 수동 제어로 실행·종료할 Aurora 프로그램을 지정하는 영역입니다.",
-        "실행 경로": "Aurora 실행 파일 경로입니다. .exe 로 끝나면 그대로, 폴더만 입력하면 '폴더\\폴더이름.exe' 를 실행합니다. 이 exe 이름으로 실행 여부를 감시하고 종료도 합니다. '적용'으로 저장하며, 배포 후에는 서버가 setpath 명령으로 갱신합니다.",
+        "실행 경로": "Aurora 실행 파일 경로입니다. .exe 로 끝나면 그대로, 폴더만 입력하면 '폴더\\폴더이름.exe', 없으면 '폴더\\Aurora.exe' 를 실행합니다 (서버 배포 폴더 Aurora_EXE_버전 도 이 규칙). 이 exe 이름으로 실행 여부를 감시하고 종료도 합니다. '적용'으로 저장하며, 배포 후에는 서버가 setpath 명령으로 갱신합니다.",
         "프로세스 종료 목록": "강제 종료할 프로세스의 exe 이름을 등록하는 목록입니다. 이름 뒤에 .exe 가 없으면 자동으로 붙습니다. 체크한 항목을 아래 '선택 프로세스 종료', 목록 전체를 '전체 종료'로 종료합니다.",
         "자동 삭제 규칙": "폴더 안의 오래된 파일 또는 날짜 폴더를 자동 삭제하는 규칙 목록입니다. ON 체크와 '적용'이 모두 된 규칙만 날짜가 바뀔 때(자정) 실행되며, '지금 실행'으로 즉시 실행할 수도 있습니다.",
         "삭제 LOG": "자동 삭제 실행 내역(삭제한 파일·폴더, 건너뜀, 오류)을 시각과 함께 기록합니다.",
