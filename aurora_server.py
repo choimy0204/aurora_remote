@@ -2429,6 +2429,12 @@ class AuroraServerApp:
 
     def _start_services(self):
         self._log_seq_shown = 0
+        # 자동 시작이 켜져 있으면 등록 경로를 지금 exe 로 갱신 (D:\AuroraRemote 로 옮겨도 예전 exe 가 켜지지 않게)
+        if getattr(sys, "frozen", False) and autostart_enabled():
+            try:
+                set_autostart(True)
+            except Exception:
+                pass
         threading.Thread(target=run_http_server, daemon=True).start()
         threading.Thread(target=check_offline,   daemon=True).start()
         add_log(f"HTTP 서버 시작: 0.0.0.0:{SERVER_PORT}")
