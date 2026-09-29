@@ -419,6 +419,10 @@ def export_roots() -> list[dict]:
     desk = _desktop_dir()
     if os.path.isdir(desk):
         roots.append({"name": "바탕화면", "path": desk})
+    # 설치 프로그램이 만드는 바로가기는 대부분 공용 바탕화면에 있음 (탐색기 바탕화면은 둘을 합쳐 보여 줌)
+    pub = os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "Desktop")
+    if os.path.isdir(pub):
+        roots.append({"name": "공용 바탕화면", "path": pub})
     return roots
 
 def export_resolve(path: str) -> str | None:
@@ -2287,7 +2291,7 @@ class AuroraClientApp:
         self._exp_path = path
         if not path:
             self._exp_roots = [it["path"] for it in items]
-        self._exp_path_lbl.config(text=path or "허용 경로 (D 드라이브 · 바탕화면)",
+        self._exp_path_lbl.config(text=path or "허용 경로 (D 드라이브 · 바탕화면 · 공용 바탕화면)",
                                   fg=self.TEXT if path else self.TEXT_DIM)
         self._exp_tree.delete(*self._exp_tree.get_children())
         self._exp_items = {}
