@@ -573,6 +573,71 @@ class _StyledButton(tk.Button):
             self._border_frame.configure(bg=self.base_border)
 
 
+class _Tooltip:
+    """위젯에 마우스를 올리고 잠시(500ms) 있으면 설명(hint)을 띄우는 툴팁.
+    text 는 문자열 또는 문자열을 반환하는 callable(동적 설명)."""
+
+    DELAY_MS = 500
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self._after_id = None
+        self._tip_win = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.DELAY_MS, self._show)
+
+    def _cancel(self):
+        if self._after_id is None:
+            return
+        try:
+            self.widget.after_cancel(self._after_id)
+        except tk.TclError:
+            pass
+        self._after_id = None
+
+    def _show(self):
+        self._after_id = None
+        if self._tip_win is not None:
+            return
+        text = self.text() if callable(self.text) else self.text
+        if not text:
+            return
+        try:
+            x = self.widget.winfo_pointerx() + _px(12)
+            y = self.widget.winfo_pointery() + _px(18)
+            win = tk.Toplevel(self.widget)
+            win.wm_overrideredirect(True)
+            win.attributes("-topmost", True)
+            tk.Label(win, text=text, justify="left", bg="#1D2327", fg="#FFFFFF",
+                     font=("맑은 고딕", 9), padx=_px(10), pady=_px(6),
+                     wraplength=_px(320), bd=0).pack()
+            win.update_idletasks()
+            # 화면 오른쪽/아래를 넘으면 안쪽으로 당김
+            x = max(0, min(x, self.widget.winfo_screenwidth() - win.winfo_reqwidth()))
+            y = max(0, min(y, self.widget.winfo_screenheight() - win.winfo_reqheight()))
+            win.wm_geometry(f"+{x}+{y}")
+            self._tip_win = win
+        except tk.TclError:
+            self._tip_win = None
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip_win is None:
+            return
+        try:
+            self._tip_win.destroy()
+        except tk.TclError:
+            pass
+        self._tip_win = None
+
+
 class AuroraServerApp:
 
     # ── 색상 팔레트 ──
@@ -629,6 +694,88 @@ class AuroraServerApp:
     ROW_H = 38      # 표 데이터 행 높이
     HDR_H = 32      # 표 헤더 행 높이
 
+    # ── 라벨 설명(툴팁) — 라벨 텍스트(또는 지정 키) → 설명. _field_label / _table_header / _table_card 등이 조회 ──
+    LABEL_HINTS = {
+        # 헤더 / 사이드바
+        "SERVER": "이 프로그램이 서버(관리 PC) 역할로 실행 중임을 나타내는 표시입니다.",
+        "온라인 카운트": "온라인 클라이언트 수 / 등록된 전체 클라이언트 수입니다. "
+                        "클라이언트는 3초마다 상태를 보고하며, 10초 이상 보고가 없으면 오프라인으로 바뀝니다. "
+                        "화면은 2초마다 갱신됩니다.",
+        "서버 상태": "클라이언트의 상태 보고(POST /status)를 받는 HTTP 서버의 상태입니다. "
+                    "':숫자'는 수신 포트이며, 포트를 바꾸려면 저장 후 프로그램을 재시작해야 합니다.",
+        "서버 뷰": "전체/현재 공정 실행·종료, 핑 모드, 포트·자동 시작·버전명 설정, 클라이언트 IP 관리를 하는 화면입니다.",
+        "배포 뷰": "소스 폴더의 하위 폴더를 클라이언트별로 골라 각 PC 의 D: 드라이브(Aurora_EXE_버전명 폴더)로 복사하는 화면입니다.",
+        "단일 배포 뷰": "선택한 파일만 클라이언트의 같은 경로로 복사하는 화면입니다. 기존 파일은 백업 후 교체합니다.",
+        # 서버 뷰 — 제어
+        "전체 공정": "아래 [실행]/[종료] 는 온라인인 모든 클라이언트에 start/stop 명령을 1회 전송합니다. "
+                    "(클라이언트 포트로 POST /command) 오프라인 클라이언트에는 보내지 않습니다.",
+        "현재 공정": "아래 [실행]/[종료] 는 '현재 공정 IP 관리' 목록의 IP 에만 명령을 전송합니다. "
+                    "온라인 여부와 관계없이 목록의 모든 IP 로 전송을 시도하며, 목록이 비어 있으면 경고가 표시됩니다.",
+        "핑 모드": "Manual: [전체 핑] 버튼을 누를 때만 핑을 확인합니다. Auto: 5초마다 자동으로 확인합니다. "
+                  "선택한 모드는 온라인 클라이언트에도 전달됩니다. 핑 결과 색상은 10ms 미만 녹색, 50ms 미만 노랑, 그 이상·시간초과 빨강입니다.",
+        # 서버 뷰 — 설정
+        "포트 설정": "서버/클라이언트 통신 포트를 정합니다. [적용] 은 설정 파일(D:\\RemoteConfig\\server_config.json)에 "
+                    "저장만 하며, 프로그램을 재시작해야 반영됩니다. 1024~65535 사이의 숫자만 가능합니다.",
+        "서버 포트": "클라이언트가 3초마다 상태를 보고하는 이 서버의 수신 포트입니다. (기본 9000) "
+                    "변경 후 저장하고 프로그램을 재시작해야 합니다.",
+        "클라이언트 포트": "서버가 클라이언트에 명령(start/stop/setpath/ping/setpingmode)을 보내는 포트입니다. (기본 9001) "
+                          "클라이언트가 수신하는 포트와 같아야 하며, 변경 후 재시작이 필요합니다.",
+        "자동 시작": "Windows 로그인 시 이 서버 프로그램을 자동 실행할지 설정합니다. "
+                    "버튼을 누르면 현재 사용자 시작 프로그램(레지스트리)에 등록/해제됩니다.",
+        "배포 버전명": "배포 뷰와 공유되는 버전명입니다. [적용] 을 눌러야 확정되며, 배포 시 클라이언트에 "
+                      "Aurora_EXE_<버전명> 폴더로 복사됩니다. [전체 경로 적용] 은 온라인 클라이언트의 Aurora 경로를 이 폴더로 바꿉니다.",
+        # 표 제목 / 로그 제목
+        "전체 공정 IP 관리": "등록된 모든 클라이언트 PC 목록과 상태입니다. 추가/삭제하면 배포 뷰·단일 배포 뷰 목록에도 반영됩니다. "
+                            "이름은 더블클릭해서 바꿀 수 있습니다.",
+        "현재 공정 IP 관리": "'현재 공정' 실행/종료 명령의 대상만 모아둔 IP 목록입니다. "
+                            "전체 공정 목록과 별도로 저장되며, 핑은 이 목록의 IP 도 확인합니다.",
+        "배포 LOG": "배포 관련(배포·복사·공유 등) 로그만 모아 보여줍니다. 최근 50줄만 유지됩니다.",
+        "배포 대상 클라이언트": "배포할 클라이언트 목록입니다. 체크된 클라이언트만 배포하며, "
+                              "클라이언트를 순차적으로 하나씩 복사합니다.",
+        "단일 배포 LOG": "단일 배포의 진행 로그(연결·백업·복사·완료/오류)를 보여줍니다.",
+        "파일 목록": "[적용]한 소스 폴더 바로 아래의 파일 목록입니다. (하위 폴더 제외) 체크된 파일만 배포됩니다.",
+        "배포 대상": "파일을 복사할 클라이언트 목록입니다. 체크된 클라이언트에만 동시에(병렬) 배포합니다. "
+                    "접속 계정은 서버 뷰 표의 ID/PW 를 사용합니다.",
+        "전체 공정 개수": "등록된 클라이언트 수입니다.",
+        "현재 공정 개수": "'현재 공정' 목록에 등록된 IP 수입니다.",
+        # 표 열 헤더 / 행 상태
+        "CLIENT": "클라이언트 PC 의 이름입니다. (전체 공정 IP 관리 표에서는 이름을 더블클릭해서 바꿀 수 있습니다.)",
+        "IP": "클라이언트 PC 의 IP 주소입니다. 명령 전송, 핑, 공유 폴더 접속에 이 주소를 사용합니다.",
+        "연결 상태": "클라이언트의 상태 보고 수신 여부입니다. 3초마다 보고를 받으며, 10초 이상 없으면 오프라인이 됩니다.",
+        "Aurora": "온라인 클라이언트에서 Aurora 프로그램이 실행 중인지(실행중/중지) 보여줍니다. 오프라인이면 —로 표시됩니다.",
+        "마지막 응답": "마지막 상태 보고를 받은 뒤 경과한 시간입니다. 5초 미만 녹색, 10초 미만 노랑, 그 이상은 회색입니다.",
+        "핑": "서버에서 클라이언트로 보낸 핑 응답 시간입니다. 10ms 미만 녹색, 50ms 미만 노랑, 그 이상·시간초과 빨강입니다. "
+             "갱신은 핑 모드(Manual/Auto)를 따릅니다.",
+        "ID": "단일 배포 시 이 PC 의 공유 폴더(\\\\IP\\드라이브)에 접속할 Windows 계정 ID 입니다. 입력 즉시 설정 파일에 저장됩니다.",
+        "PW": "단일 배포 시 이 PC 공유 폴더에 접속할 계정의 비밀번호입니다. 입력 즉시 설정 파일에 저장됩니다.",
+        "경로": "클라이언트가 보고한 Aurora 실행 경로입니다. 배포 완료 후 setpath 로 갱신되며, 아직 없으면 —로 표시됩니다.",
+        "선택": "체크한 클라이언트만 배포 대상이 됩니다.",
+        "소스 폴더 선택": "이 클라이언트에 복사할 소스 폴더입니다. 목록은 배포 소스 폴더의 하위 폴더이며, "
+                        "선택값은 [적용] 을 눌러야 저장됩니다.",
+        "진행률": "이 클라이언트로 복사한 파일 수 / 전체 파일 수입니다.",
+        "저장 경로": "클라이언트 D: 드라이브 기준의 복사 위치입니다. (추가 저장 경로\\Aurora_EXE_버전명)",
+        "배포 상태": "클라이언트별 배포 결과입니다. 배포 예정 → 배포 중... → 배포 완료 또는 실패로 바뀝니다.",
+        "이름 변경": "이름을 더블클릭하면 새 이름을 입력해 바꿀 수 있습니다.",
+        # 배포 뷰 — 입력 라벨
+        "배포 소스 폴더": "배포할 버전 폴더들이 들어 있는 상위 폴더입니다. [적용] 하면 이 폴더의 하위 폴더 목록이 "
+                        "클라이언트별 소스 폴더 선택 목록에 채워지고 설정에 저장됩니다.",
+        "내부 경로": "선택한 하위 폴더 안에서 실제로 복사할 폴더입니다. (예: x64-Debug) 비우면 하위 폴더 전체를 복사합니다. "
+                    "[적용] 을 눌러 저장합니다.",
+        "추가 저장 경로": "클라이언트 D: 드라이브 아래에서 Aurora_EXE_버전명 폴더를 만들 상위 폴더입니다. "
+                        "비우면 D: 바로 아래에 만듭니다.",
+        "저장 경로 미리보기": "클라이언트에 복사될 최종 경로 미리보기입니다. 버전명이 비어 있으면 Aurora_EXE_버전명 으로 표시됩니다.",
+        "전체 진행률": "이번 배포에서 완료된 클라이언트 수 / 대상 수입니다. 성공한 클라이언트에는 완료 후 "
+                      "Aurora 경로(setpath)가 자동 전송됩니다.",
+        "배포 상태 메시지": "배포·적용 작업의 진행 상태와 결과(성공 녹색, 진행 중 노랑, 실패·중단 빨강)를 보여줍니다.",
+        "전체 진행률 수치": "완료한 클라이언트 수 / 배포 대상 클라이언트 수입니다.",
+        # 단일 배포 뷰
+        "단일 배포 소스 폴더": "배포할 파일이 들어 있는 폴더입니다. 클라이언트에도 같은 드라이브·같은 경로의 폴더로 복사됩니다. "
+                              "기존 파일은 이름_YYYYMMDD_HHmmss.확장자 로 백업한 뒤 교체합니다.",
+        "단일 배포 상태 메시지": "[적용]/배포 결과를 보여줍니다. (파일 로드 수, 배포 중, 완료·실패 대수)",
+        "전체 배포": "이번 단일 배포에서 완료된 클라이언트 수 / 배포 대상 수입니다.",
+        "단일 현재 공정": "배포 대상 중 '현재 공정' 목록에 포함된 클라이언트의 완료 수 / 전체 수입니다.",
+    }
+
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Aurora Remote Controller  |  Server")
@@ -672,15 +819,19 @@ class AuroraServerApp:
             title_padx = (_px(20), 0)
         tk.Label(hdr, text="Aurora Remote Controller",
                  font=self.FONT_APP_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=title_padx)
-        tk.Label(hdr, text="SERVER", font=self.FONT_SMALL, padx=_px(8), pady=_px(2),
-                 fg=self.TEXT_DIM, bg=self.IDLE_BG).pack(side="left", padx=(_px(16), 0))
+        server_badge = tk.Label(hdr, text="SERVER", font=self.FONT_SMALL, padx=_px(8), pady=_px(2),
+                                fg=self.TEXT_DIM, bg=self.IDLE_BG)
+        server_badge.pack(side="left", padx=(_px(16), 0))
+        self._tip_key(server_badge, "SERVER")
 
         self.online_label = tk.Label(hdr, text="온라인: 0 / 0",
                  font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL)
         self.online_label.pack(side="right", padx=(_px(16), _px(20)))
+        self._tip_key(self.online_label, "온라인 카운트")
         self.server_status_lbl = tk.Label(hdr, text="", font=self.FONT_SMALL,
                  padx=_px(8), pady=_px(2), fg=self.YELLOW, bg=self.PANEL)
         self.server_status_lbl.pack(side="right")
+        self._tip_key(self.server_status_lbl, "서버 상태")
         self._set_badge(self.server_status_lbl, "● HTTP 서버 시작 중...", self.YELLOW)
 
         tk.Frame(self.root, bg=self.BORDER, height=max(1, _px(1))).pack(fill="x")
@@ -720,6 +871,7 @@ class AuroraServerApp:
         lbl = tk.Label(row, text=text, font=self.FONT_NAV, fg=self.TEXT_DIM,
                        bg=self.PANEL, anchor="w", cursor="hand2")
         lbl.pack(side="left", fill="both", expand=True, padx=(_px(13), 0))
+        self._tip_key(lbl, text)
         for w in (row, bar, lbl):
             w.bind("<Button-1>", lambda e, i=idx: self._select_view(i))
         return row, bar, lbl
@@ -760,8 +912,9 @@ class AuroraServerApp:
         inner.pack(fill="x", padx=_px(20), pady=_px(16))
 
         # 전체 공정
-        tk.Label(inner, text="전체 공정",
-                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=(0, _px(12)))
+        self._tip_key(tk.Label(inner, text="전체 공정",
+                               font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL),
+                      "전체 공정").pack(side="left", padx=(0, _px(12)))
         self._btn(inner, "▶  실행", self.BTN_START, self.BTN_START_H,
                   self._cmd_start).pack(side="left", padx=(0, _px(8)))
         self._btn(inner, "■  종료", self.BTN_STOP, self.BTN_STOP_H,
@@ -771,8 +924,9 @@ class AuroraServerApp:
         tk.Frame(inner, bg=self.BORDER, width=max(1, _px(1)), height=_px(28)).pack(side="left", padx=_px(28))
 
         # 현재 공정
-        tk.Label(inner, text="현재 공정",
-                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=(0, _px(12)))
+        self._tip_key(tk.Label(inner, text="현재 공정",
+                               font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL),
+                      "현재 공정").pack(side="left", padx=(0, _px(12)))
         self._btn(inner, "▶  실행", self.BTN_START, self.BTN_START_H,
                   self._cmd_start_current).pack(side="left", padx=(0, _px(8)))
         self._btn(inner, "■  종료", self.BTN_STOP, self.BTN_STOP_H,
@@ -782,8 +936,9 @@ class AuroraServerApp:
         tk.Frame(inner, bg=self.BORDER, width=max(1, _px(1)), height=_px(28)).pack(side="left", padx=_px(28))
 
         # 핑 모드
-        tk.Label(inner, text="핑 모드",
-                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=(0, _px(12)))
+        self._tip_key(tk.Label(inner, text="핑 모드",
+                               font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL),
+                      "핑 모드").pack(side="left", padx=(0, _px(12)))
         ping_btn_row = tk.Frame(inner, bg=self.PANEL)
         ping_btn_row.pack(side="left")
         self._ping_mode = config.get("ping_mode", "manual")
@@ -807,16 +962,19 @@ class AuroraServerApp:
         title_cell = tk.Frame(port_row, bg=self.PANEL, width=_px(92), height=_px(34))
         title_cell.pack(side="left")
         title_cell.pack_propagate(False)
-        tk.Label(title_cell, text="포트 설정",
-                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left")
+        self._tip_key(tk.Label(title_cell, text="포트 설정",
+                               font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL),
+                      "포트 설정").pack(side="left")
 
-        tk.Label(port_row, text="서버 포트",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, _px(8)))
+        self._tip_key(tk.Label(port_row, text="서버 포트",
+                               font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
+                      "서버 포트").pack(side="left", padx=(0, _px(8)))
         self.server_port_var = tk.StringVar(value=str(config.get("server_port", 9000)))
         self._entry(port_row, self.server_port_var, 10).pack(side="left", ipady=_px(1), padx=(0, _px(20)))
 
-        tk.Label(port_row, text="클라이언트 포트",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, _px(8)))
+        self._tip_key(tk.Label(port_row, text="클라이언트 포트",
+                               font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
+                      "클라이언트 포트").pack(side="left", padx=(0, _px(8)))
         self.client_port_var = tk.StringVar(value=str(config.get("client_port", 9001)))
         self._entry(port_row, self.client_port_var, 10).pack(side="left", ipady=_px(1), padx=(0, _px(8)))
 
@@ -824,8 +982,9 @@ class AuroraServerApp:
 
         # ── PC 시작 시 자동 실행 ─────────────
         tk.Frame(port_row, bg=self.BORDER, width=max(1, _px(1)), height=_px(28)).pack(side="left", padx=_px(28))
-        tk.Label(port_row, text="자동 시작",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, _px(8)))
+        self._tip_key(tk.Label(port_row, text="자동 시작",
+                               font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
+                      "자동 시작").pack(side="left", padx=(0, _px(8)))
         self._autostart_btn = self._sec_btn(
             port_row,
             "ON  ●" if autostart_enabled() else "OFF ○",
@@ -841,8 +1000,9 @@ class AuroraServerApp:
         ver_title_cell = tk.Frame(ver_row, bg=self.PANEL, width=_px(92), height=_px(34))
         ver_title_cell.pack(side="left")
         ver_title_cell.pack_propagate(False)
-        tk.Label(ver_row, text="배포 버전명",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, _px(8)))
+        self._tip_key(tk.Label(ver_row, text="배포 버전명",
+                               font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
+                      "배포 버전명").pack(side="left", padx=(0, _px(8)))
         self._entry(ver_row, self.version_input_var, 25).pack(side="left", ipady=_px(1), padx=(0, _px(8)))
         self._sec_btn(ver_row, "적용", self._apply_version).pack(side="left", padx=(0, _px(8)))
         self._btn(ver_row, "전체 경로 적용", self.GREEN, self.GREEN_H,
@@ -854,6 +1014,7 @@ class AuroraServerApp:
         cur_tbl, cur_tb = self._table_card(parent, "현재 공정 IP 관리")
         cur_tbl.pack(side="bottom", fill="x", pady=(_px(14), 0))
         self.current_count_lbl = self._count_badge(cur_tb)
+        self._tip_key(self.current_count_lbl, "현재 공정 개수")
         cur_btn_row = tk.Frame(cur_tb, bg=self.PANEL)
         cur_btn_row.pack(side="right")
         self._sec_btn(cur_btn_row, "+ 추가", self._add_current_ip).pack(side="left", padx=(_px(8), 0))
@@ -867,6 +1028,7 @@ class AuroraServerApp:
         tbl_outer, all_tb = self._table_card(parent, "전체 공정 IP 관리")
         tbl_outer.pack(fill="both", expand=True, pady=(_px(14), 0))
         self.all_count_lbl = self._count_badge(all_tb)
+        self._tip_key(self.all_count_lbl, "전체 공정 개수")
         btn_row = tk.Frame(all_tb, bg=self.PANEL)
         btn_row.pack(side="right")
         self._sec_btn(btn_row, "새로고침", self._refresh_paths).pack(side="left", padx=(_px(8), 0))
@@ -934,21 +1096,25 @@ class AuroraServerApp:
                  text=self._dst_preview_text(),
                  font=self.FONT_MONO, fg=self.BLUE, bg=self.PANEL)
         self.deploy_dst_preview_lbl.pack(side="left")
+        self._tip_key(self.deploy_dst_preview_lbl, "저장 경로 미리보기")
 
         # 전체 진행률 (클라이언트 목록 위)
         prog_card = self._card(parent)
         prog_card.pack(fill="x", pady=(_px(14), 0))
         overall_wrap = tk.Frame(prog_card, bg=self.PANEL)
         overall_wrap.pack(fill="x", padx=_px(20), pady=_px(16))
-        tk.Label(overall_wrap, text="전체 진행률", font=self.FONT_TITLE,
-                 fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=(0, _px(14)))
+        self._tip_key(tk.Label(overall_wrap, text="전체 진행률", font=self.FONT_TITLE,
+                               fg=self.TEXT, bg=self.PANEL),
+                      "전체 진행률").pack(side="left", padx=(0, _px(14)))
         self.deploy_status_lbl = tk.Label(overall_wrap, text="",
                  font=self.FONT_SMALL, padx=_px(8), pady=_px(2), fg=self.TEXT_DIM, bg=self.PANEL,
                  wraplength=_px(460), justify="left")
         self.deploy_status_lbl.pack(side="right", padx=(_px(14), 0))
+        self._tip_key(self.deploy_status_lbl, "배포 상태 메시지")
         self.deploy_overall_lbl = tk.Label(overall_wrap, text="0 / 0",
                  font=self.FONT_MONO_BOLD, fg=self.TEXT, bg=self.PANEL, width=8, anchor="e")
         self.deploy_overall_lbl.pack(side="right", padx=(_px(14), 0))
+        self._tip_key(self.deploy_overall_lbl, "전체 진행률 수치")
         self.deploy_progress_overall = ttk.Progressbar(overall_wrap, orient="horizontal",
                                                        mode="determinate")
         self.deploy_progress_overall.pack(side="left", fill="x", expand=True)
@@ -985,8 +1151,9 @@ class AuroraServerApp:
 
         ctrl_row = tk.Frame(ctrl_body, bg=self.PANEL)
         ctrl_row.pack(fill="x")
-        tk.Label(ctrl_row, text="배포 소스 폴더",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, _px(8)))
+        self._tip_key(tk.Label(ctrl_row, text="배포 소스 폴더",
+                               font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
+                      "단일 배포 소스 폴더").pack(side="left", padx=(0, _px(8)))
 
         self.single_src_var = tk.StringVar()
         self._entry(ctrl_row, self.single_src_var, 58).pack(side="left", ipady=_px(1), padx=(0, _px(8)))
@@ -995,6 +1162,7 @@ class AuroraServerApp:
         self.single_status_lbl = tk.Label(ctrl_row, text="",
                  font=self.FONT_SMALL, padx=_px(8), pady=_px(2), fg=self.TEXT_DIM, bg=self.PANEL)
         self.single_status_lbl.pack(side="left")
+        self._tip_key(self.single_status_lbl, "단일 배포 상태 메시지")
         self._btn(ctrl_row, "▲ 배포하기", self.BTN_DEPLOY, self.BTN_DEPLOY_H,
                   self._single_deploy_cmd, padx=20, pady=9).pack(side="right")
 
@@ -1010,11 +1178,14 @@ class AuroraServerApp:
         ]):
             row = tk.Frame(prog_panel, bg=self.PANEL)
             row.grid(row=0, column=col, sticky="ew", padx=(0, _px(12)) if col == 0 else (_px(12), 0))
-            tk.Label(row, text=lbl_text, width=8, anchor="w",
-                     font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+            hint_key = "전체 배포" if attr_bar == "prog_all" else "단일 현재 공정"
+            self._tip_key(tk.Label(row, text=lbl_text, width=8, anchor="w",
+                                   font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
+                          hint_key).pack(side="left")
             cnt_lbl = tk.Label(row, text="0 / 0", width=8, anchor="e",
                                font=self.FONT_MONO_BOLD, fg=self.TEXT, bg=self.PANEL)
             cnt_lbl.pack(side="right", padx=(_px(10), 0))
+            self._tip_key(cnt_lbl, hint_key)
             bar = ttk.Progressbar(row, orient="horizontal", mode="determinate")
             bar.pack(side="left", fill="x", expand=True)
             setattr(self, attr_bar, bar)
@@ -1057,6 +1228,18 @@ class AuroraServerApp:
         self._rebuild_single_client_rows()
 
     # ── 공용 UI 헬퍼 ─────────────────────
+    def _tip(self, widget, text):
+        """위젯에 툴팁(설명)을 붙이고 위젯을 그대로 반환"""
+        _Tooltip(widget, text)
+        return widget
+
+    def _tip_key(self, widget, key: str):
+        """LABEL_HINTS 에서 key 의 설명을 찾아 툴팁으로 붙임 (없으면 붙이지 않음)"""
+        text = self.LABEL_HINTS.get(key)
+        if text:
+            _Tooltip(widget, text)
+        return widget
+
     def _card(self, parent, **kwargs) -> tk.Frame:
         """흰 배경 + 얇은 테두리 패널"""
         return tk.Frame(parent, bg=self.PANEL, highlightthickness=1,
@@ -1083,16 +1266,20 @@ class AuroraServerApp:
         cell = tk.Frame(parent, bg=self.PANEL, width=_px(116), height=_px(34))
         cell.pack(side="left")
         cell.pack_propagate(False)
-        tk.Label(cell, text=text, font=self.FONT, fg=self.TEXT_DIM,
-                 bg=self.PANEL).pack(side="left")
+        lbl = tk.Label(cell, text=text, font=self.FONT, fg=self.TEXT_DIM,
+                       bg=self.PANEL)
+        lbl.pack(side="left")
+        self._tip_key(lbl, text)
 
     def _table_card(self, parent, title: str):
         """표 카드 + 툴바(제목 왼쪽, 버튼은 호출부에서 오른쪽에 배치). (카드, 툴바) 반환"""
         card = self._card(parent)
         toolbar = tk.Frame(card, bg=self.PANEL)
         toolbar.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)))
-        tk.Label(toolbar, text=title, font=self.FONT_TITLE,
-                 fg=self.TEXT, bg=self.PANEL).pack(side="left")
+        title_lbl = tk.Label(toolbar, text=title, font=self.FONT_TITLE,
+                             fg=self.TEXT, bg=self.PANEL)
+        title_lbl.pack(side="left")
+        self._tip_key(title_lbl, title)
         # 버튼 높이(34)만큼 툴바 높이를 확보해 카드마다 높이를 통일
         tk.Frame(toolbar, bg=self.PANEL, width=1, height=_px(34)).pack(side="right")
         return card, toolbar
@@ -1136,6 +1323,7 @@ class AuroraServerApp:
             lbl = tk.Label(cell, text=text, font=self.FONT_SMALL, fg=self.TEXT_DIM,
                            bg=self.PANEL_ALT, anchor="w")
             lbl.pack(side="left")
+            self._tip_key(lbl, text)
             labels.append(lbl)
         return labels
 
@@ -1158,8 +1346,10 @@ class AuroraServerApp:
         card = self._card(parent, height=_px(height))
         card.pack(side="bottom", fill="x", pady=(_px(14), 0))
         card.pack_propagate(False)
-        tk.Label(card, text=title,
-                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(anchor="w", padx=_px(20), pady=(_px(16), _px(10)))
+        title_lbl = tk.Label(card, text=title,
+                             font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL)
+        title_lbl.pack(anchor="w", padx=_px(20), pady=(_px(16), _px(10)))
+        self._tip_key(title_lbl, title)
         log_inner = tk.Frame(card, bg=self.LOG_BG)
         log_inner.pack(fill="both", expand=True, padx=_px(20), pady=(0, _px(16)))
         text = tk.Text(log_inner, font=self.FONT_MONO, bg=self.LOG_BG,
@@ -1199,6 +1389,9 @@ class AuroraServerApp:
                 lbl = tk.Label(cell, text=val, font=self.FONT_MONO, anchor="w",
                                fg=self.TEXT if col == "ip" else self.TEXT_DIM, bg=row_bg)
             lbl.pack(side="left")
+            status_hint_key = {"online": "연결 상태", "aurora": "Aurora", "last": "마지막 응답", "ping": "핑"}.get(col)
+            if status_hint_key:
+                self._tip_key(lbl, status_hint_key)
             labels[col] = lbl
         return labels
 
@@ -1327,6 +1520,7 @@ class AuroraServerApp:
                 _lbl.config(text=new_name)
             labels["name"].bind("<Double-Button-1>", lambda e, f=_rename: f())
             labels["name"].config(cursor="hand2")
+            self._tip_key(labels["name"], "이름 변경")
 
             # ID / PW 입력
             saved = config.get("deploy_client_creds", {}).get(ip, {})
@@ -1358,6 +1552,7 @@ class AuroraServerApp:
                                 font=self.FONT_MONO, fg=self.TEXT if cur_path else self.TEXT_DIM,
                                 bg=row_bg)
             path_lbl.pack(side="left")
+            self._tip_key(path_lbl, "경로")
             labels["path"] = path_lbl
 
             self.client_rows[ip] = labels
@@ -1432,6 +1627,7 @@ class AuroraServerApp:
             prog_lbl = tk.Label(prog_cell, text="", font=self.FONT_MONO,
                                 fg=self.TEXT_DIM, bg=row_bg, width=6, anchor="e")
             prog_lbl.pack(side="right")
+            self._tip_key(prog_lbl, "진행률")
             prog = ttk.Progressbar(prog_cell, orient="horizontal", mode="determinate")
             prog.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
 
@@ -1439,6 +1635,7 @@ class AuroraServerApp:
             dst_lbl = tk.Label(dst_cell, text=dst_text, anchor="w",
                                font=self.FONT_MONO, fg=self.BLUE, bg=row_bg)
             dst_lbl.pack(side="left")
+            self._tip_key(dst_lbl, "저장 경로")
             self.deploy_dst_labels[ip] = dst_lbl
             self.deploy_row_progress[ip] = prog
             self.deploy_row_prog_lbl[ip] = prog_lbl
@@ -1590,6 +1787,7 @@ class AuroraServerApp:
             status_lbl = tk.Label(status_cell, text="", anchor="w",
                                   font=self.FONT_SMALL, padx=_px(8), pady=_px(2), fg=self.TEXT_DIM, bg=self.IDLE_BG)
             status_lbl.pack(side="left")
+            self._tip_key(status_lbl, "배포 상태")
             self._set_badge(status_lbl, "배포 예정", self.TEXT_DIM)
             self.single_client_status_lbls[ip] = status_lbl
 

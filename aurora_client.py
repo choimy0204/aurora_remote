@@ -727,7 +727,98 @@ def run_command_server():
 # ─────────────────────────────────────────
 # GUI
 # ─────────────────────────────────────────
+class _Tooltip:
+    """위젯에 마우스를 올리고 잠시 있으면 설명(hint)을 띄우는 툴팁. text 는 문자열 또는 callable"""
+    DELAY_MS = 500
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text   = text
+        self._after_id = None
+        self._tip = None
+        widget.bind("<Enter>",       self._schedule, add="+")
+        widget.bind("<Leave>",       self._hide,     add="+")
+        widget.bind("<ButtonPress>", self._hide,     add="+")
+        widget.bind("<Destroy>",     self._hide,     add="+")
+
+    def _schedule(self, event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.DELAY_MS, self._show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        self._after_id = None
+        if self._tip is not None:
+            return
+        text = self.text() if callable(self.text) else self.text
+        if not text:
+            return
+        try:
+            x, y = self.widget.winfo_pointerxy()
+            x += _px(12)
+            y += _px(18)
+            tip = tk.Toplevel(self.widget)
+            tip.wm_overrideredirect(True)
+            tip.attributes("-topmost", True)
+            tk.Label(tip, text=text, justify="left", wraplength=_px(320),
+                     font=("맑은 고딕", 9), fg="#FFFFFF", bg="#1D2327",
+                     padx=_px(10), pady=_px(6), bd=0).pack()
+            tip.update_idletasks()
+            # 화면 오른쪽/아래를 넘으면 안쪽으로 당김
+            x = max(0, min(x, tip.winfo_screenwidth()  - tip.winfo_reqwidth()))
+            y = max(0, min(y, tip.winfo_screenheight() - tip.winfo_reqheight()))
+            tip.wm_geometry(f"+{x}+{y}")
+            self._tip = tip
+        except tk.TclError:
+            self._tip = None
+
+    def _hide(self, event=None):
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+
 class AuroraClientApp:
+
+    # ── 라벨 설명(hint) ──────────────────
+    # 섹션 제목(_section_title) / 필드 이름(_field_label) 텍스트 기준으로 자동 부착
+    LABEL_HINTS = {
+        "서버 IP 목록": "상태를 보고할 서버 IP 목록입니다. 추가·삭제하면 바로 설정 파일에 저장되고 다음 보고부터 반영됩니다. 핑 결과 표시 줄은 프로그램을 다시 시작해야 갱신됩니다.",
+        "핑 모드": "등록된 서버 IP별 핑 응답 시간을 보여 줍니다. Manual/Auto 모드는 서버가 변경하며 이 화면에서는 바꿀 수 없습니다. Auto 는 5초마다 측정하고, Manual 은 서버가 ping 명령을 보낼 때만 측정합니다.",
+        "서버 포트": "서버로 상태를 보고할 때 쓰는 서버 쪽 포트입니다(기본 9000). 1024~65535 범위이며 '적용' 후 프로그램을 다시 시작해야 반영됩니다.",
+        "수신 포트": "서버 명령(start/stop/setpath/ping/setpingmode)과 반출 요청을 받는 이 PC의 포트입니다(기본 9001). 1024~65535 범위이며 '적용' 후 프로그램을 다시 시작해야 반영됩니다.",
+        "자동 시작": "PC에 로그인할 때 이 클라이언트를 자동 실행하도록 현재 사용자(HKCU)의 Run 레지스트리에 등록하거나 해제합니다. 패키징된 exe 는 시작할 때마다 스스로 다시 등록하므로, OFF 로 해도 다음 실행 때 등록될 수 있습니다.",
+        "수동 제어": "서버 명령과 별개로 이 PC에서 Aurora 를 직접 실행·종료하는 긴급용 영역입니다. 실행은 이미 켜져 있으면 하지 않고, 종료는 실행 경로의 exe 와 이름이 같은 프로세스를 모두 강제 종료합니다.",
+        "LOG": "명령 수신, 서버 추가·삭제, 포트·경로 변경 등 클라이언트 동작 기록입니다. 최근 40줄만 표시합니다.",
+        "실행 프로그램": "서버 명령이나 수동 제어로 실행·종료할 Aurora 프로그램을 지정하는 영역입니다.",
+        "실행 경로": "Aurora 실행 파일 경로입니다. .exe 로 끝나면 그대로, 폴더만 입력하면 '폴더\\폴더이름.exe' 를 실행합니다. 이 exe 이름으로 실행 여부를 감시하고 종료도 합니다. '적용'으로 저장하며, 배포 후에는 서버가 setpath 명령으로 갱신합니다.",
+        "프로세스 종료 목록": "강제 종료할 프로세스의 exe 이름을 등록하는 목록입니다. 이름 뒤에 .exe 가 없으면 자동으로 붙습니다. 체크한 항목을 아래 '선택 프로세스 종료', 목록 전체를 '전체 종료'로 종료합니다.",
+        "자동 삭제 규칙": "폴더 안의 오래된 파일 또는 날짜 폴더를 자동 삭제하는 규칙 목록입니다. ON 체크와 '적용'이 모두 된 규칙만 날짜가 바뀔 때(자정) 실행되며, '지금 실행'으로 즉시 실행할 수도 있습니다.",
+        "삭제 LOG": "자동 삭제 실행 내역(삭제한 파일·폴더, 건너뜀, 오류)을 시각과 함께 기록합니다.",
+        "반출 LOG": "중계 PC 연결 상태, 장비 검색, 파일 반출 진행·완료·실패·취소 내역을 기록합니다.",
+        "저장 폴더": "반출한 파일을 받을 내 PC의 폴더입니다. 실제로는 '저장 폴더\\장비이름 (IP)\\' 아래에 저장됩니다. 파일은 4개까지 동시에 받고, 취소하면 받던 파일이 .part 로 남아 다음에 이어받습니다.",
+        "중계 PC": "직접 연결되지 않는 장비의 파일을 가져올 때 거치는 중계 PC(LHS)의 IP 입니다. '적용'으로 저장하며, 5초마다 연결을 확인하고 연결되면 장비를 자동으로 검색합니다. 모든 PC 의 export_key 가 같아야 연결됩니다.",
+        "장비": "중계 PC 가 자기 네트워크 대역(/24)을 스캔해 찾은 클라이언트 목록입니다. [중계]는 중계 PC 자신입니다. 장비를 고르면 허용 경로(D 드라이브·바탕화면)만 탐색할 수 있으며, '이름' 버튼으로 표시 이름을 바꿀 수 있습니다.",
+    }
+
+    # 탭 이름별 설명 (탭 순서: 설정 / 프로세스 관리 / 자동 삭제 / 반출)
+    TAB_HINTS = [
+        "서버 연결과 Aurora 상태 확인, 서버 IP·포트 설정, 자동 시작, 수동 실행/종료를 하는 탭입니다. 설정은 D:\\RemoteConfig\\client_config.json 에 저장됩니다.",
+        "Aurora 실행 경로를 지정하고, 등록한 exe 이름의 프로세스를 강제 종료하는 탭입니다.",
+        "규칙(폴더·확장자·기한·ON)에 따라 오래된 파일이나 날짜 폴더를 날짜가 바뀔 때(자정) 자동 삭제하는 탭입니다.",
+        "중계 PC(LHS)를 거쳐 직접 연결되지 않는 장비의 파일을 내 PC로 가져오는 탭입니다. D 드라이브와 바탕화면만 접근할 수 있습니다.",
+    ]
 
     # ── 색상 ─────────────────────────────
     BG       = "#F3F5F7"
@@ -845,9 +936,17 @@ class AuroraClientApp:
         return tk.Frame(parent, bg=self.PANEL, highlightthickness=1,
                         highlightbackground=self.BORDER, highlightcolor=self.BORDER)
 
+    def _tip(self, widget, text):
+        """위젯에 마우스 오버 설명(hint) 부착. widget 을 그대로 반환"""
+        _Tooltip(widget, text)
+        return widget
+
     def _section_title(self, parent, text, bg=None):
-        return tk.Label(parent, text=text, font=self.FONT_TITLE,
-                        fg=self.TEXT, bg=bg or self.PANEL)
+        lbl = tk.Label(parent, text=text, font=self.FONT_TITLE,
+                       fg=self.TEXT, bg=bg or self.PANEL)
+        if text in self.LABEL_HINTS:
+            self._tip(lbl, self.LABEL_HINTS[text])
+        return lbl
 
     def _entry(self, parent, var, width, font=None):
         return tk.Entry(parent, textvariable=var, font=font or self.FONT_INPUT,
@@ -859,8 +958,11 @@ class AuroraClientApp:
                         width=width)
 
     def _field_label(self, parent, text, width=12):
-        return tk.Label(parent, text=text, width=width, anchor="w",
-                        font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL)
+        lbl = tk.Label(parent, text=text, width=width, anchor="w",
+                       font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL)
+        if text in self.LABEL_HINTS:
+            self._tip(lbl, self.LABEL_HINTS[text])
+        return lbl
 
     def _running_style(self, is_running: bool) -> dict:
         """실행중/중지 표시용 label 옵션"""
@@ -932,8 +1034,10 @@ class AuroraClientApp:
             name_padx = (0, 0)
         tk.Label(header, text="Aurora Client",
                  font=self.FONT_HEAD, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=name_padx)
-        tk.Label(header, text=self.my_ip,
-                 font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="right", padx=_px(18))
+        self._tip(tk.Label(header, text=self.my_ip,
+                           font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.PANEL),
+                  "이 PC의 IP 입니다. 첫 번째 등록 서버로 연결할 때 사용되는 로컬 주소이며, 프로그램 시작 시 한 번 확인합니다. 확인하지 못하면 '알 수 없음'으로 표시됩니다."
+                  ).pack(side="right", padx=_px(18))
 
         # 탭바
         tabbar = tk.Frame(self.root, bg=self.PANEL)
@@ -955,6 +1059,7 @@ class AuroraClientApp:
             line = tk.Frame(cell, bg=self.PANEL, height=_px(2))
             line.pack(fill="x")
             lbl.bind("<Button-1>", lambda e, n=i: self._select_tab(n))
+            self._tip(lbl, self.TAB_HINTS[i])
             self._tab_labels.append(lbl)
             self._tab_lines.append(line)
             self._tab_frames.append(tk.Frame(content, bg=self.BG, padx=_px(18), pady=_px(16)))
@@ -985,16 +1090,23 @@ class AuroraClientApp:
         st_in.pack(fill="x", padx=_px(20), pady=_px(16))
         for c in range(3):
             st_in.columnconfigure(c, weight=1, uniform="stat")
+        stat_hints = {
+            "server_lbl": "이 PC가 등록된 모든 서버 IP 의 서버 포트(기본 9000)로 3초마다 상태를 보고한 결과입니다. 전부 성공하면 '전체 연결됨', 일부만 성공하면 '성공 수/전체 연결됨', 하나도 성공하지 못하면 '연결 안됨'으로 표시합니다.",
+            "aurora_lbl": "실행 경로에 지정한 exe 와 이름이 같은 프로세스가 켜져 있는지 3초마다 확인한 결과입니다. 이 값이 서버로 보고됩니다.",
+            "cmd_lbl": "서버에서 마지막으로 받은 START/STOP 명령입니다. 명령은 수신 포트(기본 9001)로 들어오며, 프로그램을 시작한 뒤 받은 명령이 없으면 '—' 입니다.",
+        }
         for col, (label, attr) in enumerate([("서버 연결", "server_lbl"),
                                               ("Aurora 상태", "aurora_lbl"),
                                               ("마지막 명령", "cmd_lbl")]):
             tile = tk.Frame(st_in, bg=self.PANEL_ALT, highlightthickness=1,
                             highlightbackground=self.BORDER, highlightcolor=self.BORDER)
             tile.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else _px(8), 0))
-            tk.Label(tile, text=label, anchor="w", font=self.FONT,
-                     fg=self.TEXT_DIM, bg=self.PANEL_ALT).pack(fill="x", padx=_px(12), pady=(_px(10), 0))
-            lbl = tk.Label(tile, text="—", anchor="w",
-                           font=self.FONT_VALUE, fg=self.TEXT, bg=self.PANEL_ALT)
+            self._tip(tk.Label(tile, text=label, anchor="w", font=self.FONT,
+                               fg=self.TEXT_DIM, bg=self.PANEL_ALT),
+                      stat_hints[attr]).pack(fill="x", padx=_px(12), pady=(_px(10), 0))
+            lbl = self._tip(tk.Label(tile, text="—", anchor="w",
+                                     font=self.FONT_VALUE, fg=self.TEXT, bg=self.PANEL_ALT),
+                            stat_hints[attr])
             lbl.pack(fill="x", padx=_px(12), pady=(_px(4), _px(10)))
             setattr(self, attr, lbl)
 
@@ -1058,10 +1170,13 @@ class AuroraClientApp:
                 tk.Frame(pf, bg=self.ROW_LINE, height=max(1, _px(1))).pack(fill="x")
             row = tk.Frame(pf, bg=self.PANEL)
             row.pack(fill="x", pady=_px(6))
-            tk.Label(row, text=ip, anchor="w", font=self.FONT_MONO,
-                     fg=self.TEXT, bg=self.PANEL).pack(side="left")
-            lbl = tk.Label(row, text="—", anchor="e",
-                           font=self.FONT_MONO_BOLD, fg=self.TEXT, bg=self.PANEL)
+            self._tip(tk.Label(row, text=ip, anchor="w", font=self.FONT_MONO,
+                               fg=self.TEXT, bg=self.PANEL),
+                      "핑 응답 시간을 측정하는 서버 IP 입니다."
+                      ).pack(side="left")
+            lbl = self._tip(tk.Label(row, text="—", anchor="e",
+                                     font=self.FONT_MONO_BOLD, fg=self.TEXT, bg=self.PANEL),
+                            "서버까지의 핑 응답 시간입니다. 10ms 미만은 초록, 50ms 미만은 노랑, 그 이상은 빨강이며 응답이 없으면 '시간초과'(빨강)입니다. 측정 전에는 '—' 입니다.")
             lbl.pack(side="right")
             self._ping_result_labels[ip] = lbl
 
@@ -1087,8 +1202,9 @@ class AuroraClientApp:
             auto_row, "OFF ○", "secondary", self._toggle_autostart)
         self._style_autostart_btn(autostart_enabled())
         self._autostart_btn.pack(side="left")
-        tk.Label(auto_row, text="  PC 시작 시 클라이언트 자동 실행",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+        self._tip(tk.Label(auto_row, text="  PC 시작 시 클라이언트 자동 실행",
+                           font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
+                  self.LABEL_HINTS["자동 시작"]).pack(side="left")
 
         # 수동 제어
         mf = self._card(parent)
@@ -1096,8 +1212,9 @@ class AuroraClientApp:
         mf_in = tk.Frame(mf, bg=self.PANEL)
         mf_in.pack(fill="x", padx=_px(20), pady=_px(16))
         self._section_title(mf_in, "수동 제어").pack(side="left")
-        tk.Label(mf_in, text=" (긴급용)", font=self.FONT,
-                 fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+        self._tip(tk.Label(mf_in, text=" (긴급용)", font=self.FONT,
+                           fg=self.TEXT_DIM, bg=self.PANEL),
+                  self.LABEL_HINTS["수동 제어"]).pack(side="left")
         self._button(mf_in, "■  프로그램 종료", "stop",
                      self._manual_stop).pack(side="right")
         self._button(mf_in, "▶  프로그램 실행", "start",
@@ -1148,8 +1265,10 @@ class AuroraClientApp:
         kill_entry = self._entry(add_row, self._kill_input_var, 28)
         kill_entry.pack(side="left", ipady=_px(1), padx=(0, _px(8)))
         kill_entry.bind("<Return>", lambda e: self._add_kill_process())
-        tk.Label(add_row, text="예: notepad.exe",
-                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, _px(10)))
+        self._tip(tk.Label(add_row, text="예: notepad.exe",
+                           font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL),
+                  "입력 예시입니다. 종료할 프로세스의 exe 이름을 입력하고 '+ 추가'(또는 Enter)를 누르면 목록에 저장됩니다. .exe 를 생략하면 자동으로 붙습니다."
+                  ).pack(side="left", padx=(0, _px(10)))
         self._button(add_row, "− 삭제", "danger", self._del_kill_process).pack(side="right")
         self._button(add_row, "+ 추가", "primary", self._add_kill_process).pack(side="right", padx=(0, _px(8)))
 
@@ -1170,12 +1289,14 @@ class AuroraClientApp:
         col_hdr = tk.Frame(kill_panel, bg=self.PANEL_ALT)
         col_hdr.pack(fill="x")
         self._configure_kill_grid(col_hdr)
-        tk.Label(col_hdr, text="프로세스 이름", anchor="w", font=self.FONT_SMALL,
-                 fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=_px(8)
-                 ).grid(row=0, column=1, sticky="w", padx=(0, _px(8)))
-        tk.Label(col_hdr, text="상태", anchor="w", font=self.FONT_SMALL,
-                 fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=_px(8)
-                 ).grid(row=0, column=2, sticky="w")
+        self._tip(tk.Label(col_hdr, text="프로세스 이름", anchor="w", font=self.FONT_SMALL,
+                           fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=_px(8)),
+                  "종료 대상으로 등록한 프로세스의 exe 이름입니다. 왼쪽 체크박스로 선택한 항목이 '선택 프로세스 종료'와 '− 삭제'의 대상입니다."
+                  ).grid(row=0, column=1, sticky="w", padx=(0, _px(8)))
+        self._tip(tk.Label(col_hdr, text="상태", anchor="w", font=self.FONT_SMALL,
+                           fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=_px(8)),
+                  "해당 이름의 프로세스가 지금 실행 중인지 보여 줍니다(● 실행중 / ○ 중지). 자동으로 갱신되지 않으며 목록을 다시 만들 때, 종료 직후, '새로고침'을 누를 때 갱신됩니다."
+                  ).grid(row=0, column=2, sticky="w")
 
         self._kill_rows_frame = tk.Frame(kill_panel, bg=self.PANEL)
         self._kill_rows_frame.pack(fill="both", expand=True)
@@ -1197,9 +1318,11 @@ class AuroraClientApp:
 
         procs = config.get("kill_processes", [])
         if not procs:
-            tk.Label(self._kill_rows_frame, text="등록된 프로세스가 없습니다.",
-                     font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL,
-                     pady=_px(12)).pack(anchor="w", padx=_px(12))
+            self._tip(tk.Label(self._kill_rows_frame, text="등록된 프로세스가 없습니다.",
+                               font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL,
+                               pady=_px(12)),
+                      "종료할 프로세스가 아직 없습니다. 위 입력란에 exe 이름을 넣고 '+ 추가'를 누르세요."
+                      ).pack(anchor="w", padx=_px(12))
             return
 
         running_map = get_running_processes(procs)
@@ -1215,11 +1338,13 @@ class AuroraClientApp:
                            activebackground=self.PANEL, selectcolor=self.PANEL, bd=0
                            ).grid(row=0, column=0, padx=(_px(14), 0))
 
-            tk.Label(row, text=name, anchor="w",
-                     font=self.FONT_INPUT, fg=self.TEXT, bg=self.PANEL
-                     ).grid(row=0, column=1, sticky="w", padx=(0, _px(8)))
+            self._tip(tk.Label(row, text=name, anchor="w",
+                               font=self.FONT_INPUT, fg=self.TEXT, bg=self.PANEL),
+                      "종료 대상으로 등록된 프로세스 이름입니다. 종료하면 이 이름의 프로세스가 모두 강제 종료됩니다."
+                      ).grid(row=0, column=1, sticky="w", padx=(0, _px(8)))
 
             status_lbl = self._make_badge(row, "", self.TEXT_DIM)
+            self._tip(status_lbl, "이 프로세스의 실행 여부입니다(● 실행중 / ○ 중지). '새로고침'을 누르거나 종료한 직후에 갱신됩니다.")
             self._set_badge(status_lbl, **self._running_style(running_map.get(name, False)))
             status_lbl.grid(row=0, column=2, sticky="w")
             self._kill_status_lbls[name] = status_lbl
@@ -1305,10 +1430,13 @@ class AuroraClientApp:
 
         pb_top = tk.Frame(pb_frame, bg=self.PANEL)
         pb_top.pack(fill="x", padx=_px(20), pady=_px(16))
-        tk.Label(pb_top, text="다음 자동 삭제까지",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
-        self.delete_countdown_lbl = tk.Label(pb_top, text="—",
-                 font=self.FONT_COUNTDOWN, fg=self.BLUE, bg=self.PANEL)
+        countdown_hint = ("자동 삭제가 실행될 때까지 남은 시간(시:분:초)입니다. 자동 삭제는 날짜가 바뀔 때(자정) 실행됩니다. "
+                          "'지금 실행'을 누르면 표시만 24시간으로 다시 시작하며 실제 자정 실행 시각은 바뀌지 않습니다.")
+        self._tip(tk.Label(pb_top, text="다음 자동 삭제까지",
+                           font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
+                  countdown_hint).pack(side="left")
+        self.delete_countdown_lbl = self._tip(tk.Label(pb_top, text="—",
+                 font=self.FONT_COUNTDOWN, fg=self.BLUE, bg=self.PANEL), countdown_hint)
         self.delete_countdown_lbl.pack(side="left", padx=_px(12))
 
         self.delete_progress = ttk.Progressbar(pb_top, orient="horizontal",
@@ -1335,8 +1463,9 @@ class AuroraClientApp:
         bot = tk.Frame(bot_bar, bg=self.PANEL)
         bot.pack(fill="x", padx=_px(20), pady=_px(16))
         self._button(bot, "지금 실행", "primary", self._run_delete_now).pack(side="left")
-        self.delete_status_lbl = tk.Label(bot, text="",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL)
+        self.delete_status_lbl = self._tip(tk.Label(bot, text="",
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL),
+                 "'지금 실행'의 진행 상태입니다. 실행 중에는 '실행 중...', 끝나면 '✓ 완료'로 표시됩니다. 삭제 내역은 '삭제 LOG'에서 확인하세요.")
         self.delete_status_lbl.pack(side="left", padx=_px(10))
 
         # 컬럼 헤더 (스크롤바 폭만큼 우측 여백)
@@ -1345,10 +1474,17 @@ class AuroraClientApp:
         col_in = tk.Frame(col, bg=self.PANEL_ALT)
         col_in.pack(side="left", fill="x", expand=True, padx=_px(14))
         self._configure_delete_grid(col_in)
+        delete_col_hints = {
+            "ON": "규칙 사용 여부입니다. 체크를 해제하면 '적용됨'이어도 자동 삭제와 '지금 실행'에서 이 규칙은 건너뜁니다.",
+            "폴더 경로": "삭제 대상을 찾을 폴더입니다. 이 폴더 바로 아래 항목만 검사하며 하위 폴더 안의 파일은 보지 않습니다. 폴더가 없으면 로그에 '폴더 없음'만 남깁니다.",
+            "확장자": "파일 삭제 모드에서 삭제할 파일의 확장자입니다(예: log, 앞의 점은 생략 가능). '폴더삭제'를 체크하면 사용하지 않아 입력이 비활성화됩니다.",
+            "기한(일)": "이 일수 이상 지난 항목을 삭제합니다. 파일은 최종 수정일, 폴더는 폴더 이름에 든 날짜를 기준으로 하며, 0 이하이면 삭제하지 않습니다.",
+            "폴더삭제": "체크하면 폴더 경로 바로 아래의 하위 폴더를 통째로 삭제합니다. 폴더 이름에 yyyyMMdd(8자리) 또는 yyMMdd(6자리) 날짜가 있어야 하며, 날짜가 없는 폴더와 현재 Aurora 경로가 들어 있는 폴더는 건드리지 않습니다.",
+        }
         for i, text in enumerate(["ON", "폴더 경로", "확장자", "기한(일)", "폴더삭제"]):
-            tk.Label(col_in, text=text, anchor="w", font=self.FONT_SMALL,
-                     fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=_px(8)
-                     ).grid(row=0, column=i, sticky="w", padx=_px(2))
+            self._tip(tk.Label(col_in, text=text, anchor="w", font=self.FONT_SMALL,
+                               fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=_px(8)),
+                      delete_col_hints[text]).grid(row=0, column=i, sticky="w", padx=_px(2))
 
         # 규칙 목록 (스크롤)
         list_outer = tk.Frame(rules_card, bg=self.PANEL)
@@ -1430,7 +1566,8 @@ class AuroraClientApp:
 
         # ── 적용 버튼 + 상태 표시 ─────────────
         applied_init = rule.get("applied", False)
-        status_lbl = tk.Label(row1, font=self.FONT_SMALL, padx=_px(6), pady=_px(2))
+        status_lbl = self._tip(tk.Label(row1, font=self.FONT_SMALL, padx=_px(6), pady=_px(2)),
+                               "'적용됨' 규칙만 자동 삭제가 실행됩니다. 폴더 경로·확장자(파일 모드)·폴더삭제를 바꾸면 '미적용'으로 돌아가므로 '적용'을 다시 눌러야 합니다.")
         self._set_badge(status_lbl,
                         "적용됨" if applied_init else "미적용",
                         self.GREEN if applied_init else self.RED)
@@ -1481,9 +1618,10 @@ class AuroraClientApp:
         row2 = tk.Frame(item, bg=bg)
         row2.pack(fill="x")
         last_del_text = rule.get("last_deleted", "")
-        last_del_lbl = tk.Label(row2,
+        last_del_lbl = self._tip(tk.Label(row2,
                                 text=f"마지막 삭제: {last_del_text}" if last_del_text else "마지막 삭제: —",
-                                font=self.FONT_MONO_SMALL, fg=self.TEXT_DIM, bg=bg)
+                                font=self.FONT_MONO_SMALL, fg=self.TEXT_DIM, bg=bg),
+                                "이 규칙이 마지막으로 항목을 삭제한 시각입니다. 삭제된 항목이 없던 실행은 기록하지 않으며, 폴더 경로를 바꾸면 초기화됩니다.")
         last_del_lbl.pack(anchor="w", padx=(_px(48), _px(14)), pady=(_px(4), _px(10)))
         widget_info["last_del_lbl"] = last_del_lbl
         last_del_lbl.master = row2
@@ -1629,8 +1767,9 @@ class AuroraClientApp:
         self._exp_progress = ttk.Progressbar(row2, orient="horizontal", maximum=1, value=0,
                                              style="Countdown.Horizontal.TProgressbar")
         self._exp_progress.pack(side="top", fill="x", padx=(0, _px(12)), pady=(_px(4), _px(4)))
-        self._exp_prog_lbl = tk.Label(row2, text="대기", anchor="w",
-                                      font=self.FONT_MONO_SMALL, fg=self.TEXT_DIM, bg=self.PANEL)
+        self._exp_prog_lbl = self._tip(tk.Label(row2, text="대기", anchor="w",
+                                      font=self.FONT_MONO_SMALL, fg=self.TEXT_DIM, bg=self.PANEL),
+                                      "반출 진행 상황입니다. 받은 파일 수/전체 파일 수, 받은 용량/전체 용량, 전송 속도, 실패한 파일 수(있을 때)를 보여 줍니다. 파일은 4개까지 동시에 받습니다.")
         self._exp_prog_lbl.pack(side="top", fill="x")
 
         # ── 연결 카드 (상단) ──
@@ -1642,7 +1781,8 @@ class AuroraClientApp:
         self._exp_relay_var = tk.StringVar(value=config.get("export_relay"))
         self._entry(r1, self._exp_relay_var, 18).pack(side="left", ipady=_px(1), padx=(0, _px(8)))
         self._button(r1, "적용", "primary", self._export_apply_relay).pack(side="left")
-        self._exp_conn_lbl = self._make_badge(r1, "○ 확인 중", self.TEXT_DIM)
+        self._exp_conn_lbl = self._tip(self._make_badge(r1, "○ 확인 중", self.TEXT_DIM),
+                                       "중계 PC 연결 상태입니다. 5초마다 확인하며 연결되면 '● 연결됨 (호스트 이름)'과 함께 장비를 자동 검색합니다. '키 불일치'는 PC마다 export_key 설정이 달라 거부된 경우입니다. 연결되지 않으면 장비 검색·반출이 비활성화됩니다.")
         self._exp_conn_lbl.pack(side="right")
 
         r2 = tk.Frame(conn, bg=self.PANEL)
@@ -1666,8 +1806,9 @@ class AuroraClientApp:
         self._button(nav, "↑ 상위", "secondary", self._export_up, small=True).pack(side="left", padx=(0, _px(8)))
         self._button(nav, "새로고침", "secondary",
                      lambda: self._export_nav(self._exp_path), small=True).pack(side="right")
-        self._exp_path_lbl = tk.Label(nav, text="장비를 선택하세요", anchor="w",
-                                      font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.PANEL)
+        self._exp_path_lbl = self._tip(tk.Label(nav, text="장비를 선택하세요", anchor="w",
+                                      font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.PANEL),
+                                      "선택한 장비에서 현재 보고 있는 경로입니다. 처음에는 접근 가능한 허용 경로(D 드라이브·바탕화면)가 나오고, 그 밖의 경로는 열 수 없습니다. 폴더를 더블클릭하면 안으로 들어갑니다.")
         self._exp_path_lbl.pack(side="left", fill="x", expand=True)
 
         tree_wrap = tk.Frame(browse, bg=self.PANEL)
