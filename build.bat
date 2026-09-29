@@ -38,6 +38,11 @@ if not "%RC_S: =%"=="0" ( echo [FAIL] AuroraServer - log: & type "%ROOT%build_se
 if not "%RC_C: =%"=="0" ( echo [FAIL] AuroraClient - log: & type "%ROOT%build_client.log" & set FAIL=1 )
 rem 사용 매뉴얼 + version.json(자동 업데이트 기준)을 최신 폴더에 함께 넣음
 if "%FAIL%"=="0" copy /y "%ROOT%Aurora_사용매뉴얼.md" "%ROOT%dist\latest\" >nul
+rem deploy 용 AuroraDeploy.exe (Python 없는 PC 에서 실행) - deploy_remote.py 가 바뀌었거나 exe 가 없을 때만
+if "%FAIL%"=="0" "%PY%" -c "import os,sys;e=r'%ROOT%dist\latest\AuroraDeploy.exe';s=r'%ROOT%tools\deploy_remote.py';sys.exit(0 if os.path.exists(e) and os.path.getmtime(e)>os.path.getmtime(s) else 1)" || (
+    echo Building AuroraDeploy...
+    "%PY%" -m PyInstaller "%ROOT%tools\deploy_remote.py" --onefile --console --name AuroraDeploy --distpath "%ROOT%dist\latest" --workpath "%ROOT%build_deploy" --specpath "%ROOT%build_deploy" --noconfirm --log-level WARN > "%ROOT%build_deploy.log" 2>&1 || ( echo [FAIL] AuroraDeploy - log: & type "%ROOT%build_deploy.log" & set FAIL=1 )
+)
 if "%FAIL%"=="0" "%PY%" "%ROOT%tools\release.py" manifest
 if "%FAIL%"=="0" echo Done! Check: %ROOT%dist\latest\  (이 폴더 내용을 D:\RemoteConfig\Update 에 넣으면 자동 업데이트)
 if /i not "%~1"=="nopause" pause

@@ -27,7 +27,10 @@ import threading
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
+FROZEN     = getattr(sys, "frozen", False)   # AuroraDeploy.exe (Python 없는 PC 용)
 ROOT       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# exe 는 dist\latest 안에 AuroraClient/Server.exe 와 함께 있으므로 자기 폴더가 원본
+DEFAULT_SRC = os.path.dirname(sys.executable) if FROZEN else os.path.join(ROOT, "dist", "latest")
 CONFIG_DIR = r"D:\RemoteConfig"
 CLIENT_EXE = "AuroraClient.exe"
 SERVER_EXE = "AuroraServer.exe"
@@ -159,7 +162,7 @@ def main():
         pass
     ap = argparse.ArgumentParser(description="Aurora 원격 설치/갱신")
     ap.add_argument("ips", nargs="*", help="대상 IP (생략 시 서버 설정의 클라이언트 전체)")
-    ap.add_argument("--src", default=os.path.join(ROOT, "dist", "latest"), help="exe 원본 폴더")
+    ap.add_argument("--src", default=DEFAULT_SRC, help="exe 원본 폴더")
     ap.add_argument("--dry", action="store_true", help="복사 없이 계획만 표시")
     ap.add_argument("--overwrite-config", action="store_true", help="대상 PC 의 RemoteConfig json 덮어쓰기")
     ap.add_argument("-y", "--yes", action="store_true", help="확인 없이 진행")
@@ -201,4 +204,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        if FROZEN:   # 더블클릭 실행 시 결과를 보기 전에 창이 닫히지 않게
+            try:
+                input("\n엔터를 누르면 창을 닫습니다...")
+            except Exception:
+                pass
