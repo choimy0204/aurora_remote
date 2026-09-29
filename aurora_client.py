@@ -30,7 +30,7 @@ from PIL import Image as PILImage
 from PIL import ImageTk
 import aurora_update
 
-APP_VERSION = "2.8.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.9.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -531,6 +531,35 @@ def export_discover(force: bool = False) -> list[dict]:
         return found
 
 
+class _BodyReader:
+    """스트림에서 정해진 길이만큼만 읽는 파일 객체 — 반입 업로드·중계용 (requests 가 Content-Length 를 유지)
+    on_chunk(n) 로 진행량 통지, on_chunk 가 예외를 던지면 전송 중단"""
+    def __init__(self, src, length: int, on_chunk=None):
+        self._src, self._len, self._left, self._on = src, length, length, on_chunk
+
+    def __len__(self):
+        return self._len
+
+    def __iter__(self):
+        while True:
+            chunk = self.read(EXPORT_CHUNK)
+            if not chunk:
+                return
+            yield chunk
+
+    def read(self, n=-1):
+        if self._left <= 0:
+            return b""
+        n = self._left if n is None or n < 0 else min(n, self._left)
+        chunk = self._src.read(n)
+        if not chunk:   # 약속한 길이보다 짧음 → 받는 쪽이 무한 대기하지 않도록 끊음
+            raise IOError("전송이 중간에 끊겼습니다")
+        self._left -= len(chunk)
+        if self._on:
+            self._on(len(chunk))
+        return chunk
+
+
 class CommandHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
 
@@ -636,6 +665,86 @@ class CommandHandler(BaseHTTPRequestHandler):
             self.end_headers()
             for chunk in r.raw.stream(EXPORT_CHUNK, decode_content=False):
                 self.wfile.write(chunk)
+
+    # ── 반입 API (PUT) — 반출과 같은 키·허용 경로(D 드라이브·바탕화면)만 ──
+    def do_PUT(self):
+        import hmac
+        key = config.get("export_key", "")
+        if not key or not hmac.compare_digest(self.headers.get(EXPORT_KEY_HEADER, ""), key):
+            return self._send_json({"error": "인증 실패 (반출 키 불일치)"}, 403)
+
+        parsed = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        try:
+            if q.get("via"):
+                return self._relay_put(parsed, q)
+            path = export_resolve(q.get("path", ""))
+            if path is None:
+                return self._send_json({"error": "허용되지 않은 경로 (D 드라이브·바탕화면만 가능)"}, 403)
+            if parsed.path == "/fs/mkdir":
+                os.makedirs(path, exist_ok=True)
+                return self._send_json({"ok": True})
+            if parsed.path == "/fs/upload":
+                return self._recv_file(path, q)
+            self._send_json({"error": "not found"}, 404)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except Exception as e:
+            try:
+                self._send_json({"error": str(e)}, 500)
+            except Exception:
+                pass
+
+    def _recv_file(self, path: str, q: dict):
+        """받은 본문을 .part 에 쓴 뒤 완료되면 교체 (중간에 끊기면 .part 삭제 → 기존 파일 유지)"""
+        length = int(self.headers.get("Content-Length", "-1") or -1)
+        if length < 0:
+            return self._send_json({"error": "Content-Length 없음"}, 411)
+        if os.path.isdir(path):
+            return self._send_json({"error": "같은 이름의 폴더가 있습니다"}, 400)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        part = path + ".part"
+        try:
+            with open(part, "wb") as f:
+                for chunk in _BodyReader(self.rfile, length):
+                    f.write(chunk)
+            os.replace(part, path)
+        except Exception:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+            raise
+        try:
+            mtime = float(q.get("mtime", ""))
+            os.utime(path, (mtime, mtime))
+        except (ValueError, OSError):
+            pass
+        if app_instance:
+            app_instance.add_log(f"📥 반입: {self.client_address[0]} → {path}")
+        self._send_json({"ok": True, "size": length})
+
+    def _relay_put(self, parsed, q: dict):
+        """via 의 첫 IP 로 업로드 본문을 그대로 흘려 보냄 (디스크 저장 없음)"""
+        hops = [h for h in q.pop("via").split(",") if h.strip()]
+        peer = _export_peer(hops[0])
+        if peer is None:
+            return self._send_json({"error": f"중계 대상 IP 오류: {hops[0]}"}, 400)
+        if hops[1:]:
+            q["via"] = ",".join(hops[1:])
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        try:
+            r = requests.put(f"http://{peer}{parsed.path}?{urlencode(q)}",
+                             data=_BodyReader(self.rfile, length) if length else b"",
+                             headers={EXPORT_KEY_HEADER: self.headers.get(EXPORT_KEY_HEADER, "")},
+                             timeout=(3, 120))
+        except Exception as e:
+            return self._send_json({"error": f"{hops[0]} 연결 실패: {e}"}, 502)
+        self.send_response(r.status_code)
+        self.send_header("Content-Type", r.headers.get("Content-Type", "application/json"))
+        self.send_header("Content-Length", str(len(r.content)))
+        self.end_headers()
+        self.wfile.write(r.content)
 
     def do_POST(self):
         if self.path == "/command":
@@ -824,19 +933,21 @@ class AuroraClientApp:
         "프로세스 종료 목록": "강제 종료할 프로세스의 exe 이름을 등록하는 목록입니다. 이름 뒤에 .exe 가 없으면 자동으로 붙습니다. 체크한 항목을 아래 '선택 프로세스 종료', 목록 전체를 '전체 종료'로 종료합니다.",
         "자동 삭제 규칙": "폴더 안의 오래된 파일 또는 날짜 폴더를 자동 삭제하는 규칙 목록입니다. ON 체크와 '적용'이 모두 된 규칙만 날짜가 바뀔 때(자정) 실행되며, '지금 실행'으로 즉시 실행할 수도 있습니다.",
         "삭제 LOG": "자동 삭제 실행 내역(삭제한 파일·폴더, 건너뜀, 오류)을 시각과 함께 기록합니다.",
-        "반출 LOG": "중계 PC 연결 상태, 장비 검색, 파일 반출 진행·완료·실패·취소 내역을 기록합니다.",
+        "반입/반출 LOG": "중계 PC 연결 상태, 장비 검색, 파일 반입·반출 진행·완료·실패·취소 내역을 기록합니다.",
         "저장 폴더": "반출한 파일을 받을 내 PC의 폴더입니다. 실제로는 '저장 폴더\\장비이름 (IP)\\' 아래에 저장됩니다. 파일은 4개까지 동시에 받고, 취소하면 받던 파일이 .part 로 남아 다음에 이어받습니다.",
         "중계 PC": "직접 연결되지 않는 장비의 파일을 가져올 때 거치는 중계 PC(LHS)의 IP 입니다. '적용'으로 저장하며, 5초마다 연결을 확인하고 연결되면 장비를 자동으로 검색합니다. 모든 PC 의 export_key 가 같아야 연결됩니다.",
         "접속 경로": "반출 요청이 실제로 거치는 PC 순서입니다. 내 PC 에서 가져오면 내 PC → 중계 PC(LHS) → 대상 장비(CCW 등) 3대, 중계 PC(LHS)에서 직접 가져오면 LHS → 대상 장비 2대로 표시됩니다. 화살표가 초록이면 연결됨, 빨강이면 연결 안됨입니다.",
+        "보낼 항목": "반입 모드에서 내 PC 에서 장비로 보낼 파일·폴더 목록입니다. '파일 추가'/'폴더 추가'로 넣고, 폴더는 하위 전체를 보냅니다. 파일은 4개까지 동시에 보내고, 같은 이름의 파일은 확인 후 덮어씁니다.",
+        "반입 위치": "반입 파일이 들어갈 장비의 폴더입니다. 아래 파일 탐색에서 D 드라이브·바탕화면 안의 폴더로 이동하면 그 폴더가 반입 위치가 됩니다.",
         "장비": "중계 PC 가 자기 네트워크 대역(/24)을 스캔해 찾은 클라이언트 목록입니다. [중계]는 중계 PC 자신입니다. 장비를 고르면 허용 경로(D 드라이브·바탕화면)만 탐색할 수 있으며, '이름' 버튼으로 표시 이름을 바꿀 수 있습니다.",
     }
 
-    # 탭 이름별 설명 (탭 순서: 설정 / 프로세스 관리 / 자동 삭제 / 반출)
+    # 탭 이름별 설명 (탭 순서: 설정 / 프로세스 관리 / 자동 삭제 / 반입/반출)
     TAB_HINTS = [
         "서버 연결과 Aurora 상태 확인, 서버 IP·포트 설정, 자동 시작, 수동 실행/종료를 하는 탭입니다. 설정은 D:\\RemoteConfig\\client_config.json 에 저장됩니다.",
         "Aurora 실행 경로를 지정하고, 등록한 exe 이름의 프로세스를 강제 종료하는 탭입니다.",
         "규칙(폴더·확장자·기한·ON)에 따라 오래된 파일이나 날짜 폴더를 날짜가 바뀔 때(자정) 자동 삭제하는 탭입니다.",
-        "중계 PC(LHS)를 거쳐 직접 연결되지 않는 장비의 파일을 내 PC로 가져오는 탭입니다. D 드라이브와 바탕화면만 접근할 수 있습니다.",
+        "중계 PC(LHS)를 거쳐 직접 연결되지 않는 장비와 파일을 주고받는 탭입니다. 반출 모드는 장비 → 내 PC, 반입 모드는 내 PC → 장비이며, D 드라이브와 바탕화면만 접근할 수 있습니다.",
     ]
 
     # ── 색상 ─────────────────────────────
@@ -1073,7 +1184,7 @@ class AuroraClientApp:
         self._tab_frames = []
         self._tab_labels = []
         self._tab_lines  = []
-        for i, title in enumerate(["설정", "프로세스 관리", "자동 삭제", "반출"]):
+        for i, title in enumerate(["설정", "프로세스 관리", "자동 삭제", "반입/반출"]):
             cell = tk.Frame(tabbar, bg=self.PANEL)
             cell.pack(side="left", padx=(_px(8) if i == 0 else 0, 0))
             lbl = tk.Label(cell, text=title, font=self.FONT_TAB, fg=self.TEXT_DIM,
@@ -1780,12 +1891,16 @@ class AuroraClientApp:
         self._exp_relay_host = ""     # 중계 PC 호스트명 (/info 응답)
 
         # 로그 (하단 고정 — 먼저 pack)
-        self.export_log_text = self._log_panel(parent, "반출 LOG", height=140)
+        self.export_log_text = self._log_panel(parent, "반입/반출 LOG", height=140)
+
+        self._exp_mode      = "export"  # "export"(장비 → 내 PC) / "import"(내 PC → 장비)
+        self._imp_sources   = []      # 반입할 내 PC 파일·폴더 경로
 
         # ── 저장/실행 카드 (하단) ──
         act = self._card(parent)
         act.pack(side="bottom", fill="x", pady=(_px(14), 0))
-        row = tk.Frame(act, bg=self.PANEL)
+        # 반출 모드: 저장 폴더
+        row = self._exp_save_row = tk.Frame(act, bg=self.PANEL)
         row.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)))
         self._field_label(row, "저장 폴더", width=8).pack(side="left", padx=(0, _px(8)))
         self._exp_save_var = tk.StringVar(value=config.get("export_save_dir"))
@@ -1795,9 +1910,34 @@ class AuroraClientApp:
         self._entry(row, self._exp_save_var, 30).pack(
             side="left", fill="x", expand=True, ipady=_px(1), padx=(0, _px(8)))
 
-        row2 = tk.Frame(act, bg=self.PANEL)
+        # 반입 모드: 보낼 항목 + 반입 위치 (모드 전환 시 저장 폴더 줄과 교체)
+        imp = self._imp_frame = tk.Frame(act, bg=self.PANEL)
+        ir1 = tk.Frame(imp, bg=self.PANEL)
+        ir1.pack(fill="x", pady=(0, _px(6)))
+        self._field_label(ir1, "보낼 항목", width=8).pack(side="left", anchor="n", padx=(0, _px(8)))
+        lb_wrap = tk.Frame(ir1, bg=self.PANEL, highlightthickness=1, highlightbackground=self.INPUT_BORDER)
+        lb_wrap.pack(side="left", fill="x", expand=True)
+        self._imp_list = tk.Listbox(lb_wrap, height=2, font=self.FONT_INPUT, relief="flat", bd=0,
+                                    selectmode="extended", fg=self.TEXT, bg=self.PANEL,
+                                    selectbackground=self.SELECT_BG, selectforeground=self.TEXT,
+                                    highlightthickness=0, activestyle="none")
+        lsb = ttk.Scrollbar(lb_wrap, orient="vertical", command=self._imp_list.yview)
+        self._imp_list.configure(yscrollcommand=lsb.set)
+        lsb.pack(side="right", fill="y")
+        self._imp_list.pack(side="left", fill="both", expand=True, padx=_px(4), pady=_px(2))
+        ir2 = tk.Frame(imp, bg=self.PANEL)
+        ir2.pack(fill="x")
+        self._field_label(ir2, "반입 위치", width=8).pack(side="left", padx=(0, _px(8)))
+        self._button(ir2, "빼기", "secondary", self._import_remove, small=True).pack(side="right")
+        self._button(ir2, "폴더 추가", "secondary", self._import_add_dir, small=True).pack(side="right", padx=(0, _px(6)))
+        self._button(ir2, "파일 추가", "secondary", self._import_add_files, small=True).pack(side="right", padx=(0, _px(6)))
+        self._imp_dest_lbl = tk.Label(ir2, text="", anchor="w", font=self.FONT_INPUT,
+                                      fg=self.TEXT_DIM, bg=self.PANEL)
+        self._imp_dest_lbl.pack(side="left", fill="x", expand=True)
+
+        row2 = self._exp_act_row = tk.Frame(act, bg=self.PANEL)
         row2.pack(fill="x", padx=_px(20), pady=(0, _px(16)))
-        self._exp_go_btn = self._button(row2, "⬇ 반출", "primary", self._export_start)
+        self._exp_go_btn = self._button(row2, "⬇ 반출", "primary", self._transfer_start)
         self._exp_go_btn.pack(side="right")
         self._exp_cancel_btn = self._button(row2, "취소", "danger", self._export_cancel)
         self._exp_cancel_btn.pack(side="right", padx=(0, _px(8)))
@@ -1807,8 +1947,22 @@ class AuroraClientApp:
         self._exp_progress.pack(side="top", fill="x", padx=(0, _px(12)), pady=(_px(4), _px(4)))
         self._exp_prog_lbl = self._tip(tk.Label(row2, text="대기", anchor="w",
                                       font=self.FONT_MONO_SMALL, fg=self.TEXT_DIM, bg=self.PANEL),
-                                      "반출 진행 상황입니다. 받은 파일 수/전체 파일 수, 받은 용량/전체 용량, 전송 속도, 실패한 파일 수(있을 때)를 보여 줍니다. 파일은 4개까지 동시에 받습니다.")
+                                      "반입·반출 진행 상황입니다. 처리한 파일 수/전체 파일 수, 처리한 용량/전체 용량, 전송 속도, 실패한 파일 수(있을 때)를 보여 줍니다. 파일은 4개까지 동시에 주고받습니다.")
         self._exp_prog_lbl.pack(side="top", fill="x")
+
+        # ── 모드 전환 (최상단) ──
+        mode = tk.Frame(parent, bg=self.BG)
+        mode.pack(fill="x", pady=(0, _px(10)))
+        self._exp_mode_btns = {
+            "export": self._button(mode, "⬇ 반출 모드", "secondary", lambda: self._set_transfer_mode("export")),
+            "import": self._button(mode, "⬆ 반입 모드", "secondary", lambda: self._set_transfer_mode("import")),
+        }
+        self._exp_mode_btns["export"].pack(side="left")
+        self._exp_mode_btns["import"].pack(side="left", padx=(_px(6), 0))
+        self._tip(self._exp_mode_btns["export"], "반출 모드: 선택한 장비의 파일·폴더를 내 PC 저장 폴더로 가져옵니다.")
+        self._tip(self._exp_mode_btns["import"], "반입 모드: 내 PC 의 파일·폴더를 선택한 장비의 현재 폴더로 보냅니다. 같은 이름의 파일은 확인 후 덮어씁니다.")
+        self._exp_mode_lbl = tk.Label(mode, text="", font=self.FONT, fg=self.TEXT_DIM, bg=self.BG)
+        self._exp_mode_lbl.pack(side="left", padx=(_px(12), 0))
 
         # ── 연결 카드 (상단) ──
         conn = self._card(parent)
@@ -1831,7 +1985,8 @@ class AuroraClientApp:
                                            font=self.FONT_INPUT, style="Export.TCombobox")
         self._exp_dev_combo.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
         self._exp_dev_combo.bind("<<ComboboxSelected>>",
-                                 lambda e: (self._export_update_route(), self._export_nav("")))
+                                 lambda e: (self._export_update_route(), self._export_nav(""),
+                                            self._export_fill("", [])))
         self._button(r2, "이름", "secondary", self._export_rename_device).pack(side="right")
         self._exp_scan_btn = self._button(r2, "장비 검색", "secondary",
                                           lambda: self._export_discover(force=True))
@@ -1874,6 +2029,30 @@ class AuroraClientApp:
         self._exp_tree.bind("<Double-1>", self._export_on_double)
 
         self._export_set_connected(False)
+        self._set_transfer_mode("export")
+
+    # 반입/반출 모드 전환
+    def _set_transfer_mode(self, mode: str):
+        if self._exp_busy:
+            return
+        self._exp_mode = mode
+        for m, b in self._exp_mode_btns.items():
+            self._style_segment(b, m == mode)
+        is_imp = mode == "import"
+        self._exp_mode_lbl.config(text="내 PC → 장비 (선택한 장비의 현재 폴더로 보내기)" if is_imp
+                                  else "장비 → 내 PC (선택한 파일·폴더를 저장 폴더로 가져오기)")
+        self._exp_go_btn.config(text="⬆ 반입" if is_imp else "⬇ 반출")
+        self._exp_tree.config(selectmode="browse" if is_imp else "extended")
+        if is_imp:
+            self._exp_save_row.pack_forget()
+            self._imp_frame.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)), before=self._exp_act_row)
+        else:
+            self._imp_frame.pack_forget()
+            self._exp_save_row.pack(fill="x", padx=_px(20), pady=(_px(16), _px(10)), before=self._exp_act_row)
+        self._import_update_dest()
+
+    def _transfer_start(self):
+        (self._import_start if self._exp_mode == "import" else self._export_start)()
 
     # 접속 경로 표시
     def _export_relay_is_self(self) -> bool:
@@ -1960,8 +2139,8 @@ class AuroraClientApp:
 
     # 중계 PC 요청
     def _export_request(self, route: str, params: dict = None, target: str = None,
-                        timeout=(3, 30), **kw):
-        """중계 PC 경유 GET. target 이 중계 PC 자신이면 via 없이 직접 처리"""
+                        timeout=(3, 30), method: str = "GET", **kw):
+        """중계 PC 경유 요청 (반입은 PUT). target 이 중계 PC 자신이면 via 없이 직접 처리"""
         relay  = config.get("export_relay", "").strip()
         port   = config.get("export_peer_port", 9001)
         params = dict(params or {})
@@ -1969,8 +2148,8 @@ class AuroraClientApp:
             params["via"] = target
         headers = {EXPORT_KEY_HEADER: config.get("export_key", "")}
         headers.update(kw.pop("headers", {}))
-        return requests.get(f"http://{relay}:{port}{route}", params=params,
-                            headers=headers, timeout=timeout, **kw)
+        return requests.request(method, f"http://{relay}:{port}{route}", params=params,
+                                headers=headers, timeout=timeout, **kw)
 
     @staticmethod
     def _export_error(r) -> str:
@@ -2118,6 +2297,7 @@ class AuroraClientApp:
                 text=("📁 " if it["dir"] else "📄 ") + it["name"],
                 values=("" if it["dir"] else self._fmt_size(it["size"]), mtime))
             self._exp_items[iid] = it
+        self._import_update_dest()
 
     def _export_on_double(self, event):
         iid = self._exp_tree.identify_row(event.y)
@@ -2204,15 +2384,6 @@ class AuroraClientApp:
         t0    = time.time()
         self._export_log(f"반출 시작: {len(jobs)}개 파일, {self._fmt_size(total)} → {dest_root}")
 
-        def _ui():
-            with lock:
-                done, nf, nfail = prog["done"], prog["files"], prog["fail"]
-            speed = done / max(time.time() - t0, 0.1)
-            self._exp_progress.config(maximum=total, value=done)
-            self._exp_prog_lbl.config(
-                text=f"{nf}/{len(jobs)}개  ·  {self._fmt_size(done)} / {self._fmt_size(total)}"
-                     f"  ·  {self._fmt_size(speed)}/s" + (f"  ·  실패 {nfail}" if nfail else ""))
-
         def _one(job):
             remote, local, size, mtime = job
             if self._exp_cancel.is_set():
@@ -2248,16 +2419,7 @@ class AuroraClientApp:
                 self._export_log(f"❌ {remote}: {e}")
 
         # 2) 병렬 다운로드 + 진행률 갱신
-        stop_ui = threading.Event()
-        def _ui_loop():
-            while not stop_ui.is_set():
-                self.root.after(0, _ui)
-                time.sleep(0.3)
-        threading.Thread(target=_ui_loop, daemon=True).start()
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            list(ex.map(_one, jobs))
-        stop_ui.set()
-        self.root.after(0, _ui)
+        self._transfer_run(jobs, total, _one, prog, lock, t0)
 
         elapsed = time.time() - t0
         if self._exp_cancel.is_set():
@@ -2271,6 +2433,184 @@ class AuroraClientApp:
         self._exp_busy = False
         self._exp_cancel_btn.config(state="disabled")
         self._exp_go_btn.config(state="normal" if self._exp_connected else "disabled")
+        if self._exp_mode == "import" and self._exp_path:
+            self._export_nav(self._exp_path)   # 반입한 파일이 보이도록 새로고침
+
+    def _transfer_run(self, jobs: list, total: int, one, prog: dict, lock, t0: float):
+        """반입·반출 공용: jobs 를 4개씩 병렬 처리하면서 0.3초마다 진행률 표시
+        one(job) 이 prog["done"/"files"/"fail"] 을 lock 안에서 갱신"""
+        def _ui():
+            with lock:
+                done, nf, nfail = prog["done"], prog["files"], prog["fail"]
+            speed = done / max(time.time() - t0, 0.1)
+            self._exp_progress.config(maximum=total, value=done)
+            self._exp_prog_lbl.config(
+                text=f"{nf}/{len(jobs)}개  ·  {self._fmt_size(done)} / {self._fmt_size(total)}"
+                     f"  ·  {self._fmt_size(speed)}/s" + (f"  ·  실패 {nfail}" if nfail else ""))
+
+        stop_ui = threading.Event()
+        def _ui_loop():
+            while not stop_ui.is_set():
+                self.root.after(0, _ui)
+                time.sleep(0.3)
+        threading.Thread(target=_ui_loop, daemon=True).start()
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(one, jobs))
+        stop_ui.set()
+        self.root.after(0, _ui)
+
+    # ── 반입 (내 PC → 장비) ──────────────
+    def _import_update_dest(self):
+        if not hasattr(self, "_imp_dest_lbl"):
+            return
+        if not self._export_target():
+            text, fg = "장비를 선택하세요", self.TEXT_DIM
+        elif not self._exp_path:
+            text, fg = "아래에서 D 드라이브·바탕화면 안의 폴더로 이동하세요", self.TEXT_DIM
+        else:
+            name = self._exp_dev_combo.get().replace("  [중계]", "")
+            text, fg = f"{name}  ›  {self._exp_path}", self.TEXT
+        self._imp_dest_lbl.config(text=text, fg=fg)
+
+    def _import_refresh_list(self):
+        self._imp_list.delete(0, "end")
+        for p in self._imp_sources:
+            name = os.path.basename(p.rstrip("\\/")) or p
+            self._imp_list.insert("end", ("📁 " if os.path.isdir(p) else "📄 ") + f"{name}   ({os.path.dirname(p.rstrip(chr(92) + '/'))})")
+
+    def _import_add(self, paths):
+        for p in paths:
+            p = os.path.normpath(p)
+            if p not in self._imp_sources:
+                self._imp_sources.append(p)
+        self._import_refresh_list()
+
+    def _import_add_files(self):
+        self._import_add(filedialog.askopenfilenames(title="반입할 파일 선택") or [])
+
+    def _import_add_dir(self):
+        path = filedialog.askdirectory(title="반입할 폴더 선택")
+        if path:
+            self._import_add([path])
+
+    def _import_remove(self):
+        sel = set(self._imp_list.curselection())
+        if not sel:   # 선택이 없으면 전체 비우기
+            sel = set(range(len(self._imp_sources)))
+        self._imp_sources = [p for i, p in enumerate(self._imp_sources) if i not in sel]
+        self._import_refresh_list()
+
+    def _import_jobs(self, dest: str):
+        """(파일 작업 [(로컬, 원격, 크기, 수정시각)], 만들 원격 폴더 [경로]) — 폴더는 하위 전체"""
+        jobs, dirs = [], []
+        for src in self._imp_sources:
+            if os.path.isdir(src):
+                name = os.path.basename(src.rstrip("\\/")) or (src[0] + "_drive")
+                base = os.path.join(dest, name)
+                dirs.append(base)
+                for cur, _, fnames in os.walk(src):
+                    rel = os.path.relpath(cur, src)
+                    rbase = base if rel == "." else os.path.join(base, rel)
+                    if rel != ".":
+                        dirs.append(rbase)
+                    for fn in fnames:
+                        full = os.path.join(cur, fn)
+                        try:
+                            st = os.stat(full)
+                        except OSError:
+                            continue
+                        jobs.append((full, os.path.join(rbase, fn), st.st_size, st.st_mtime))
+            elif os.path.isfile(src):
+                st = os.stat(src)
+                jobs.append((src, os.path.join(dest, os.path.basename(src)), st.st_size, st.st_mtime))
+        return jobs, dirs
+
+    def _import_start(self):
+        target = self._export_target()
+        if not target:
+            messagebox.showinfo("안내", "장비를 먼저 선택하세요.")
+            return
+        dest = self._exp_path
+        if not dest:
+            messagebox.showinfo("안내", "반입할 위치로 이동하세요.\n아래 파일 탐색에서 D 드라이브 또는 바탕화면 안의 폴더를 더블클릭하면 그 폴더가 반입 위치가 됩니다.")
+            return
+        if not self._imp_sources:
+            messagebox.showinfo("안내", "'파일 추가' 또는 '폴더 추가'로 보낼 항목을 넣으세요.")
+            return
+        jobs, dirs = self._import_jobs(dest)
+        if not jobs and not dirs:
+            messagebox.showinfo("안내", "보낼 파일이 없습니다 (추가한 경로가 없어졌을 수 있습니다).")
+            return
+        total = sum(j[2] for j in jobs)
+        name = self._exp_dev_combo.get().replace("  [중계]", "")
+        if not messagebox.askyesno("반입 확인",
+                f"{name}\n{dest}\n\n위 위치로 파일 {len(jobs)}개 ({self._fmt_size(total)}) 를 보냅니다.\n"
+                "같은 이름의 파일이 있으면 덮어씁니다. 진행할까요?"):
+            return
+        self._export_log(f"경로: {self._export_route_text()}")
+        self._exp_cancel.clear()
+        self._exp_busy = True
+        self._exp_go_btn.config(state="disabled")
+        self._exp_cancel_btn.config(state="normal")
+        threading.Thread(target=self._import_worker, args=(target, jobs, dirs, dest),
+                         daemon=True).start()
+
+    def _import_worker(self, target: str, jobs: list, dirs: list, dest: str):
+        # 1) 폴더 먼저 (빈 폴더 포함)
+        try:
+            for d in dirs:
+                r = self._export_request("/fs/mkdir", {"path": d}, target, method="PUT")
+                if not r.ok:
+                    raise RuntimeError(f"{d}: {self._export_error(r)}")
+        except Exception as e:
+            self._export_log(f"❌ 폴더 만들기 실패: {e}")
+            return self.root.after(0, self._export_done)
+
+        total = sum(j[2] for j in jobs) or 1
+        prog  = {"done": 0, "files": 0, "fail": 0}
+        lock  = threading.Lock()
+        t0    = time.time()
+        self._export_log(f"반입 시작: {len(jobs)}개 파일, {self._fmt_size(total)} → {dest}")
+
+        def _one(job):
+            local, remote, size, mtime = job
+            if self._exp_cancel.is_set():
+                return
+            sent = [0]
+            def _on_chunk(n):
+                if self._exp_cancel.is_set():
+                    raise IOError("취소됨")
+                sent[0] += n
+                with lock:
+                    prog["done"] += n
+            try:
+                with open(local, "rb") as f:
+                    r = self._export_request("/fs/upload", {"path": remote, "mtime": str(mtime)},
+                                             target, timeout=(3, 120), method="PUT",
+                                             data=_BodyReader(f, size, _on_chunk))
+                if not r.ok:
+                    raise RuntimeError(self._export_error(r))
+                with lock:
+                    prog["files"] += 1
+            except Exception as e:
+                with lock:
+                    prog["done"] -= sent[0]   # 실패한 파일은 진행량에서 뺌
+                if self._exp_cancel.is_set():
+                    return
+                with lock:
+                    prog["fail"] += 1
+                self._export_log(f"❌ {local}: {e}")
+
+        # 2) 병렬 업로드 + 진행률 갱신
+        self._transfer_run(jobs, total, _one, prog, lock, t0)
+
+        elapsed = time.time() - t0
+        if self._exp_cancel.is_set():
+            self._export_log(f"⏹ 반입 취소됨 ({prog['files']}/{len(jobs)}개 완료, 보내던 파일은 장비에 남지 않음)")
+        else:
+            self._export_log(f"✅ 반입 완료: {prog['files']}/{len(jobs)}개, "
+                             f"{elapsed:.1f}초" + (f", 실패 {prog['fail']}" if prog["fail"] else ""))
+        self.root.after(0, self._export_done)
 
     def _button(self, parent, text, kind, cmd, small=False):
         """kind: primary / start / stop / secondary / danger
