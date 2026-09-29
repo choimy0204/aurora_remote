@@ -7,6 +7,7 @@ Aurora Remote Controller - Client
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from tkinter import font as tkfont
 import threading
 import subprocess
 import re
@@ -23,6 +24,24 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, date, timedelta
 import pystray
 from PIL import Image as PILImage
+from PIL import ImageTk
+
+# ── 글꼴 등록 (fonts/ 폴더) ───────────────
+def _resource_path(rel):
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
+def _register_fonts():
+    """fonts/ 폴더의 글꼴을 이 프로세스에서만 사용하도록 등록 (실패 시 무시 → 폴백 폰트)"""
+    try:
+        import ctypes, glob
+        gdi = ctypes.WinDLL("gdi32")
+        for f in glob.glob(_resource_path(os.path.join("fonts", "*.[ot]tf"))):
+            gdi.AddFontResourceExW(f, 0x10, 0)   # FR_PRIVATE
+    except Exception:
+        pass
+
+_register_fonts()
 
 # ── 중복 실행 방지 ────────────────────────
 _LOCK_SOCK = None
@@ -450,35 +469,65 @@ def run_command_server():
 class AuroraClientApp:
 
     # ── 색상 ─────────────────────────────
-    BG       = "#f1f5f9"
-    PANEL    = "#ffffff"
-    BORDER   = "#e2e8f0"
-    TEXT     = "#0f172a"
-    TEXT_DIM = "#64748b"
-    WHITE    = "#ffffff"
-    GREEN    = "#16a34a"
-    RED      = "#dc2626"
-    YELLOW   = "#d97706"
-    BLUE     = "#4f46e5"
-    BTN_START    = "#16a34a"
-    BTN_START_H  = "#15803d"
-    BTN_STOP     = "#dc2626"
-    BTN_STOP_H   = "#b91c1c"
-    BTN_ALL      = "#7c3aed"
-    BTN_ALL_H    = "#6d28d9"
-    SELECT_BG    = "#e0e7ff"
-    ROW_ALT      = "#e9eef5"
+    BG       = "#F3F5F7"
+    PANEL    = "#FFFFFF"
+    PANEL_ALT    = "#F7F8FA"
+    BORDER   = "#E1E5E8"
+    INPUT_BORDER = "#CDD3D7"
+    ROW_LINE = "#EEF1F3"
+    TEXT     = "#1D2327"
+    TEXT_DIM = "#5F686B"
+    DISABLED_TEXT = "#9AA2A5"
+    WHITE    = "#FFFFFF"
+    BRAND    = "#2F98F9"
+    BLUE     = "#1A6FC9"
+    BLUE_H   = "#155CA8"
+    NAV_ON_BG = "#E8F2FE"
+    GREEN    = "#138A43"
+    RED      = "#C9372C"
+    YELLOW   = "#9A5700"
+    OK_BG    = "#E7F6EC"
+    ERR_BG   = "#FDECEA"
+    WARN_BG  = "#FFF4E0"
+    IDLE_BG  = "#EEF1F3"
+    LOG_BG   = "#1D2327"
+    LOG_FG   = "#D5DADD"
+    BTN_START    = "#138A43"
+    BTN_START_H  = "#0F7036"
+    BTN_STOP     = "#C9372C"
+    BTN_STOP_H   = "#A82C23"
+    DANGER_BORDER = "#E8A9A3"
+    OK_BORDER    = "#9FD5B3"
+    OK_HOVER     = "#D6EEDD"
+    SELECT_BG    = "#E8F2FE"
 
     # ── 폰트 ─────────────────────────────
-    FONT             = ("맑은 고딕", 10)
-    FONT_BOLD        = ("맑은 고딕", 10, "bold")
-    FONT_TITLE       = ("맑은 고딕", 11, "bold")
-    FONT_HEAD        = ("맑은 고딕", 13, "bold")
-    FONT_SMALL       = ("맑은 고딕", 9)
-    FONT_SMALL_BOLD  = ("맑은 고딕", 9, "bold")
-    FONT_INPUT       = ("Consolas", 10)
-    FONT_MONO        = ("Consolas", 9)
-    FONT_MONO_BOLD   = ("Consolas", 9, "bold")
+    FONT             = ("Pretendard Medium", 9)
+    FONT_BOLD        = ("Pretendard SemiBold", 9)
+    FONT_TITLE       = ("Pretendard", 10, "bold")
+    FONT_HEAD        = ("Pretendard", 11, "bold")
+    FONT_VALUE       = ("Pretendard", 10, "bold")
+    FONT_TAB         = ("Pretendard Medium", 10)
+    FONT_TAB_ON      = ("Pretendard", 10, "bold")
+    FONT_SMALL       = ("Pretendard SemiBold", 8)
+    FONT_SMALL_BOLD  = ("Pretendard SemiBold", 8)
+    FONT_INPUT       = ("JetBrains Mono", 9)
+    FONT_MONO        = ("JetBrains Mono", 9)
+    FONT_MONO_SMALL  = ("JetBrains Mono", 8)
+    FONT_MONO_BOLD   = ("JetBrains Mono SemiBold", 9)
+    FONT_COUNTDOWN   = ("JetBrains Mono SemiBold", 13)
+
+    @classmethod
+    def apply_font_fallback(cls):
+        """Pretendard 가 없으면 맑은 고딕/Consolas 로 대체 (tk 루트 생성 후 호출)"""
+        if "Pretendard" in tkfont.families():
+            return
+        for name in [n for n in dir(cls) if n.startswith("FONT")]:
+            font = getattr(cls, name)
+            family, size = font[0], font[1]
+            heavy = "SemiBold" in family or "bold" in font[2:]
+            new_family = "Consolas" if "JetBrains" in family else "맑은 고딕"
+            setattr(cls, name, (new_family, size, "bold") if heavy else (new_family, size))
 
     @classmethod
     def setup_styles(cls):
@@ -487,18 +536,12 @@ class AuroraClientApp:
         style.theme_use("clam")
         style.configure("Vertical.TScrollbar",
                         background=cls.BORDER, troughcolor=cls.BG,
-                        arrowcolor=cls.TEXT_DIM, bordercolor=cls.BORDER)
-        style.configure("TNotebook",
-                        background=cls.BG, borderwidth=0, tabmargins=0)
-        style.configure("TNotebook.Tab",
-                        background=cls.BORDER, foreground=cls.TEXT_DIM,
-                        font=cls.FONT_BOLD, padding=[16, 8],
-                        borderwidth=0)
-        style.map("TNotebook.Tab",
-                  background=[("selected", cls.PANEL)],
-                  foreground=[("selected", cls.BLUE)])
+                        arrowcolor=cls.TEXT_DIM, bordercolor=cls.BG,
+                        lightcolor=cls.BORDER, darkcolor=cls.BORDER,
+                        width=10, arrowsize=10)
         style.configure("Countdown.Horizontal.TProgressbar",
-                        troughcolor=cls.BORDER, background=cls.BLUE,
+                        troughcolor=cls.BORDER, background=cls.BRAND,
+                        bordercolor=cls.BORDER, lightcolor=cls.BRAND, darkcolor=cls.BRAND,
                         borderwidth=0, thickness=8)
 
     def __init__(self, root: tk.Tk):
@@ -542,11 +585,16 @@ class AuroraClientApp:
         return tk.Frame(parent, bg=self.PANEL, highlightthickness=1,
                         highlightbackground=self.BORDER, highlightcolor=self.BORDER)
 
+    def _section_title(self, parent, text, bg=None):
+        return tk.Label(parent, text=text, font=self.FONT_TITLE,
+                        fg=self.TEXT, bg=bg or self.PANEL)
+
     def _entry(self, parent, var, width, font=None):
         return tk.Entry(parent, textvariable=var, font=font or self.FONT_INPUT,
                         bg=self.PANEL, fg=self.TEXT, insertbackground=self.TEXT,
+                        disabledbackground=self.BG, disabledforeground=self.DISABLED_TEXT,
                         relief="flat", bd=0, highlightthickness=1,
-                        highlightbackground=self.BORDER, highlightcolor=self.BLUE,
+                        highlightbackground=self.INPUT_BORDER, highlightcolor=self.BLUE,
                         width=width)
 
     def _field_label(self, parent, text, width=12):
@@ -558,58 +606,155 @@ class AuroraClientApp:
         return {"text": "● 실행중" if is_running else "○ 중지",
                 "fg": self.GREEN if is_running else self.TEXT_DIM}
 
+    def _badge_bg(self, fg: str) -> str:
+        """글자색으로 배지 배경색 결정"""
+        if fg == self.GREEN:
+            return self.OK_BG
+        if fg == self.RED:
+            return self.ERR_BG
+        if fg == self.YELLOW:
+            return self.WARN_BG
+        return self.IDLE_BG
+
+    def _set_badge(self, lbl, text: str, fg: str):
+        """상태 라벨을 배지(글자색 + 옅은 배경)로 표시"""
+        lbl.config(text=text, fg=fg, bg=self._badge_bg(fg))
+
+    def _make_badge(self, parent, text: str, fg: str):
+        lbl = tk.Label(parent, font=self.FONT_SMALL, padx=8, pady=2)
+        self._set_badge(lbl, text, fg)
+        return lbl
+
+    def _load_logo(self, height: int):
+        """assets/ubisam_logo.png 를 높이에 맞춰 로드 (실패 시 None)"""
+        try:
+            img = PILImage.open(_resource_path(os.path.join("assets", "ubisam_logo.png"))).convert("RGBA")
+            width = max(1, round(img.width * height / img.height))
+            img = img.resize((width, height), PILImage.LANCZOS)
+            return ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+
+    def _log_panel(self, parent, title: str, height: int = None):
+        """다크 로그 카드. Text 위젯 반환"""
+        card = self._card(parent)
+        if height:
+            card.configure(height=height)
+            card.pack_propagate(False)
+            card.pack(fill="x", side="bottom", pady=(14, 0))
+        else:
+            card.pack(fill="both", expand=True)
+        self._section_title(card, title).pack(anchor="w", padx=20, pady=(16, 10))
+        dark = tk.Frame(card, bg=self.LOG_BG)
+        dark.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        text = tk.Text(dark, font=self.FONT_MONO, bg=self.LOG_BG, fg=self.LOG_FG,
+                       insertbackground=self.LOG_FG, relief="flat", bd=0,
+                       padx=12, pady=10, spacing1=2, state="disabled", wrap="word",
+                       highlightthickness=0)
+        sb = ttk.Scrollbar(dark, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        text.pack(fill="both", expand=True)
+        return text
+
     # ── UI ───────────────────────────────
     def _build_ui(self):
-        # 타이틀
-        tf = tk.Frame(self.root, bg=self.BG)
-        tf.pack(fill="x", padx=20, pady=(18, 0))
-        tk.Label(tf, text="◈  AURORA CLIENT",
-                 font=self.FONT_HEAD, fg=self.BLUE, bg=self.BG).pack(side="left")
-        tk.Label(tf, text=self.my_ip,
-                 font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.BG).pack(side="right")
+        # 헤더
+        header = tk.Frame(self.root, bg=self.PANEL, height=52)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        self._logo_img = self._load_logo(18)
+        name_padx = (18, 0)
+        if self._logo_img:
+            tk.Label(header, image=self._logo_img, bg=self.PANEL).pack(side="left", padx=(18, 12))
+            tk.Frame(header, bg=self.BORDER, width=1, height=18).pack(side="left", padx=(0, 12))
+            name_padx = (0, 0)
+        tk.Label(header, text="Aurora Client",
+                 font=self.FONT_HEAD, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=name_padx)
+        tk.Label(header, text=self.my_ip,
+                 font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="right", padx=18)
 
-        self._separator(self.root, padx=20, pady=(10, 0))
+        # 탭바
+        tabbar = tk.Frame(self.root, bg=self.PANEL)
+        tabbar.pack(fill="x")
+        self._separator(self.root)
 
-        # Notebook
-        nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=20, pady=(10, 16))
+        content = tk.Frame(self.root, bg=self.BG)
+        content.pack(fill="both", expand=True)
 
-        tab_main    = tk.Frame(nb, bg=self.BG)
-        tab_process = tk.Frame(nb, bg=self.BG)
-        tab_delete  = tk.Frame(nb, bg=self.BG)
-        nb.add(tab_main,    text="  설정  ")
-        nb.add(tab_process, text="  프로세스 관리  ")
-        nb.add(tab_delete,  text="  자동 삭제  ")
+        self._tab_frames = []
+        self._tab_labels = []
+        self._tab_lines  = []
+        for i, title in enumerate(["설정", "프로세스 관리", "자동 삭제"]):
+            cell = tk.Frame(tabbar, bg=self.PANEL)
+            cell.pack(side="left", padx=(8 if i == 0 else 0, 0))
+            lbl = tk.Label(cell, text=title, font=self.FONT_TAB, fg=self.TEXT_DIM,
+                           bg=self.PANEL, padx=16, pady=10, cursor="hand2")
+            lbl.pack()
+            line = tk.Frame(cell, bg=self.PANEL, height=2)
+            line.pack(fill="x")
+            lbl.bind("<Button-1>", lambda e, n=i: self._select_tab(n))
+            self._tab_labels.append(lbl)
+            self._tab_lines.append(line)
+            self._tab_frames.append(tk.Frame(content, bg=self.BG, padx=18, pady=16))
 
-        self._build_main_tab(tab_main)
-        self._build_process_tab(tab_process)
-        self._build_delete_tab(tab_delete)
+        self._build_main_tab(self._tab_frames[0])
+        self._build_process_tab(self._tab_frames[1])
+        self._build_delete_tab(self._tab_frames[2])
+        self._select_tab(0)
+
+    def _select_tab(self, index: int):
+        for i, frame in enumerate(self._tab_frames):
+            selected = (i == index)
+            if selected:
+                frame.pack(fill="both", expand=True)
+            else:
+                frame.pack_forget()
+            self._tab_labels[i].config(
+                fg=self.BLUE if selected else self.TEXT_DIM,
+                font=self.FONT_TAB_ON if selected else self.FONT_TAB)
+            self._tab_lines[i].config(bg=self.BRAND if selected else self.PANEL)
 
     def _build_main_tab(self, parent):
-        # 설정 패널
-        cfg = self._card(parent)
-        cfg.pack(fill="x", pady=(10, 0))
+        # 상태 카드
+        st = self._card(parent)
+        st.pack(fill="x", pady=(0, 14))
+        st_in = tk.Frame(st, bg=self.PANEL)
+        st_in.pack(fill="x", padx=20, pady=16)
+        for c in range(3):
+            st_in.columnconfigure(c, weight=1, uniform="stat")
+        for col, (label, attr) in enumerate([("서버 연결", "server_lbl"),
+                                              ("Aurora 상태", "aurora_lbl"),
+                                              ("마지막 명령", "cmd_lbl")]):
+            tile = tk.Frame(st_in, bg=self.PANEL_ALT, highlightthickness=1,
+                            highlightbackground=self.BORDER, highlightcolor=self.BORDER)
+            tile.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 8, 0))
+            tk.Label(tile, text=label, anchor="w", font=self.FONT,
+                     fg=self.TEXT_DIM, bg=self.PANEL_ALT).pack(fill="x", padx=12, pady=(10, 0))
+            lbl = tk.Label(tile, text="—", anchor="w",
+                           font=self.FONT_VALUE, fg=self.TEXT, bg=self.PANEL_ALT)
+            lbl.pack(fill="x", padx=12, pady=(4, 10))
+            setattr(self, attr, lbl)
 
-        tk.Label(cfg, text="설정",
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM,
-                 bg=self.PANEL).pack(anchor="w", padx=14, pady=(8, 4))
+        # 서버 카드 (좌: 서버 IP 목록 / 우: 핑 모드)
+        srv = self._card(parent)
+        srv.pack(fill="x", pady=(0, 14))
+        srv_in = tk.Frame(srv, bg=self.PANEL)
+        srv_in.pack(fill="x", padx=20, pady=16)
 
-        # ── 서버 IP 목록 ─────────────────────
-        srv_row = tk.Frame(cfg, bg=self.PANEL)
-        srv_row.pack(fill="x", padx=14, pady=(4, 0))
-        self._field_label(srv_row, "서버 IP 목록").pack(side="left")
-
-        srv_right = tk.Frame(cfg, bg=self.PANEL)
-        srv_right.pack(fill="x", padx=14, pady=(2, 6))
+        srv_left = tk.Frame(srv_in, bg=self.PANEL)
+        srv_left.pack(side="left", fill="both", expand=True)
+        self._section_title(srv_left, "서버 IP 목록").pack(anchor="w", pady=(0, 10))
 
         # 리스트박스
-        lb_frame = tk.Frame(srv_right, bg=self.PANEL)
-        lb_frame.pack(side="left", fill="x", expand=True)
+        lb_frame = tk.Frame(srv_left, bg=self.PANEL, padx=8, pady=6,
+                            highlightthickness=1, highlightbackground=self.INPUT_BORDER,
+                            highlightcolor=self.BLUE)
+        lb_frame.pack(fill="x")
         self.server_lb = tk.Listbox(lb_frame, font=self.FONT_MONO,
                                     bg=self.PANEL, fg=self.TEXT,
                                     selectbackground=self.BLUE, selectforeground=self.WHITE,
-                                    relief="flat", bd=0, highlightthickness=1,
-                                    highlightbackground=self.BORDER, highlightcolor=self.BLUE,
+                                    relief="flat", bd=0, highlightthickness=0,
                                     height=4, activestyle="none")
         self.server_lb.pack(side="left", fill="x", expand=True)
         lb_sb = ttk.Scrollbar(lb_frame, orient="vertical", command=self.server_lb.yview)
@@ -619,131 +764,103 @@ class AuroraClientApp:
             self.server_lb.insert("end", ip)
 
         # 추가/삭제 버튼
-        srv_btn = tk.Frame(srv_right, bg=self.PANEL)
-        srv_btn.pack(side="left", padx=(8, 0), anchor="n")
+        srv_btn = tk.Frame(srv_left, bg=self.PANEL)
+        srv_btn.pack(fill="x", pady=(10, 0))
         self.server_ip_input = tk.StringVar()
-        ip_entry = self._entry(srv_btn, self.server_ip_input, 16, self.FONT_MONO)
-        ip_entry.pack(pady=(0, 4), ipady=3)
+        ip_entry = self._entry(srv_btn, self.server_ip_input, 15, self.FONT_MONO)
+        ip_entry.pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 8))
         ip_entry.bind("<Return>", lambda e: self._add_server_ip())
-        self._small_btn(srv_btn, "+ 추가", self.BLUE, self._add_server_ip).pack(fill="x", pady=(0, 2))
-        self._small_btn(srv_btn, "− 삭제", self.RED,  self._del_server_ip).pack(fill="x")
+        self._button(srv_btn, "+ 추가", "primary", self._add_server_ip).pack(side="left", padx=(0, 8))
+        self._button(srv_btn, "− 삭제", "danger",  self._del_server_ip).pack(side="left")
 
-        self.server_port_var = tk.StringVar(value=str(config.get("server_port", 9000)))
-        self.listen_port_var = tk.StringVar(value=str(config.get("listen_port", 9001)))
-        row_p = tk.Frame(cfg, bg=self.PANEL)
-        row_p.pack(fill="x", padx=14, pady=4)
-        self._field_label(row_p, "서버 포트").pack(side="left")
-        self._entry(row_p, self.server_port_var, 8).pack(side="left", ipady=4, padx=(0, 16))
-        self._field_label(row_p, "수신 포트", width=10).pack(side="left")
-        self._entry(row_p, self.listen_port_var, 8).pack(side="left", ipady=4, padx=(0, 8))
-        self._small_btn(row_p, "적용", self.BLUE, self._apply_ports).pack(side="left")
+        tk.Frame(srv_in, bg=self.ROW_LINE, width=1).pack(side="left", fill="y", padx=20)
 
-        # ── PC 시작 시 자동 실행 ─────────────
-        auto_row = tk.Frame(cfg, bg=self.PANEL)
-        auto_row.pack(fill="x", padx=14, pady=(4, 10))
-        self._field_label(auto_row, "자동 시작").pack(side="left")
-        self._autostart_btn = self._small_btn(
-            auto_row,
-            "ON  ●" if autostart_enabled() else "OFF ○",
-            self.GREEN if autostart_enabled() else self.TEXT_DIM,
-            self._toggle_autostart)
-        self._autostart_btn.pack(side="left")
-        tk.Label(auto_row, text="  PC 시작 시 클라이언트 자동 실행",
-                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
-
-        self._separator(parent, pady=(10, 0))
-
-        # 상태 패널
-        st = self._card(parent)
-        st.pack(fill="x", pady=10)
-        for label, attr in [("서버 연결", "server_lbl"),
-                             ("Aurora 상태", "aurora_lbl"),
-                             ("마지막 명령", "cmd_lbl")]:
-            row = tk.Frame(st, bg=self.PANEL)
-            row.pack(fill="x", padx=16, pady=5)
-            self._field_label(row, label).pack(side="left")
-            lbl = tk.Label(row, text="—", anchor="w",
-                           font=self.FONT_BOLD, fg=self.TEXT, bg=self.PANEL)
-            lbl.pack(side="left")
-            setattr(self, attr, lbl)
-
-        self._separator(parent)
-
-        # 핑 모드
-        pf = self._card(parent)
-        pf.pack(fill="x", pady=10)
+        pf = tk.Frame(srv_in, bg=self.PANEL)
+        pf.pack(side="left", fill="y")
+        tk.Frame(pf, bg=self.PANEL, width=220, height=1).pack()
         hdr_row = tk.Frame(pf, bg=self.PANEL)
-        hdr_row.pack(fill="x", padx=14, pady=(4, 6))
-        self._field_label(hdr_row, "핑 모드").pack(side="left")
+        hdr_row.pack(fill="x", pady=(0, 8))
+        self._section_title(hdr_row, "핑 모드").pack(side="left")
+        seg = tk.Frame(hdr_row, bg=self.PANEL)
+        seg.pack(side="right")
         self._ping_mode_client = config.get("ping_mode", "manual")
-        self.ping_manual_btn_c = self._small_btn(
-            hdr_row, "Manual", self.TEXT_DIM, lambda: None)
-        self.ping_manual_btn_c.pack(side="left", padx=(0, 4))
-        self.ping_auto_btn_c = self._small_btn(
-            hdr_row, "Auto", self.TEXT_DIM, lambda: None)
+        self.ping_manual_btn_c = self._button(seg, "Manual", "secondary", lambda: None, small=True)
+        self.ping_manual_btn_c.pack(side="left")
+        self.ping_auto_btn_c = self._button(seg, "Auto", "secondary", lambda: None, small=True)
         self.ping_auto_btn_c.pack(side="left")
         self._apply_ping_mode_style()
 
         self._ping_result_labels = {}
-        for ip in config.get("server_ips", []):
+        for i, ip in enumerate(config.get("server_ips", [])):
+            if i > 0:
+                tk.Frame(pf, bg=self.ROW_LINE, height=1).pack(fill="x")
             row = tk.Frame(pf, bg=self.PANEL)
-            row.pack(fill="x", padx=14, pady=2)
-            self._field_label(row, ip, width=18).pack(side="left")
-            lbl = tk.Label(row, text="—", anchor="w",
-                           font=self.FONT_BOLD, fg=self.TEXT, bg=self.PANEL)
-            lbl.pack(side="left")
+            row.pack(fill="x", pady=6)
+            tk.Label(row, text=ip, anchor="w", font=self.FONT_MONO,
+                     fg=self.TEXT, bg=self.PANEL).pack(side="left")
+            lbl = tk.Label(row, text="—", anchor="e",
+                           font=self.FONT_MONO_BOLD, fg=self.TEXT, bg=self.PANEL)
+            lbl.pack(side="right")
             self._ping_result_labels[ip] = lbl
 
-        self._separator(parent)
+        # 설정 카드
+        cfg = self._card(parent)
+        cfg.pack(fill="x", pady=(0, 14))
+
+        self.server_port_var = tk.StringVar(value=str(config.get("server_port", 9000)))
+        self.listen_port_var = tk.StringVar(value=str(config.get("listen_port", 9001)))
+        row_p = tk.Frame(cfg, bg=self.PANEL)
+        row_p.pack(fill="x", padx=20, pady=(16, 0))
+        self._field_label(row_p, "서버 포트", width=8).pack(side="left", padx=(0, 8))
+        self._entry(row_p, self.server_port_var, 10).pack(side="left", ipady=7, padx=(0, 28))
+        self._field_label(row_p, "수신 포트", width=8).pack(side="left", padx=(0, 8))
+        self._entry(row_p, self.listen_port_var, 10).pack(side="left", ipady=7, padx=(0, 8))
+        self._button(row_p, "적용", "primary", self._apply_ports).pack(side="left")
+
+        # ── PC 시작 시 자동 실행 ─────────────
+        auto_row = tk.Frame(cfg, bg=self.PANEL)
+        auto_row.pack(fill="x", padx=20, pady=(10, 16))
+        self._field_label(auto_row, "자동 시작", width=8).pack(side="left", padx=(0, 8))
+        self._autostart_btn = self._button(
+            auto_row, "OFF ○", "secondary", self._toggle_autostart)
+        self._style_autostart_btn(autostart_enabled())
+        self._autostart_btn.pack(side="left")
+        tk.Label(auto_row, text="  PC 시작 시 클라이언트 자동 실행",
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
 
         # 수동 제어
-        mf = tk.Frame(parent, bg=self.BG)
-        mf.pack(fill="x", pady=10)
-        tk.Label(mf, text="수동 제어 (긴급용)",
-                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.BG).pack(anchor="w", pady=(0, 6))
-        br = tk.Frame(mf, bg=self.BG)
-        br.pack(fill="x")
-        self._btn(br, "▶ 프로그램 실행", self.BTN_START, self.BTN_START_H,
-                  self._manual_start).pack(side="left", padx=(0, 8))
-        self._btn(br, "■ 프로그램 종료", self.BTN_STOP, self.BTN_STOP_H,
-                  self._manual_stop).pack(side="left")
-
-        self._separator(parent, pady=(10, 0))
+        mf = self._card(parent)
+        mf.pack(fill="x", pady=(0, 14))
+        mf_in = tk.Frame(mf, bg=self.PANEL)
+        mf_in.pack(fill="x", padx=20, pady=16)
+        self._section_title(mf_in, "수동 제어").pack(side="left")
+        tk.Label(mf_in, text=" (긴급용)", font=self.FONT,
+                 fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+        self._button(mf_in, "■  프로그램 종료", "stop",
+                     self._manual_stop).pack(side="right")
+        self._button(mf_in, "▶  프로그램 실행", "start",
+                     self._manual_start).pack(side="right", padx=(0, 8))
 
         # 로그
-        lf = tk.Frame(parent, bg=self.BG)
-        lf.pack(fill="both", expand=True, pady=(8, 0))
-        tk.Label(lf, text="LOG", font=self.FONT_TITLE,
-                 fg=self.TEXT_DIM, bg=self.BG).pack(anchor="w", pady=(0, 4))
-        li = self._card(lf)
-        li.pack(fill="both", expand=True)
-        self.log_text = tk.Text(li, font=self.FONT_MONO, bg=self.PANEL,
-                 fg=self.TEXT_DIM, bd=0, padx=10, pady=8,
-                 state="disabled", wrap="word", highlightthickness=0)
-        sb = ttk.Scrollbar(li, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.log_text.pack(fill="both", expand=True)
+        self.log_text = self._log_panel(parent, "LOG")
 
     # ── 프로세스 관리 탭 ─────────────────
     def _build_process_tab(self, parent):
         # ── 실행 프로그램 섹션 ────────────────
         run_panel = self._card(parent)
-        run_panel.pack(fill="x", pady=(10, 0))
+        run_panel.pack(fill="x", pady=(0, 14))
 
-        tk.Label(run_panel, text="실행 프로그램",
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM,
-                 bg=self.PANEL).pack(anchor="w", padx=14, pady=(8, 4))
+        self._section_title(run_panel, "실행 프로그램").pack(anchor="w", padx=20, pady=(16, 10))
 
         path_row = tk.Frame(run_panel, bg=self.PANEL)
-        path_row.pack(fill="x", padx=14, pady=(0, 10))
+        path_row.pack(fill="x", padx=20, pady=(0, 16))
 
-        self._field_label(path_row, "실행 경로", width=10).pack(side="left")
+        self._field_label(path_row, "실행 경로", width=8).pack(side="left", padx=(0, 8))
 
         self.aurora_path_var = tk.StringVar(
             value=config.get("aurora_path", DEFAULT_CONFIG["aurora_path"]))
-        self._entry(path_row, self.aurora_path_var, 30
-                    ).pack(side="left", ipady=4, padx=(0, 6))
+
+        self._button(path_row, "적용", "primary", self._apply_aurora_path).pack(side="right")
 
         def _browse_exe():
             path = filedialog.askopenfilename(
@@ -751,56 +868,64 @@ class AuroraClientApp:
             if path:
                 self.aurora_path_var.set(path)
 
-        self._small_btn(path_row, "찾아보기", self.TEXT_DIM, _browse_exe).pack(side="left", padx=(0, 6))
-        self._small_btn(path_row, "적용", self.BLUE, self._apply_aurora_path).pack(side="left")
-
-        self._separator(parent, pady=(4, 0))
+        self._button(path_row, "찾아보기", "secondary", _browse_exe).pack(side="right", padx=(0, 8))
+        self._entry(path_row, self.aurora_path_var, 30
+                    ).pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 8))
 
         # ── 프로세스 종료 섹션 ────────────────
-        kill_panel = tk.Frame(parent, bg=self.BG)
-        kill_panel.pack(fill="both", expand=True, pady=(10, 0))
+        kill_panel = self._card(parent)
+        kill_panel.pack(fill="both", expand=True)
 
-        hdr = tk.Frame(kill_panel, bg=self.BG)
-        hdr.pack(fill="x", padx=4)
-        tk.Label(hdr, text="프로세스 종료 목록",
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM, bg=self.BG).pack(side="left")
+        top = tk.Frame(kill_panel, bg=self.PANEL)
+        top.pack(fill="x", padx=20, pady=(16, 12))
+        self._section_title(top, "프로세스 종료 목록").pack(anchor="w", pady=(0, 10))
 
-        add_row = tk.Frame(kill_panel, bg=self.BG)
-        add_row.pack(fill="x", padx=4, pady=(6, 4))
+        add_row = tk.Frame(top, bg=self.PANEL)
+        add_row.pack(fill="x")
         self._kill_input_var = tk.StringVar()
-        kill_entry = self._entry(add_row, self._kill_input_var, 22)
-        kill_entry.pack(side="left", ipady=4, padx=(0, 6))
+        kill_entry = self._entry(add_row, self._kill_input_var, 28)
+        kill_entry.pack(side="left", ipady=7, padx=(0, 8))
         kill_entry.bind("<Return>", lambda e: self._add_kill_process())
         tk.Label(add_row, text="예: notepad.exe",
-                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.BG).pack(side="left", padx=(0, 10))
-        self._small_btn(add_row, "+ 추가", self.BLUE, self._add_kill_process, self.BG).pack(side="left", padx=(0, 4))
-        self._small_btn(add_row, "− 삭제", self.RED,  self._del_kill_process, self.BG).pack(side="left")
-
-        # 열 헤더
-        col_hdr = tk.Frame(kill_panel, bg=self.PANEL)
-        col_hdr.pack(fill="x", padx=4)
-        for col, w, anchor in [("프로세스 이름", 24, "w"), ("상태", 12, "center")]:
-            tk.Label(col_hdr, text=col, width=w, anchor=anchor,
-                     font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                     bg=self.PANEL, pady=4).pack(side="left", padx=(8 if anchor == "w" else 0, 0))
-
-        self._separator(kill_panel, padx=4)
-
-        self._kill_rows_frame = tk.Frame(kill_panel, bg=self.BG)
-        self._kill_rows_frame.pack(fill="both", expand=True, padx=4)
+                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, 10))
+        self._button(add_row, "− 삭제", "danger", self._del_kill_process).pack(side="right")
+        self._button(add_row, "+ 추가", "primary", self._add_kill_process).pack(side="right", padx=(0, 8))
 
         # 하단 버튼
-        self._separator(kill_panel, padx=4, pady=(4, 0))
-        btn_row = tk.Frame(kill_panel, bg=self.BG)
-        btn_row.pack(fill="x", padx=4, pady=6)
-        self._btn(btn_row, "선택 프로세스 종료", self.BTN_STOP, self.BTN_STOP_H,
-                  self._kill_selected).pack(side="left", padx=(0, 8))
-        self._btn(btn_row, "전체 종료", self.BTN_ALL, self.BTN_ALL_H,
-                  self._kill_all).pack(side="left", padx=(0, 8))
-        self._small_btn(btn_row, "새로고침", self.TEXT_DIM,
-                        self._refresh_kill_status, self.BG).pack(side="left")
+        btn_bar = tk.Frame(kill_panel, bg=self.PANEL)
+        btn_bar.pack(side="bottom", fill="x")
+        self._separator(btn_bar)
+        btn_row = tk.Frame(btn_bar, bg=self.PANEL)
+        btn_row.pack(fill="x", padx=20, pady=16)
+        self._button(btn_row, "선택 프로세스 종료", "stop",
+                     self._kill_selected).pack(side="left", padx=(0, 8))
+        self._button(btn_row, "전체 종료", "danger",
+                     self._kill_all).pack(side="left")
+        self._button(btn_row, "새로고침", "secondary",
+                     self._refresh_kill_status).pack(side="right")
+
+        # 열 헤더
+        col_hdr = tk.Frame(kill_panel, bg=self.PANEL_ALT)
+        col_hdr.pack(fill="x")
+        self._configure_kill_grid(col_hdr)
+        tk.Label(col_hdr, text="프로세스 이름", anchor="w", font=self.FONT_SMALL,
+                 fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=8
+                 ).grid(row=0, column=1, sticky="w", padx=(0, 8))
+        tk.Label(col_hdr, text="상태", anchor="w", font=self.FONT_SMALL,
+                 fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=8
+                 ).grid(row=0, column=2, sticky="w")
+
+        self._kill_rows_frame = tk.Frame(kill_panel, bg=self.PANEL)
+        self._kill_rows_frame.pack(fill="both", expand=True)
 
         self._rebuild_kill_rows()
+
+    def _configure_kill_grid(self, frame):
+        """프로세스 표 열 규격 (헤더·행 공통)"""
+        frame.columnconfigure(0, minsize=44)
+        frame.rowconfigure(0, minsize=38)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(2, minsize=110)
 
     def _rebuild_kill_rows(self):
         for w in self._kill_rows_frame.winfo_children():
@@ -811,32 +936,30 @@ class AuroraClientApp:
         procs = config.get("kill_processes", [])
         if not procs:
             tk.Label(self._kill_rows_frame, text="등록된 프로세스가 없습니다.",
-                     font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.BG,
+                     font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL,
                      pady=12).pack(anchor="w", padx=12)
             return
 
         running_map = get_running_processes(procs)
-        for idx, name in enumerate(procs):
-            row_bg = self.BG if idx % 2 == 0 else self.ROW_ALT
-            row = tk.Frame(self._kill_rows_frame, bg=row_bg)
+        for name in procs:
+            tk.Frame(self._kill_rows_frame, bg=self.ROW_LINE, height=1).pack(fill="x")
+            row = tk.Frame(self._kill_rows_frame, bg=self.PANEL)
             row.pack(fill="x")
+            self._configure_kill_grid(row)
 
             var = tk.BooleanVar(value=False)
             self._kill_check_vars[name] = var
-            tk.Checkbutton(row, variable=var, bg=row_bg,
-                           activebackground=row_bg, selectcolor=self.PANEL, bd=0
-                           ).pack(side="left", padx=(6, 0))
+            tk.Checkbutton(row, variable=var, bg=self.PANEL,
+                           activebackground=self.PANEL, selectcolor=self.PANEL, bd=0
+                           ).grid(row=0, column=0, padx=(14, 0))
 
-            tk.Label(row, text=name, width=22, anchor="w",
-                     font=self.FONT_INPUT, fg=self.TEXT, bg=row_bg, pady=6
-                     ).pack(side="left", padx=(4, 0))
+            tk.Label(row, text=name, anchor="w",
+                     font=self.FONT_INPUT, fg=self.TEXT, bg=self.PANEL
+                     ).grid(row=0, column=1, sticky="w", padx=(0, 8))
 
-            status_lbl = tk.Label(row,
-                                  **self._running_style(running_map.get(name, False)),
-                                  width=12, anchor="center",
-                                  font=self.FONT_MONO_BOLD,
-                                  bg=row_bg, pady=6)
-            status_lbl.pack(side="left")
+            status_lbl = self._make_badge(row, "", self.TEXT_DIM)
+            self._set_badge(status_lbl, **self._running_style(running_map.get(name, False)))
+            status_lbl.grid(row=0, column=2, sticky="w")
             self._kill_status_lbls[name] = status_lbl
 
     def _add_kill_process(self):
@@ -901,93 +1024,88 @@ class AuroraClientApp:
             running_map = get_running_processes(procs)
             def _upd():
                 for name, lbl in self._kill_status_lbls.items():
-                    lbl.config(**self._running_style(running_map.get(name, False)))
+                    self._set_badge(lbl, **self._running_style(running_map.get(name, False)))
             self.root.after(0, _upd)
         threading.Thread(target=_do, daemon=True).start()
 
     # ── 자동 삭제 탭 ─────────────────────
-    def _build_delete_tab(self, parent):
-        # 헤더
-        hdr = tk.Frame(parent, bg=self.BG)
-        hdr.pack(fill="x", pady=(10, 6))
-        tk.Label(hdr, text="자동 삭제 규칙",
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM, bg=self.BG).pack(side="left")
-        self._small_btn(hdr, "+ 추가", self.BLUE,
-                        self._add_delete_rule, self.BG).pack(side="right")
+    # 규칙 표 열 규격 (최소폭, 가중치) — 헤더·행 공통
+    _DELETE_COLS = [(30, 0), (0, 1), (62, 0), (50, 0), (86, 0), (50, 0), (49, 0), (37, 0)]
 
+    def _configure_delete_grid(self, frame):
+        for i, (minsize, weight) in enumerate(self._DELETE_COLS):
+            frame.columnconfigure(i, minsize=minsize, weight=weight)
+
+    def _build_delete_tab(self, parent):
         # ── 프로그레스바 (다음 실행까지) ─────
         pb_frame = self._card(parent)
-        pb_frame.pack(fill="x", pady=(0, 8))
+        pb_frame.pack(fill="x", pady=(0, 14))
 
         pb_top = tk.Frame(pb_frame, bg=self.PANEL)
-        pb_top.pack(fill="x", padx=10, pady=(6, 4))
+        pb_top.pack(fill="x", padx=20, pady=16)
         tk.Label(pb_top, text="다음 자동 삭제까지",
-                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
         self.delete_countdown_lbl = tk.Label(pb_top, text="—",
-                 font=self.FONT_MONO_BOLD, fg=self.BLUE, bg=self.PANEL)
-        self.delete_countdown_lbl.pack(side="right")
+                 font=self.FONT_COUNTDOWN, fg=self.BLUE, bg=self.PANEL)
+        self.delete_countdown_lbl.pack(side="left", padx=12)
 
-        self.delete_progress = ttk.Progressbar(pb_frame, orient="horizontal",
+        self.delete_progress = ttk.Progressbar(pb_top, orient="horizontal",
                                                length=200, maximum=86400, value=0,
                                                style="Countdown.Horizontal.TProgressbar")
-        self.delete_progress.pack(fill="x", padx=10, pady=(0, 8))
+        self.delete_progress.pack(side="left", fill="x", expand=True)
 
-        self._separator(parent)
+        # 로그 (하단 고정 — 규칙 카드보다 먼저 pack)
+        self.delete_log_text = self._log_panel(parent, "삭제 LOG", height=170)
 
-        # 컬럼 헤더
-        col = tk.Frame(parent, bg=self.PANEL)
+        # ── 규칙 카드 ────────────────────────
+        rules_card = self._card(parent)
+        rules_card.pack(fill="both", expand=True)
+
+        tool = tk.Frame(rules_card, bg=self.PANEL)
+        tool.pack(fill="x", padx=20, pady=16)
+        self._section_title(tool, "자동 삭제 규칙").pack(side="left")
+        self._button(tool, "+ 추가", "primary", self._add_delete_rule).pack(side="right")
+
+        # 하단: 지금 실행 버튼
+        bot_bar = tk.Frame(rules_card, bg=self.PANEL)
+        bot_bar.pack(side="bottom", fill="x")
+        self._separator(bot_bar)
+        bot = tk.Frame(bot_bar, bg=self.PANEL)
+        bot.pack(fill="x", padx=20, pady=16)
+        self._button(bot, "지금 실행", "primary", self._run_delete_now).pack(side="left")
+        self.delete_status_lbl = tk.Label(bot, text="",
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL)
+        self.delete_status_lbl.pack(side="left", padx=10)
+
+        # 컬럼 헤더 (스크롤바 폭만큼 우측 여백)
+        col = tk.Frame(rules_card, bg=self.PANEL_ALT)
         col.pack(fill="x")
-        for text, anchor, w in [("ON", "center", 4), ("폴더 경로", "w", 26),
-                                 ("확장자", "center", 8), ("기한(일)", "center", 8),
-                                 ("폴더삭제", "center", 7)]:
-            tk.Label(col, text=text, width=w, anchor=anchor,
-                     font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                     bg=self.PANEL, pady=6).pack(side="left")
-
-        self._separator(parent)
+        col_in = tk.Frame(col, bg=self.PANEL_ALT)
+        col_in.pack(side="left", fill="x", expand=True, padx=14)
+        self._configure_delete_grid(col_in)
+        for i, text in enumerate(["ON", "폴더 경로", "확장자", "기한(일)", "폴더삭제"]):
+            tk.Label(col_in, text=text, anchor="w", font=self.FONT_SMALL,
+                     fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=8
+                     ).grid(row=0, column=i, sticky="w", padx=2)
 
         # 규칙 목록 (스크롤)
-        list_outer = self._card(parent)
-        list_outer.pack(fill="both", expand=True, pady=(8, 4))
+        list_outer = tk.Frame(rules_card, bg=self.PANEL)
+        list_outer.pack(fill="both", expand=True)
 
         canvas = tk.Canvas(list_outer, bg=self.PANEL, highlightthickness=0)
         sb2 = ttk.Scrollbar(list_outer, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=sb2.set)
         sb2.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
+        tk.Frame(col, bg=self.PANEL_ALT, width=sb2.winfo_reqwidth(), height=1).pack(side="left")
 
         self._delete_rules_frame = tk.Frame(canvas, bg=self.PANEL)
-        canvas.create_window((0, 0), window=self._delete_rules_frame, anchor="nw")
+        rules_win = canvas.create_window((0, 0), window=self._delete_rules_frame, anchor="nw")
         self._delete_rules_frame.bind("<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+            lambda e: canvas.itemconfigure(rules_win, width=e.width))
         self._delete_canvas = canvas
-
-        self._separator(parent)
-
-        # 하단: 지금 실행 버튼
-        bot = tk.Frame(parent, bg=self.BG)
-        bot.pack(fill="x", pady=(6, 0))
-        self._small_btn(bot, "지금 실행", self.BLUE,
-                        self._run_delete_now, self.BG).pack(side="left")
-        self.delete_status_lbl = tk.Label(bot, text="",
-                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.BG)
-        self.delete_status_lbl.pack(side="left", padx=10)
-
-        # 로그
-        self._separator(parent, pady=(6, 0))
-        dlf = tk.Frame(parent, bg=self.BG)
-        dlf.pack(fill="x", pady=(6, 0))
-        tk.Label(dlf, text="삭제 LOG", font=self.FONT_TITLE,
-                 fg=self.TEXT_DIM, bg=self.BG).pack(anchor="w", pady=(0, 4))
-        dli = self._card(dlf)
-        dli.pack(fill="x")
-        self.delete_log_text = tk.Text(dli, font=self.FONT_MONO, bg=self.PANEL,
-                 fg=self.TEXT_DIM, bd=0, padx=8, pady=6,
-                 state="disabled", wrap="word", highlightthickness=0, height=5)
-        sb3 = ttk.Scrollbar(dli, orient="vertical", command=self.delete_log_text.yview)
-        self.delete_log_text.configure(yscrollcommand=sb3.set)
-        sb3.pack(side="right", fill="y")
-        self.delete_log_text.pack(fill="x")
 
         # 저장된 규칙 복원
         for rule in config.get("auto_delete_rules", []):
@@ -1001,15 +1119,20 @@ class AuroraClientApp:
         self._tick_countdown()
 
     def _add_delete_rule(self, rule: dict = None):
-        idx  = len(self._delete_rule_widgets)
         rule = rule or {"path": "", "ext": "", "minutes": 30,
                         "enabled": True, "applied": False, "last_deleted": "",
                         "type": "file"}
-        bg   = self.BG if idx % 2 == 0 else self.ROW_ALT
+        bg   = self.PANEL
+
+        # 규칙 1개 = item(구분선 + 행 1 + 행 2)
+        item = tk.Frame(self._delete_rules_frame, bg=bg)
+        item.pack(fill="x")
+        tk.Frame(item, bg=self.ROW_LINE, height=1).pack(fill="x")
 
         # ── 행 1: 컨트롤 ─────────────────────
-        row1 = tk.Frame(self._delete_rules_frame, bg=bg)
-        row1.pack(fill="x")
+        row1 = tk.Frame(item, bg=bg)
+        row1.pack(fill="x", padx=14, pady=(10, 0))
+        self._configure_delete_grid(row1)
 
         ena_var        = tk.BooleanVar(value=rule.get("enabled", True))
         path_var       = tk.StringVar(value=rule.get("path", ""))
@@ -1019,41 +1142,40 @@ class AuroraClientApp:
 
         tk.Checkbutton(row1, variable=ena_var, bg=bg,
                        activebackground=bg, selectcolor=self.PANEL, bd=0
-                       ).pack(side="left", padx=(10, 4))
+                       ).grid(row=0, column=0, padx=2)
 
-        self._entry(row1, path_var, 24, self.FONT_MONO
-                    ).pack(side="left", ipady=4, padx=(0, 4), pady=6)
+        path_cell = tk.Frame(row1, bg=bg)
+        path_cell.grid(row=0, column=1, sticky="ew", padx=2)
+        self._entry(path_cell, path_var, 1, self.FONT_MONO
+                    ).pack(side="left", fill="x", expand=True, ipady=7)
 
         def _browse(_pv=path_var):
             folder = filedialog.askdirectory(parent=self.root)
             if folder:
                 _pv.set(folder)
-        tk.Button(row1, text="…", font=self.FONT_SMALL, fg=self.TEXT_DIM,
-                  bg=self.PANEL, activebackground=self.BORDER,
-                  relief="flat", bd=0, cursor="hand2",
-                  command=_browse, padx=5, pady=3).pack(side="left", padx=(0, 6))
+        self._button(path_cell, "…", "secondary", _browse, small=True).pack(side="left")
 
-        ext_entry = self._entry(row1, ext_var, 7, self.FONT_MONO)
-        ext_entry.pack(side="left", ipady=4, padx=(0, 6))
+        ext_entry = self._entry(row1, ext_var, 1, self.FONT_MONO)
+        ext_entry.grid(row=0, column=2, sticky="ew", padx=2, ipady=7)
 
-        self._entry(row1, min_var, 6, self.FONT_MONO
-                    ).pack(side="left", ipady=4, padx=(0, 6))
+        self._entry(row1, min_var, 1, self.FONT_MONO
+                    ).grid(row=0, column=3, sticky="ew", padx=2, ipady=7)
 
         tk.Checkbutton(row1, text="폴더삭제", variable=folder_del_var,
                        font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=bg,
-                       activebackground=bg, selectcolor=self.PANEL, bd=0
-                       ).pack(side="left", padx=(0, 6))
+                       activebackground=bg, selectcolor=self.PANEL, bd=0, padx=6
+                       ).grid(row=0, column=4, sticky="w", padx=2)
 
         # ── 적용 버튼 + 상태 표시 ─────────────
         applied_init = rule.get("applied", False)
-        status_lbl = tk.Label(row1,
-                              text="적용됨" if applied_init else "미적용",
-                              font=self.FONT_SMALL_BOLD,
-                              fg=self.GREEN if applied_init else self.RED,
-                              bg=bg, width=5)
-        status_lbl.pack(side="right", padx=(0, 4))
+        status_lbl = tk.Label(row1, font=self.FONT_SMALL, padx=6, pady=2)
+        self._set_badge(status_lbl,
+                        "적용됨" if applied_init else "미적용",
+                        self.GREEN if applied_init else self.RED)
+        status_lbl.grid(row=0, column=5, sticky="w", padx=2)
 
         widget_info = {
+            "item": item,
             "row1": row1, "path": path_var, "ext": ext_var,
             "minutes": min_var, "enabled": ena_var,
             "folder_del": folder_del_var, "ext_entry": ext_entry,
@@ -1075,36 +1197,32 @@ class AuroraClientApp:
                 messagebox.showwarning("알림", "확장자를 입력하거나 폴더삭제를 체크하세요.", parent=self.root)
                 return
             _wi["applied"] = True
-            _wi["status_lbl"].config(text="적용됨", fg=self.GREEN)
+            self._set_badge(_wi["status_lbl"], "적용됨", self.GREEN)
             self._save_delete_rules()
 
-        tk.Button(row1, text="적용", font=self.FONT_SMALL_BOLD,
-                  fg=self.BLUE, bg=bg, activeforeground=self.BLUE,
-                  activebackground=self.BORDER, relief="flat", bd=0,
-                  cursor="hand2", padx=6, pady=2,
-                  command=_apply_rule).pack(side="right", padx=(0, 4))
+        self._button(row1, "적용", "primary", _apply_rule, small=True
+                     ).grid(row=0, column=6, sticky="ew", padx=2)
 
         def _del_rule(_wi=widget_info):
             self._delete_rule_widgets.remove(_wi)
             _wi["row1"].destroy()
             if _wi["last_del_lbl"] and _wi["last_del_lbl"].winfo_exists():
                 _wi["last_del_lbl"].master.destroy()
+            _wi["item"].destroy()
             self._save_delete_rules()
             self._refresh_delete_canvas()
 
-        tk.Button(row1, text="✕", font=self.FONT_SMALL_BOLD,
-                  fg=self.RED, bg=bg, activeforeground=self.RED,
-                  activebackground=self.BORDER, relief="flat", bd=0, cursor="hand2",
-                  command=_del_rule).pack(side="right", padx=(0, 2))
+        self._button(row1, "✕", "danger", _del_rule, small=True
+                     ).grid(row=0, column=7, sticky="ew", padx=2)
 
         # ── 행 2: 마지막 삭제 일자 ───────────
-        row2 = tk.Frame(self._delete_rules_frame, bg=bg)
+        row2 = tk.Frame(item, bg=bg)
         row2.pack(fill="x")
         last_del_text = rule.get("last_deleted", "")
         last_del_lbl = tk.Label(row2,
                                 text=f"마지막 삭제: {last_del_text}" if last_del_text else "마지막 삭제: —",
-                                font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=bg)
-        last_del_lbl.pack(anchor="w", padx=28, pady=(0, 4))
+                                font=self.FONT_MONO_SMALL, fg=self.TEXT_DIM, bg=bg)
+        last_del_lbl.pack(anchor="w", padx=(48, 14), pady=(4, 10))
         widget_info["last_del_lbl"] = last_del_lbl
         last_del_lbl.master = row2
 
@@ -1117,14 +1235,14 @@ class AuroraClientApp:
             )
             if _wi["applied"]:
                 _wi["applied"] = False
-                _wi["status_lbl"].config(text="미적용", fg=self.RED)
+                self._set_badge(_wi["status_lbl"], "미적용", self.RED)
             self._save_delete_rules()
 
         # 경로 변경 시 적용 상태 초기화
         def _on_key_change(*_, _wi=widget_info):
             if _wi["applied"]:
                 _wi["applied"] = False
-                _wi["status_lbl"].config(text="미적용", fg=self.RED)
+                self._set_badge(_wi["status_lbl"], "미적용", self.RED)
                 self._save_delete_rules()
 
         path_var.trace_add("write", _on_key_change)
@@ -1177,7 +1295,7 @@ class AuroraClientApp:
     def _delete_log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
-        self.add_log(line)
+        self.add_log(msg)   # add_log 가 시각을 붙이므로 원문 전달
         self.delete_log_text.config(state="normal")
         self.delete_log_text.insert("end", line + "\n")
         self.delete_log_text.see("end")
@@ -1213,21 +1331,61 @@ class AuroraClientApp:
         threading.Thread(target=run, daemon=True).start()
 
     # ── 버튼 헬퍼 ────────────────────────
-    def _btn(self, parent, text, bg, abg, cmd):
-        b = tk.Button(parent, text=text, font=self.FONT_BOLD,
-                      fg=self.WHITE, bg=bg, activeforeground=self.WHITE,
-                      activebackground=abg, bd=0, cursor="hand2",
-                      relief="flat", padx=16, pady=8, command=cmd)
-        b.bind("<Enter>", lambda e: b.config(bg=abg))
-        b.bind("<Leave>", lambda e: b.config(bg=bg))
+    def _button(self, parent, text, kind, cmd, small=False):
+        """kind: primary / start / stop / secondary / danger
+        base_bg / hover_bg 속성으로 hover 색을 관리 (상태 변경 시 함께 갱신)"""
+        styles = {
+            #             bg           hover        fg           border
+            "primary":   (self.BLUE,      self.BLUE_H,      self.WHITE, self.BLUE),
+            "start":     (self.BTN_START, self.BTN_START_H, self.WHITE, self.BTN_START),
+            "stop":      (self.BTN_STOP,  self.BTN_STOP_H,  self.WHITE, self.BTN_STOP),
+            "secondary": (self.PANEL,     self.BG,          self.TEXT,  self.INPUT_BORDER),
+            "danger":    (self.PANEL,     self.BG,          self.RED,   self.DANGER_BORDER),
+        }
+        bg, hover, fg, border = styles[kind]
+        # tk.Button 은 highlight 테두리가 그려지지 않으므로 1px 테두리용 Frame 으로 감싼다
+        # (pack/grid/place 는 테두리 Frame 에 위임)
+        border_frame = tk.Frame(parent, bg=border)
+        b = tk.Button(border_frame, text=text,
+                      font=self.FONT_SMALL if small else self.FONT_BOLD,
+                      fg=fg, bg=bg, activeforeground=fg, activebackground=hover,
+                      disabledforeground=self.DISABLED_TEXT,
+                      bd=0, cursor="hand2", relief="flat", highlightthickness=0,
+                      padx=10 if small else 14, pady=6 if small else 7,
+                      command=cmd)
+        b.pack(fill="both", expand=True, padx=1, pady=1)
+        b.border_frame = border_frame
+        b.pack   = border_frame.pack
+        b.grid   = border_frame.grid
+        b.place  = border_frame.place
+        b.base_bg  = bg
+        b.hover_bg = hover
+        b.bind("<Enter>", lambda e: b.config(bg=b.hover_bg))
+        b.bind("<Leave>", lambda e: b.config(bg=b.base_bg))
         return b
 
-    def _small_btn(self, parent, text, fg, cmd, bg=None):
-        bg = bg or self.PANEL
-        return tk.Button(parent, text=text, font=self.FONT_SMALL_BOLD,
-                         fg=fg, bg=bg, activeforeground=fg,
-                         activebackground=self.BORDER, bd=0, cursor="hand2",
-                         relief="flat", padx=10, pady=3, command=cmd)
+    def _style_button(self, btn, text, fg, bg, hover, border):
+        """토글/세그먼트 버튼 표시 갱신 (hover 색도 함께)"""
+        btn.base_bg  = bg
+        btn.hover_bg = hover
+        btn.border_frame.config(bg=border)
+        btn.config(text=text, fg=fg, bg=bg, activeforeground=fg, activebackground=hover)
+
+    def _style_segment(self, btn, selected: bool):
+        """Manual/Auto 세그먼트: 선택=BLUE 배경·흰 글자, 비선택=흰 배경·TEXT_DIM"""
+        if selected:
+            self._style_button(btn, btn.cget("text"), self.WHITE, self.BLUE, self.BLUE_H, self.BLUE)
+        else:
+            self._style_button(btn, btn.cget("text"), self.TEXT_DIM, self.PANEL, self.BG, self.INPUT_BORDER)
+
+    def _style_autostart_btn(self, enabled: bool):
+        """자동 시작 토글: ON=초록 배지 느낌, OFF=보조 버튼"""
+        if enabled:
+            self._style_button(self._autostart_btn, "ON  ●", self.GREEN, self.OK_BG,
+                               self.OK_HOVER, self.OK_BORDER)
+        else:
+            self._style_button(self._autostart_btn, "OFF ○", self.TEXT_DIM, self.PANEL,
+                               self.BG, self.INPUT_BORDER)
 
     # ── 서버 IP 목록 관리 ────────────────
     def _add_server_ip(self):
@@ -1272,9 +1430,7 @@ class AuroraClientApp:
         try:
             new_state = not autostart_enabled()
             set_autostart(new_state)
-            self._autostart_btn.config(
-                text="ON  ●" if new_state else "OFF ○",
-                fg=self.GREEN if new_state else self.TEXT_DIM)
+            self._style_autostart_btn(new_state)
             self.add_log(f"자동 시작 {'활성화' if new_state else '비활성화'}")
         except Exception as e:
             messagebox.showerror("오류", f"레지스트리 쓰기 실패:\n{e}")
@@ -1397,12 +1553,10 @@ class AuroraClientApp:
                 lbl.config(text=f"{ms}ms", fg=fg)
 
     def _apply_ping_mode_style(self):
-        """현재 핑 모드 기준으로 Manual/Auto 버튼 글자색 표시 (초기화·변경 공용)"""
+        """현재 핑 모드 기준으로 Manual/Auto 세그먼트 표시 (초기화·변경 공용)"""
         is_auto = self._ping_mode_client == "auto"
-        manual_fg = self.TEXT_DIM if is_auto else self.BLUE
-        auto_fg   = self.BLUE if is_auto else self.TEXT_DIM
-        self.ping_manual_btn_c.config(fg=manual_fg, activeforeground=manual_fg)
-        self.ping_auto_btn_c.config(fg=auto_fg, activeforeground=auto_fg)
+        self._style_segment(self.ping_manual_btn_c, not is_auto)
+        self._style_segment(self.ping_auto_btn_c, is_auto)
 
     def _on_ping_mode_changed(self, mode: str):
         self._ping_mode_client = mode
@@ -1464,6 +1618,7 @@ def main():
             root.iconbitmap(ico_path)
             break
 
+    AuroraClientApp.apply_font_fallback()
     AuroraClientApp.setup_styles()
 
     app = AuroraClientApp(root)
