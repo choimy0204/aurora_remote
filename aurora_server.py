@@ -16,10 +16,28 @@ import winreg
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 import pystray
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageTk
+from tkinter import font as tkfont
 import socket as _socket
 import shutil
 import sys
+
+# ── 번들 리소스(글꼴/이미지) ──────────────
+def _resource_path(rel):
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
+def _register_fonts():
+    """fonts/ 폴더의 글꼴을 이 프로세스에서만 사용하도록 등록 (실패 시 무시 → 폴백 폰트)"""
+    try:
+        import ctypes, glob
+        gdi = ctypes.WinDLL("gdi32")
+        for f in glob.glob(_resource_path(os.path.join("fonts", "*.[ot]tf"))):
+            gdi.AddFontResourceExW(f, 0x10, 0)   # FR_PRIVATE
+    except Exception:
+        pass
+
+_register_fonts()
 
 # ── 중복 실행 방지 ────────────────────────
 _LOCK_SOCK = None
@@ -507,41 +525,102 @@ def check_offline():
 # ─────────────────────────────────────────
 # GUI
 # ─────────────────────────────────────────
+_DISABLED_BG = "#EEF1F3"
+
+
+class _StyledButton(tk.Button):
+    """테두리(1px)를 가진 버튼. Windows 의 tk.Button 은 highlightthickness 테두리가 그려지지 않으므로
+    테두리색 Frame 으로 감싸고, pack/pack_forget 은 그 Frame 에 적용한다.
+    state 변경 시 disabled 스타일(회색 배경)을 자동 적용/복원한다."""
+
+    def __init__(self, parent, border, **kw):
+        self._border_frame = tk.Frame(parent, bg=border)
+        super().__init__(self._border_frame, **kw)
+        tk.Button.pack(self, padx=1, pady=1)
+
+    def pack(self, cnf=None, **kw):
+        self._border_frame.pack(cnf or {}, **kw)
+
+    def pack_forget(self):
+        self._border_frame.pack_forget()
+
+    def set_border(self, color):
+        self.base_border = color
+        if str(self.cget("state")) != "disabled":
+            self._border_frame.configure(bg=color)
+
+    def configure(self, cnf=None, **kw):
+        result = super().configure(cnf, **kw)
+        if "state" in kw:
+            self._apply_state()
+        return result
+
+    config = configure
+
+    def _apply_state(self):
+        if str(self.cget("state")) == "disabled":
+            super().configure(bg=_DISABLED_BG)
+            self._border_frame.configure(bg=_DISABLED_BG)
+        else:
+            super().configure(bg=self.base_bg)
+            self._border_frame.configure(bg=self.base_border)
+
+
 class AuroraServerApp:
 
     # ── 색상 팔레트 ──
-    BG          = "#f1f5f9"
-    PANEL       = "#ffffff"
-    BORDER      = "#e2e8f0"
-    TEXT        = "#0f172a"
-    TEXT_DIM    = "#64748b"
-    GREEN       = "#16a34a"
-    RED         = "#dc2626"
-    YELLOW      = "#d97706"
-    BLUE        = "#4f46e5"
-    BTN_START   = "#16a34a"
-    BTN_START_H = "#15803d"
-    BTN_STOP    = "#dc2626"
-    BTN_STOP_H  = "#b91c1c"
-    BTN_DEPLOY  = "#4f46e5"
-    BTN_DEPLOY_H= "#4338ca"
-    BTN_NEUTRAL   = "#64748b"
-    BTN_NEUTRAL_H = "#475569"
-    WHITE       = "#ffffff"
-    ROW_ALT     = "#e9eef5"   # BG 위 줄무늬 행
-    PANEL_ALT   = "#f8fafc"   # PANEL 위 줄무늬 행
-    SELECT_BG   = "#e0e7ff"
+    BG            = "#F3F5F7"
+    PANEL         = "#FFFFFF"
+    PANEL_ALT     = "#F7F8FA"   # 표 헤더 배경
+    BORDER        = "#E1E5E8"
+    INPUT_BORDER  = "#CDD3D7"
+    ROW_LINE      = "#EEF1F3"   # 표 행 구분선
+    TEXT          = "#1D2327"
+    TEXT_DIM      = "#5F686B"
+    DISABLED_TEXT = "#9AA2A5"
+    BRAND         = "#2F98F9"
+    BLUE          = "#1A6FC9"
+    BLUE_H        = "#155CA8"
+    NAV_ON_BG     = "#E8F2FE"
+    GREEN         = "#138A43"
+    GREEN_H       = "#0F7036"
+    RED           = "#C9372C"
+    RED_H         = "#A82C23"
+    YELLOW        = "#9A5700"
+    OK_BG         = "#E7F6EC"
+    OK_BG_H       = "#D4EDDC"
+    OK_BORDER     = "#9FD5B3"
+    ERR_BG        = "#FDECEA"
+    WARN_BG       = "#FFF4E0"
+    IDLE_BG       = "#EEF1F3"
+    DANGER_BORDER = "#E8A9A3"
+    LOG_BG        = "#1D2327"
+    LOG_FG        = "#D5DADD"
+    BTN_START     = GREEN
+    BTN_START_H   = GREEN_H
+    BTN_STOP      = RED
+    BTN_STOP_H    = RED_H
+    BTN_DEPLOY    = BLUE
+    BTN_DEPLOY_H  = BLUE_H
+    WHITE         = "#FFFFFF"
+    SELECT_BG     = NAV_ON_BG
 
     # ── 폰트 ──
-    FONT           = ("맑은 고딕", 10)
-    FONT_BOLD      = ("맑은 고딕", 10, "bold")
-    FONT_TITLE     = ("맑은 고딕", 11, "bold")
-    FONT_APP_TITLE = ("맑은 고딕", 14, "bold")
-    FONT_SMALL     = ("맑은 고딕", 9)
-    FONT_SMALL_BOLD = ("맑은 고딕", 9, "bold")
-    FONT_MONO      = ("Consolas", 9)
-    FONT_MONO_BOLD = ("Consolas", 9, "bold")
-    FONT_MONO_L    = ("Consolas", 10)
+    FONT            = ("Pretendard Medium", 9)
+    FONT_DESC       = ("Pretendard", 9)
+    FONT_BOLD       = ("Pretendard SemiBold", 9)
+    FONT_TITLE      = ("Pretendard", 10, "bold")
+    FONT_APP_TITLE  = ("Pretendard", 11, "bold")
+    FONT_NAV        = ("Pretendard Medium", 10)
+    FONT_NAV_ON     = ("Pretendard", 10, "bold")
+    FONT_SMALL      = ("Pretendard SemiBold", 8)
+    FONT_SMALL_BOLD = ("Pretendard SemiBold", 8)
+    FONT_MONO       = ("Pretendard", 9)
+    FONT_MONO_BOLD  = ("Pretendard SemiBold", 9)
+    FONT_MONO_L     = ("Pretendard", 9)
+
+    ROW_H = 38      # 표 데이터 행 높이
+    HDR_H = 32      # 표 헤더 행 높이
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -572,341 +651,319 @@ class AuroraServerApp:
 
     # ── UI 최상위 ─────────────────────────
     def _build_ui(self):
-        # 타이틀 바
-        tf = tk.Frame(self.root, bg=self.BG)
-        tf.pack(fill="x", padx=20, pady=(14, 0))
-        tk.Label(tf, text="◈  AURORA REMOTE CONTROLLER",
-                 font=self.FONT_APP_TITLE, fg=self.BLUE, bg=self.BG).pack(side="left")
-        self.server_status_lbl = tk.Label(tf, text="● HTTP 서버 시작 중...",
-                 font=self.FONT_SMALL, fg=self.YELLOW, bg=self.BG)
+        # 헤더 (로고 + 앱 이름 + SERVER 배지 …… HTTP 서버 상태 / 온라인 카운트)
+        hdr = tk.Frame(self.root, bg=self.PANEL, height=56)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+
+        logo = self._load_logo(22)
+        if logo:
+            tk.Label(hdr, image=logo, bg=self.PANEL, bd=0).pack(side="left", padx=(20, 0))
+            tk.Frame(hdr, bg=self.BORDER, width=1, height=22).pack(side="left", padx=16)
+            title_padx = (0, 0)
+        else:
+            title_padx = (20, 0)
+        tk.Label(hdr, text="Aurora Remote Controller",
+                 font=self.FONT_APP_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=title_padx)
+        tk.Label(hdr, text="SERVER", font=self.FONT_SMALL, padx=8, pady=2,
+                 fg=self.TEXT_DIM, bg=self.IDLE_BG).pack(side="left", padx=(16, 0))
+
+        self.online_label = tk.Label(hdr, text="온라인: 0 / 0",
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL)
+        self.online_label.pack(side="right", padx=(16, 20))
+        self.server_status_lbl = tk.Label(hdr, text="", font=self.FONT_SMALL,
+                 padx=8, pady=2, fg=self.YELLOW, bg=self.PANEL)
         self.server_status_lbl.pack(side="right")
+        self._set_badge(self.server_status_lbl, "● HTTP 서버 시작 중...", self.YELLOW)
 
-        tk.Frame(self.root, bg=self.BORDER, height=1).pack(fill="x", padx=20, pady=(14, 0))
+        tk.Frame(self.root, bg=self.BORDER, height=1).pack(fill="x")
 
-        # Notebook
-        nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=24, pady=(14, 20))
+        # 본문: 사이드바 + 컨텐츠
+        body = tk.Frame(self.root, bg=self.BG)
+        body.pack(fill="both", expand=True)
 
-        server_tab        = tk.Frame(nb, bg=self.BG)
-        deploy_tab        = tk.Frame(nb, bg=self.BG)
-        single_deploy_tab = tk.Frame(nb, bg=self.BG)
-        nb.add(server_tab,        text="  서버 뷰  ")
-        nb.add(deploy_tab,        text="  배포 뷰  ")
-        nb.add(single_deploy_tab, text="  단일 배포 뷰  ")
+        nav = tk.Frame(body, bg=self.PANEL, width=200)
+        nav.pack(side="left", fill="y")
+        nav.pack_propagate(False)
+        tk.Frame(body, bg=self.BORDER, width=1).pack(side="left", fill="y")
+        tk.Frame(nav, bg=self.PANEL, height=12).pack(fill="x")
+
+        content = tk.Frame(body, bg=self.BG)
+        content.pack(side="left", fill="both", expand=True)
+
+        server_tab        = tk.Frame(content, bg=self.BG)
+        deploy_tab        = tk.Frame(content, bg=self.BG)
+        single_deploy_tab = tk.Frame(content, bg=self.BG)
+        self._pages = [server_tab, deploy_tab, single_deploy_tab]
+        self._nav_items = []
+        for idx, text in enumerate(["서버 뷰", "배포 뷰", "단일 배포 뷰"]):
+            self._nav_items.append(self._make_nav_item(nav, text, idx))
 
         self._build_server_tab(server_tab)
         self._build_deploy_tab(deploy_tab)
         self._build_single_deploy_tab(single_deploy_tab)
+        self._select_view(0)
+
+    def _make_nav_item(self, nav, text: str, idx: int):
+        row = tk.Frame(nav, bg=self.PANEL, height=40, cursor="hand2")
+        row.pack(fill="x")
+        row.pack_propagate(False)
+        bar = tk.Frame(row, bg=self.PANEL, width=3)
+        bar.pack(side="left", fill="y")
+        lbl = tk.Label(row, text=text, font=self.FONT_NAV, fg=self.TEXT_DIM,
+                       bg=self.PANEL, anchor="w", cursor="hand2")
+        lbl.pack(side="left", fill="both", expand=True, padx=(13, 0))
+        for w in (row, bar, lbl):
+            w.bind("<Button-1>", lambda e, i=idx: self._select_view(i))
+        return row, bar, lbl
+
+    def _select_view(self, idx: int):
+        """사이드바 메뉴 선택 — 해당 뷰 프레임만 표시"""
+        for i, page in enumerate(self._pages):
+            row, bar, lbl = self._nav_items[i]
+            if i == idx:
+                page.pack(fill="both", expand=True, padx=24, pady=20)
+                row.config(bg=self.NAV_ON_BG)
+                bar.config(bg=self.BRAND)
+                lbl.config(bg=self.NAV_ON_BG, fg=self.BLUE, font=self.FONT_NAV_ON)
+            else:
+                page.pack_forget()
+                row.config(bg=self.PANEL)
+                bar.config(bg=self.PANEL)
+                lbl.config(bg=self.PANEL, fg=self.TEXT_DIM, font=self.FONT_NAV)
+
+    def _load_logo(self, height: int):
+        """assets/ubisam_logo.png 를 높이에 맞춰 로드 (실패 시 None → 로고 생략)"""
+        try:
+            img = PILImage.open(_resource_path(os.path.join("assets", "ubisam_logo.png"))).convert("RGB")
+            width = max(1, int(img.width * height / img.height))
+            resample = getattr(PILImage, "Resampling", PILImage).LANCZOS
+            img = img.resize((width, height), resample)
+            self._logo_img = ImageTk.PhotoImage(img)
+            return self._logo_img
+        except Exception:
+            return None
 
     # ── 서버 뷰 탭 ───────────────────────
     def _build_server_tab(self, parent):
-        parent = self._make_scroll_frame(parent)
-
         # 제어 버튼
         ctrl = self._card(parent)
         ctrl.pack(fill="x")
         inner = tk.Frame(ctrl, bg=self.PANEL)
-        inner.pack(pady=10)
+        inner.pack(fill="x", padx=20, pady=16)
 
         # 전체 공정
-        all_grp = tk.Frame(inner, bg=self.PANEL)
-        all_grp.pack(side="left", padx=(10, 24))
-        tk.Label(all_grp, text="전체 공정",
-                 font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.PANEL).pack(pady=(0, 4))
-        btn_row_all = tk.Frame(all_grp, bg=self.PANEL)
-        btn_row_all.pack()
-        self._btn(btn_row_all, "▶  실행", self.BTN_START, self.BTN_START_H,
-                  self._cmd_start, 10).pack(side="left", padx=4)
-        self._btn(btn_row_all, "■  종료", self.BTN_STOP, self.BTN_STOP_H,
-                  self._cmd_stop, 10).pack(side="left", padx=4)
+        tk.Label(inner, text="전체 공정",
+                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=(0, 12))
+        self._btn(inner, "▶  실행", self.BTN_START, self.BTN_START_H,
+                  self._cmd_start).pack(side="left", padx=(0, 8))
+        self._btn(inner, "■  종료", self.BTN_STOP, self.BTN_STOP_H,
+                  self._cmd_stop).pack(side="left")
 
         # 구분선
-        tk.Frame(inner, bg=self.BORDER, width=1).pack(side="left", fill="y", pady=4)
+        tk.Frame(inner, bg=self.BORDER, width=1, height=28).pack(side="left", padx=28)
 
         # 현재 공정
-        cur_grp = tk.Frame(inner, bg=self.PANEL)
-        cur_grp.pack(side="left", padx=(24, 10))
+        tk.Label(inner, text="현재 공정",
+                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=(0, 12))
+        self._btn(inner, "▶  실행", self.BTN_START, self.BTN_START_H,
+                  self._cmd_start_current).pack(side="left", padx=(0, 8))
+        self._btn(inner, "■  종료", self.BTN_STOP, self.BTN_STOP_H,
+                  self._cmd_stop_current).pack(side="left")
 
         # 구분선
-        tk.Frame(inner, bg=self.BORDER, width=1).pack(side="left", fill="y", pady=4)
+        tk.Frame(inner, bg=self.BORDER, width=1, height=28).pack(side="left", padx=28)
 
         # 핑 모드
-        ping_grp = tk.Frame(inner, bg=self.PANEL)
-        ping_grp.pack(side="left", padx=(24, 10))
-        tk.Label(ping_grp, text="핑 모드",
-                 font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.PANEL).pack(pady=(0, 4))
-        ping_btn_row = tk.Frame(ping_grp, bg=self.PANEL)
-        ping_btn_row.pack()
+        tk.Label(inner, text="핑 모드",
+                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=(0, 12))
+        ping_btn_row = tk.Frame(inner, bg=self.PANEL)
+        ping_btn_row.pack(side="left")
         self._ping_mode = config.get("ping_mode", "manual")
-        self.ping_manual_btn = self._btn(ping_btn_row, "Manual", self.BLUE, self.BTN_DEPLOY_H,
-                                         lambda: self._set_ping_mode("manual"), 8)
-        self.ping_manual_btn.pack(side="left", padx=4)
-        self.ping_auto_btn = self._btn(ping_btn_row, "Auto", self.BTN_NEUTRAL, self.BTN_NEUTRAL_H,
-                                       lambda: self._set_ping_mode("auto"), 8)
-        self.ping_auto_btn.pack(side="left", padx=4)
-        self.ping_now_btn = self._btn(ping_grp, "전체 핑", self.BTN_NEUTRAL, self.BTN_NEUTRAL_H,
-                                      self._cmd_ping_now, 10)
-        self.ping_now_btn.pack(pady=(4, 0))
+        self.ping_manual_btn = self._sec_btn(ping_btn_row, "Manual",
+                                             lambda: self._set_ping_mode("manual"))
+        self.ping_manual_btn.pack(side="left")
+        self.ping_auto_btn = self._sec_btn(ping_btn_row, "Auto",
+                                           lambda: self._set_ping_mode("auto"))
+        self.ping_auto_btn.pack(side="left")
+        self.ping_now_btn = self._sec_btn(inner, "전체 핑", self._cmd_ping_now)
+        self.ping_now_btn.pack(side="left", padx=(8, 0))
         self._update_ping_mode_btns()
-        tk.Label(cur_grp, text="현재 공정",
-                 font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.PANEL).pack(pady=(0, 4))
-        btn_row_cur = tk.Frame(cur_grp, bg=self.PANEL)
-        btn_row_cur.pack()
-        self._btn(btn_row_cur, "▶  실행", self.BTN_START, self.BTN_START_H,
-                  self._cmd_start_current, 10).pack(side="left", padx=4)
-        self._btn(btn_row_cur, "■  종료", self.BTN_STOP, self.BTN_STOP_H,
-                  self._cmd_stop_current, 10).pack(side="left", padx=4)
 
-        self.online_label = tk.Label(ctrl, text="온라인: 0 / 0",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL)
-        self.online_label.pack(pady=(0, 8))
-
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill="x")
-
-        # 포트 설정
+        # 설정 카드 (포트 / 자동 시작 / 버전명)
         port_frame = self._card(parent)
-        port_frame.pack(fill="x", pady=(10, 0))
-
-        tk.Label(port_frame, text="포트 설정",
-                 font=self.FONT_BOLD, fg=self.TEXT_DIM,
-                 bg=self.PANEL).pack(anchor="w", padx=14, pady=(8, 4))
+        port_frame.pack(fill="x", pady=(14, 0))
 
         port_row = tk.Frame(port_frame, bg=self.PANEL)
-        port_row.pack(fill="x", padx=14, pady=(0, 8))
+        port_row.pack(fill="x", padx=20, pady=(16, 10))
 
-        tk.Label(port_row, text="서버 포트", width=10, anchor="w",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+        title_cell = tk.Frame(port_row, bg=self.PANEL, width=92, height=34)
+        title_cell.pack(side="left")
+        title_cell.pack_propagate(False)
+        tk.Label(title_cell, text="포트 설정",
+                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(side="left")
+
+        tk.Label(port_row, text="서버 포트",
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, 8))
         self.server_port_var = tk.StringVar(value=str(config.get("server_port", 9000)))
-        self._entry(port_row, self.server_port_var, 8).pack(side="left", ipady=4, padx=(0, 20))
+        self._entry(port_row, self.server_port_var, 10).pack(side="left", ipady=7, padx=(0, 20))
 
-        tk.Label(port_row, text="클라이언트 포트", width=14, anchor="w",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+        tk.Label(port_row, text="클라이언트 포트",
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, 8))
         self.client_port_var = tk.StringVar(value=str(config.get("client_port", 9001)))
-        self._entry(port_row, self.client_port_var, 8).pack(side="left", ipady=4, padx=(0, 12))
+        self._entry(port_row, self.client_port_var, 10).pack(side="left", ipady=7, padx=(0, 8))
 
-        self._small_btn(port_row, "적용 (재시작 필요)", self.BLUE, self._apply_ports).pack(side="left")
+        self._sec_btn(port_row, "적용 (재시작 필요)", self._apply_ports).pack(side="left")
 
         # ── PC 시작 시 자동 실행 ─────────────
-        auto_row = tk.Frame(port_frame, bg=self.PANEL)
-        auto_row.pack(fill="x", padx=14, pady=(0, 10))
-        tk.Label(auto_row, text="자동 시작", width=10, anchor="w",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
-        self._autostart_btn = self._small_btn(
-            auto_row,
+        tk.Frame(port_row, bg=self.BORDER, width=1, height=28).pack(side="left", padx=28)
+        tk.Label(port_row, text="자동 시작",
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, 8))
+        self._autostart_btn = self._sec_btn(
+            port_row,
             "ON  ●" if autostart_enabled() else "OFF ○",
-            self.GREEN if autostart_enabled() else self.TEXT_DIM,
             self._toggle_autostart)
         self._autostart_btn.pack(side="left")
-        tk.Label(auto_row, text="  PC 시작 시 서버 자동 실행",
-                 font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+        self._set_autostart_look(autostart_enabled())
+        tk.Label(port_row, text="  PC 시작 시 서버 자동 실행",
+                 font=self.FONT_DESC, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
 
         # 버전명 (배포 뷰와 공유)
         ver_row = tk.Frame(port_frame, bg=self.PANEL)
-        ver_row.pack(fill="x", padx=14, pady=(0, 10))
-        tk.Label(ver_row, text="배포 버전명", width=10, anchor="w",
-                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
-        self._entry(ver_row, self.version_input_var, 20).pack(side="left", ipady=4, padx=(0, 8))
-        self._small_btn(ver_row, "적용", self.BLUE, self._apply_version).pack(side="left", padx=(0, 6))
-        self._small_btn(ver_row, "전체 경로 적용", self.GREEN, self._apply_path_to_all).pack(side="left", padx=(0, 10))
+        ver_row.pack(fill="x", padx=20, pady=(0, 16))
+        ver_title_cell = tk.Frame(ver_row, bg=self.PANEL, width=92, height=34)
+        ver_title_cell.pack(side="left")
+        ver_title_cell.pack_propagate(False)
+        tk.Label(ver_row, text="배포 버전명",
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, 8))
+        self._entry(ver_row, self.version_input_var, 25).pack(side="left", ipady=7, padx=(0, 8))
+        self._sec_btn(ver_row, "적용", self._apply_version).pack(side="left", padx=(0, 8))
+        self._btn(ver_row, "전체 경로 적용", self.GREEN, self.GREEN_H,
+                  self._apply_path_to_all).pack(side="left", padx=(0, 16))
         tk.Label(ver_row, text="← 배포 뷰와 공유됩니다",
-                 font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+                 font=self.FONT_DESC, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
 
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill="x", pady=(8, 0))
-
-        # 클라이언트 IP 관리
-        ip_frame = tk.Frame(parent, bg=self.BG)
-        ip_frame.pack(fill="x", pady=(10, 0))
-
-        hdr_row = tk.Frame(ip_frame, bg=self.BG)
-        hdr_row.pack(fill="x")
-        tk.Label(hdr_row, text="전체 공정  IP  관리",
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM, bg=self.BG).pack(side="left")
-
-        btn_row = tk.Frame(hdr_row, bg=self.BG)
-        btn_row.pack(side="right")
-        self._small_btn(btn_row, "새로고침", self.GREEN, self._refresh_paths, self.BG).pack(side="left", padx=4)
-        self._small_btn(btn_row, "+ 추가", self.BLUE, self._add_ip, self.BG).pack(side="left", padx=4)
-        self._small_btn(btn_row, "− 삭제", self.RED,  self._del_ip, self.BG).pack(side="left", padx=4)
-
-        tbl_outer = self._card(ip_frame)
-        tbl_outer.pack(fill="x", pady=8)
-
-        hdr = tk.Frame(tbl_outer, bg=self.PANEL)
-        hdr.pack(fill="x")
-        for col, w in [("CLIENT", 12), ("IP", 20), ("연결 상태", 14), ("Aurora", 14), ("마지막 응답", 14), ("핑", 10), ("ID", 10), ("PW", 10), ("경로", 30)]:
-            tk.Label(hdr, text=col, width=w, anchor="center",
-                     font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                     bg=self.PANEL, pady=5).pack(side="left")
-
-        tk.Frame(tbl_outer, bg=self.BORDER, height=1).pack(fill="x")
-
-        self.rows_frame = tk.Frame(tbl_outer, bg=self.BG)
-        self.rows_frame.pack(fill="x")
-
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill="x", pady=(4, 4))
-
-        # 현재 공정 IP 관리
-        cur_frame = tk.Frame(parent, bg=self.BG)
-        cur_frame.pack(fill="x", pady=(4, 0))
-
-        cur_hdr = tk.Frame(cur_frame, bg=self.BG)
-        cur_hdr.pack(fill="x")
-        tk.Label(cur_hdr, text="현재 공정  IP  관리",
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM, bg=self.BG).pack(side="left")
-        cur_btn_row = tk.Frame(cur_hdr, bg=self.BG)
+        # 현재 공정 IP 관리 (하단 고정 높이)
+        cur_tbl, cur_tb = self._table_card(parent, "현재 공정 IP 관리")
+        cur_tbl.pack(side="bottom", fill="x", pady=(14, 0))
+        self.current_count_lbl = self._count_badge(cur_tb)
+        cur_btn_row = tk.Frame(cur_tb, bg=self.PANEL)
         cur_btn_row.pack(side="right")
-        self._small_btn(cur_btn_row, "+ 추가", self.BLUE, self._add_current_ip, self.BG).pack(side="left", padx=4)
-        self._small_btn(cur_btn_row, "− 삭제", self.RED,  self._del_current_ip, self.BG).pack(side="left", padx=4)
+        self._sec_btn(cur_btn_row, "+ 추가", self._add_current_ip).pack(side="left", padx=(8, 0))
+        self._sec_btn(cur_btn_row, "− 삭제", self._del_current_ip).pack(side="left", padx=(8, 0))
 
-        cur_tbl = self._card(cur_frame)
-        cur_tbl.pack(fill="x", pady=(6, 6))
-
-        cur_col_hdr = tk.Frame(cur_tbl, bg=self.PANEL)
-        cur_col_hdr.pack(fill="x")
-        for col, w in [("CLIENT", 12), ("IP", 20), ("연결 상태", 14), ("Aurora", 14), ("마지막 응답", 14), ("핑", 10)]:
-            tk.Label(cur_col_hdr, text=col, width=w, anchor="center",
-                     font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                     bg=self.PANEL, pady=5).pack(side="left")
-
-        tk.Frame(cur_tbl, bg=self.BORDER, height=1).pack(fill="x")
-
-        self.current_rows_frame = tk.Frame(cur_tbl, bg=self.BG)
-        self.current_rows_frame.pack(fill="x")
+        self._table_header(cur_tbl, self.CUR_COLS)
+        self.current_rows_frame = self._table_region(cur_tbl, height=(self.ROW_H + 1) * 3)
         self.current_client_rows = {}
+
+        # 클라이언트 IP 관리 (남는 높이 채움)
+        tbl_outer, all_tb = self._table_card(parent, "전체 공정 IP 관리")
+        tbl_outer.pack(fill="both", expand=True, pady=(14, 0))
+        self.all_count_lbl = self._count_badge(all_tb)
+        btn_row = tk.Frame(all_tb, bg=self.PANEL)
+        btn_row.pack(side="right")
+        self._sec_btn(btn_row, "새로고침", self._refresh_paths).pack(side="left", padx=(8, 0))
+        self._sec_btn(btn_row, "+ 추가", self._add_ip).pack(side="left", padx=(8, 0))
+        self._sec_btn(btn_row, "− 삭제", self._del_ip).pack(side="left", padx=(8, 0))
+
+        self._table_header(tbl_outer, self.ALL_COLS)
+        self.rows_frame = self._table_region(tbl_outer)
 
         self._rebuild_current_rows()
 
         self._rebuild_rows()
 
+    # 표 열 정의: (제목, 폭(px), side) — 폭 None 은 남는 폭 채움. 헤더와 행이 같은 정의를 공유.
+    ALL_COLS = [("CLIENT", 98), ("IP", 138), ("연결 상태", 104), ("Aurora", 98),
+                ("마지막 응답", 98), ("핑", 78), ("ID", 108), ("PW", 108), ("경로", None)]
+    CUR_COLS = [("CLIENT", 98), ("IP", 138), ("연결 상태", 104), ("Aurora", 98),
+                ("마지막 응답", 98), ("핑", 78)]
+    DEPLOY_COLS = [("선택", 48), ("CLIENT", 98), ("IP", 138), ("소스 폴더 선택", 198),
+                   ("진행률", 220, "right"), ("저장 경로", None)]
+    SINGLE_COLS = [("", 32), ("CLIENT", 118), ("IP", 158), ("배포 상태", None)]
+
     # ── 배포 뷰 탭 ───────────────────────
     def _build_deploy_tab(self, parent):
-        parent = self._make_scroll_frame(parent)
-
         # 소스 폴더 선택
         src_panel = self._card(parent)
         src_panel.pack(fill="x")
+        src_body = tk.Frame(src_panel, bg=self.PANEL)
+        src_body.pack(fill="x", padx=20, pady=16)
 
-        tk.Label(src_panel, text="배포 소스 폴더",
-                 font=self.FONT_BOLD, fg=self.TEXT_DIM,
-                 bg=self.PANEL).pack(anchor="w", padx=14, pady=(10, 4))
-
-        src_row = tk.Frame(src_panel, bg=self.PANEL)
-        src_row.pack(fill="x", padx=14, pady=(0, 10))
+        src_row = tk.Frame(src_body, bg=self.PANEL)
+        src_row.pack(fill="x")
+        self._field_label(src_row, "배포 소스 폴더")
 
         self.deploy_src_var = tk.StringVar(value=config.get("deploy_src", ""))
-        self._entry(src_row, self.deploy_src_var, 42).pack(side="left", ipady=4, padx=(0, 8))
+        self._entry(src_row, self.deploy_src_var, 55).pack(side="left", ipady=7, padx=(0, 8))
 
-        self._small_btn(src_row, "폴더 선택", self.TEXT_DIM,
-                        self._browse_deploy_src).pack(side="left", padx=(0, 6))
-        self._small_btn(src_row, "적용", self.BLUE,
-                        self._apply_deploy_src).pack(side="left", padx=(0, 12))
-        self._btn(src_row, "▲ 배포하기", self.BTN_DEPLOY, self.BTN_DEPLOY_H,
-                  self._cmd_deploy_selected, 14).pack(side="left")
+        self._sec_btn(src_row, "폴더 선택", self._browse_deploy_src).pack(side="left", padx=(0, 8))
+        self._sec_btn(src_row, "적용", self._apply_deploy_src).pack(side="left")
         self.deploy_stop_btn = self._btn(src_row, "■ 중단", self.BTN_STOP, self.BTN_STOP_H,
-                                         self._cmd_deploy_stop, 12)
-        self.deploy_stop_btn.pack(side="left", padx=(6, 0))
+                                         self._cmd_deploy_stop, padx=20, pady=9)
+        self.deploy_stop_btn.pack(side="right")
         self.deploy_stop_btn.config(state="disabled")
+        self._btn(src_row, "▲ 배포하기", self.BTN_DEPLOY, self.BTN_DEPLOY_H,
+                  self._cmd_deploy_selected, padx=20, pady=9).pack(side="right", padx=(0, 8))
 
         # 내부 경로 (소스 폴더 안의 실제 파일 위치)
-        inner_row = tk.Frame(src_panel, bg=self.PANEL)
-        inner_row.pack(fill="x", padx=14, pady=(0, 4))
-        tk.Label(inner_row, text="내부 경로",
-                 font=self.FONT_BOLD, fg=self.TEXT_DIM,
-                 bg=self.PANEL, width=12, anchor="w").pack(side="left")
+        inner_row = tk.Frame(src_body, bg=self.PANEL)
+        inner_row.pack(fill="x", pady=(10, 0))
+        self._field_label(inner_row, "내부 경로")
         self.deploy_inner_var = tk.StringVar(value=config.get("deploy_inner_path", ""))
-        self._entry(inner_row, self.deploy_inner_var, 20).pack(side="left", ipady=4, padx=(0, 8))
-        self._small_btn(inner_row, "적용", self.BLUE,
-                        self._apply_deploy_inner).pack(side="left", padx=(0, 10))
+        self._entry(inner_row, self.deploy_inner_var, 25).pack(side="left", ipady=7, padx=(0, 8))
+        self._sec_btn(inner_row, "적용", self._apply_deploy_inner).pack(side="left", padx=(0, 10))
         tk.Label(inner_row, text="예: x64-Debug  (비우면 소스 폴더 직접 사용)",
-                 font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+                 font=self.FONT_DESC, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
 
         # 추가 저장 경로
-        dst_row = tk.Frame(src_panel, bg=self.PANEL)
-        dst_row.pack(fill="x", padx=14, pady=(0, 4))
-        tk.Label(dst_row, text="추가 저장 경로",
-                 font=self.FONT_BOLD, fg=self.TEXT_DIM,
-                 bg=self.PANEL, width=12, anchor="w").pack(side="left")
+        dst_row = tk.Frame(src_body, bg=self.PANEL)
+        dst_row.pack(fill="x", pady=(10, 0))
+        self._field_label(dst_row, "추가 저장 경로")
         self.deploy_dst_folder_var = tk.StringVar(value=config.get("deploy_dst_folder", ""))
-        self._entry(dst_row, self.deploy_dst_folder_var, 20).pack(side="left", ipady=4, padx=(0, 8))
-        self._small_btn(dst_row, "적용", self.BLUE,
-                        self._apply_deploy_dst_folder).pack(side="left", padx=(0, 10))
+        self._entry(dst_row, self.deploy_dst_folder_var, 25).pack(side="left", ipady=7, padx=(0, 8))
+        self._sec_btn(dst_row, "적용", self._apply_deploy_dst_folder).pack(side="left", padx=(0, 10))
         self.deploy_dst_preview_lbl = tk.Label(dst_row,
                  text=self._dst_preview_text(),
                  font=self.FONT_MONO, fg=self.BLUE, bg=self.PANEL)
         self.deploy_dst_preview_lbl.pack(side="left")
 
-        self.deploy_status_lbl = tk.Label(src_panel, text="",
-                 font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.PANEL)
-        self.deploy_status_lbl.pack(anchor="w", padx=14, pady=(0, 4))
-
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill="x")
-
         # 전체 진행률 (클라이언트 목록 위)
-        overall_wrap = tk.Frame(parent, bg=self.BG)
-        overall_wrap.pack(fill="x", padx=14, pady=(8, 2))
-        tk.Label(overall_wrap, text="전체 진행률", font=self.FONT_BOLD,
-                 fg=self.TEXT_DIM, bg=self.BG).pack(side="left", padx=(0, 8))
+        prog_card = self._card(parent)
+        prog_card.pack(fill="x", pady=(14, 0))
+        overall_wrap = tk.Frame(prog_card, bg=self.PANEL)
+        overall_wrap.pack(fill="x", padx=20, pady=16)
+        tk.Label(overall_wrap, text="전체 진행률", font=self.FONT_TITLE,
+                 fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=(0, 14))
+        self.deploy_status_lbl = tk.Label(overall_wrap, text="",
+                 font=self.FONT_SMALL, padx=8, pady=2, fg=self.TEXT_DIM, bg=self.PANEL,
+                 wraplength=460, justify="left")
+        self.deploy_status_lbl.pack(side="right", padx=(14, 0))
+        self.deploy_overall_lbl = tk.Label(overall_wrap, text="0 / 0",
+                 font=self.FONT_MONO_BOLD, fg=self.TEXT, bg=self.PANEL, width=8, anchor="e")
+        self.deploy_overall_lbl.pack(side="right", padx=(14, 0))
         self.deploy_progress_overall = ttk.Progressbar(overall_wrap, orient="horizontal",
                                                        mode="determinate")
-        self.deploy_progress_overall.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.deploy_overall_lbl = tk.Label(overall_wrap, text="0 / 0",
-                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.BG, width=8, anchor="w")
-        self.deploy_overall_lbl.pack(side="left")
+        self.deploy_progress_overall.pack(side="left", fill="x", expand=True)
 
-        # 클라이언트 목록 헤더
-        list_frame = tk.Frame(parent, bg=self.BG)
-        list_frame.pack(fill="x", pady=(6, 0))
+        # 배포 로그 (하단 고정)
+        self.deploy_log_text = self._build_log_view(parent, "배포 LOG", 170)
 
-        hdr_row = tk.Frame(list_frame, bg=self.BG)
-        hdr_row.pack(fill="x")
-        tk.Label(hdr_row, text="배포 대상 클라이언트",
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM, bg=self.BG).pack(side="left")
-        self._small_btn(hdr_row, "전체 해제", self.TEXT_DIM,
-                        self._deploy_uncheck_all, self.BG).pack(side="right", padx=4)
-        self._small_btn(hdr_row, "전체 선택", self.BLUE,
-                        self._deploy_check_all, self.BG).pack(side="right", padx=4)
-        tk.Frame(hdr_row, bg=self.BORDER, width=1).pack(side="right", fill="y", padx=6)
-        self._small_btn(hdr_row, "새로고침", self.TEXT_DIM,
-                        self._refresh_deploy_src, self.BG).pack(side="right", padx=4)
-        self._small_btn(hdr_row, "적용", self.BLUE,
-                        self._save_deploy_combos, self.BG).pack(side="right", padx=4)
+        # 클라이언트 목록
+        tbl_outer, hdr_row = self._table_card(parent, "배포 대상 클라이언트")
+        tbl_outer.pack(fill="both", expand=True, pady=(14, 0))
+        btn_row = tk.Frame(hdr_row, bg=self.PANEL)
+        btn_row.pack(side="right")
+        self._sec_btn(btn_row, "새로고침", self._refresh_deploy_src).pack(side="left", padx=(8, 0))
+        self._sec_btn(btn_row, "적용", self._save_deploy_combos).pack(side="left", padx=(8, 0))
+        self._sec_btn(btn_row, "전체 선택", self._deploy_check_all).pack(side="left", padx=(8, 0))
+        self._sec_btn(btn_row, "전체 해제", self._deploy_uncheck_all).pack(side="left", padx=(8, 0))
 
-        tbl_outer = self._card(list_frame)
-        tbl_outer.pack(fill="x", pady=8)
+        hdr_labels = self._table_header(tbl_outer, self.DEPLOY_COLS)
+        self.deploy_dst_col_hdr = hdr_labels[-1]
+        self.deploy_dst_col_hdr.config(text=self._deploy_dst_col_text())
 
-        col_hdr = tk.Frame(tbl_outer, bg=self.PANEL)
-        col_hdr.pack(fill="x")
-        # 행의 패딩과 동일하게 맞춤: 체크박스 padx=(8,0), CLIENT/IP 패딩 없음, 콤보 padx=(8,6)
-        tk.Label(col_hdr, text="선택", width=5, anchor="center",
-                 font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                 bg=self.PANEL, pady=5).pack(side="left", padx=(8, 0))
-        for text, w in [("CLIENT", 11), ("IP", 18)]:
-            tk.Label(col_hdr, text=text, width=w, anchor="center",
-                     font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                     bg=self.PANEL, pady=5).pack(side="left")
-        tk.Label(col_hdr, text="소스 폴더 선택", width=24, anchor="center",
-                 font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                 bg=self.PANEL, pady=5).pack(side="left", padx=(8, 6))
-        self.deploy_dst_col_hdr = tk.Label(col_hdr, text=self._deploy_dst_col_text(),
-                     anchor="w",
-                     font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                     bg=self.PANEL, pady=5)
-        self.deploy_dst_col_hdr.pack(side="left", fill="x", expand=True)
-        tk.Label(col_hdr, text="진행률", anchor="center", width=16,
-                 font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                 bg=self.PANEL, pady=5).pack(side="right", padx=(0, 70))
-
-        tk.Frame(tbl_outer, bg=self.BORDER, height=1).pack(fill="x")
-
-        self.deploy_rows_frame = tk.Frame(tbl_outer, bg=self.BG)
-        self.deploy_rows_frame.pack(fill="x")
-
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill="x", pady=(4, 8))
-
-        # 배포 로그
-        log_frame = tk.Frame(parent, bg=self.BG)
-        log_frame.pack(fill="both", expand=True)
-        self.deploy_log_text = self._build_log_view(log_frame, "배포 LOG", 8)
+        self.deploy_rows_frame = self._table_region(tbl_outer)
 
         self._rebuild_deploy_rows()
 
@@ -916,109 +973,81 @@ class AuroraServerApp:
         # 상단 컨트롤
         ctrl_panel = self._card(parent)
         ctrl_panel.pack(fill="x")
+        ctrl_body = tk.Frame(ctrl_panel, bg=self.PANEL)
+        ctrl_body.pack(fill="x", padx=20, pady=16)
 
-        tk.Label(ctrl_panel, text="배포 소스 폴더",
-                 font=self.FONT_BOLD, fg=self.TEXT_DIM,
-                 bg=self.PANEL).pack(anchor="w", padx=14, pady=(10, 4))
-
-        ctrl_row = tk.Frame(ctrl_panel, bg=self.PANEL)
-        ctrl_row.pack(fill="x", padx=14, pady=(0, 10))
+        ctrl_row = tk.Frame(ctrl_body, bg=self.PANEL)
+        ctrl_row.pack(fill="x")
+        tk.Label(ctrl_row, text="배포 소스 폴더",
+                 font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, 8))
 
         self.single_src_var = tk.StringVar()
-        self._entry(ctrl_row, self.single_src_var, 44).pack(side="left", ipady=4, padx=(0, 8))
-        self._small_btn(ctrl_row, "폴더 선택", self.TEXT_DIM,
-                        self._single_browse).pack(side="left", padx=(0, 6))
-        self._small_btn(ctrl_row, "적용", self.BLUE,
-                        self._single_apply).pack(side="left", padx=(0, 12))
+        self._entry(ctrl_row, self.single_src_var, 58).pack(side="left", ipady=7, padx=(0, 8))
+        self._sec_btn(ctrl_row, "폴더 선택", self._single_browse).pack(side="left", padx=(0, 8))
+        self._sec_btn(ctrl_row, "적용", self._single_apply).pack(side="left", padx=(0, 12))
+        self.single_status_lbl = tk.Label(ctrl_row, text="",
+                 font=self.FONT_SMALL, padx=8, pady=2, fg=self.TEXT_DIM, bg=self.PANEL)
+        self.single_status_lbl.pack(side="left")
         self._btn(ctrl_row, "▲ 배포하기", self.BTN_DEPLOY, self.BTN_DEPLOY_H,
-                  self._single_deploy_cmd, 14).pack(side="left")
-
-        self.single_status_lbl = tk.Label(ctrl_panel, text="",
-                 font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.PANEL)
-        self.single_status_lbl.pack(anchor="w", padx=14, pady=(0, 8))
-
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill="x")
+                  self._single_deploy_cmd, padx=20, pady=9).pack(side="right")
 
         # ── 진행 상황 프로그레스바 ────────
-        prog_panel = tk.Frame(parent, bg=self.BG)
-        prog_panel.pack(fill="x", padx=14, pady=(8, 4))
+        prog_panel = tk.Frame(ctrl_body, bg=self.PANEL)
+        prog_panel.pack(fill="x", pady=(12, 0))
+        prog_panel.columnconfigure(0, weight=1, uniform="prog")
+        prog_panel.columnconfigure(1, weight=1, uniform="prog")
 
-        for lbl_text, attr_bar, attr_lbl in [
+        for col, (lbl_text, attr_bar, attr_lbl) in enumerate([
             ("전체 배포", "prog_all", "prog_all_lbl"),
             ("현재 공정", "prog_cur", "prog_cur_lbl"),
-        ]:
-            row = tk.Frame(prog_panel, bg=self.BG)
-            row.pack(fill="x", pady=(0, 4))
-            tk.Label(row, text=lbl_text, width=9, anchor="w",
-                     font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.BG).pack(side="left")
+        ]):
+            row = tk.Frame(prog_panel, bg=self.PANEL)
+            row.grid(row=0, column=col, sticky="ew", padx=(0, 12) if col == 0 else (12, 0))
+            tk.Label(row, text=lbl_text, width=8, anchor="w",
+                     font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
+            cnt_lbl = tk.Label(row, text="0 / 0", width=8, anchor="e",
+                               font=self.FONT_MONO_BOLD, fg=self.TEXT, bg=self.PANEL)
+            cnt_lbl.pack(side="right", padx=(10, 0))
             bar = ttk.Progressbar(row, orient="horizontal", mode="determinate")
-            bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
-            cnt_lbl = tk.Label(row, text="0 / 0", width=8, anchor="w",
-                               font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.BG)
-            cnt_lbl.pack(side="left")
+            bar.pack(side="left", fill="x", expand=True)
             setattr(self, attr_bar, bar)
             setattr(self, attr_lbl, cnt_lbl)
 
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill="x", pady=(2, 0))
+        # 하단 로그 (고정 높이)
+        self.single_log_text = self._build_log_view(parent, "단일 배포 LOG", 150)
 
         # 2단 레이아웃 (파일 목록 | 클라이언트 목록)
         body = tk.Frame(parent, bg=self.BG)
-        body.pack(fill="both", expand=True, pady=(10, 0))
+        body.pack(fill="both", expand=True, pady=(14, 0))
 
-        # ── 좌측: 파일 목록 (반반) ──
-        left = tk.Frame(body, bg=self.BG)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        # ── 좌측: 파일 목록 (고정 폭) ──
+        file_outer, file_hdr = self._table_card(body, "파일 목록")
+        file_outer.configure(width=420)
+        file_outer.pack(side="left", fill="y")
+        file_outer.pack_propagate(False)
+        btn_row = tk.Frame(file_hdr, bg=self.PANEL)
+        btn_row.pack(side="right")
+        self._sec_btn(btn_row, "전체 선택", self._single_file_check_all).pack(side="left", padx=(8, 0))
+        self._sec_btn(btn_row, "전체 해제", self._single_file_uncheck_all).pack(side="left", padx=(8, 0))
 
-        file_hdr = tk.Frame(left, bg=self.BG)
-        file_hdr.pack(fill="x")
-        tk.Label(file_hdr, text="파일 목록",
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM, bg=self.BG).pack(side="left")
-        self._small_btn(file_hdr, "전체 해제", self.TEXT_DIM,
-                        self._single_file_uncheck_all, self.BG).pack(side="right", padx=4)
-        self._small_btn(file_hdr, "전체 선택", self.BLUE,
-                        self._single_file_check_all, self.BG).pack(side="right", padx=4)
-
-        file_outer = self._card(left)
-        file_outer.pack(fill="both", expand=True, pady=6)
-
-        self.single_file_frame = self._make_scroll_frame(file_outer, bg=self.PANEL)
+        tk.Frame(file_outer, bg=self.BORDER, height=1).pack(fill="x")
+        self.single_file_frame = self._table_region(file_outer)
         self.single_file_canvas = self.single_file_frame.canvas
 
         # ── 우측: 클라이언트 목록 (확장) ─
-        right = tk.Frame(body, bg=self.BG)
-        right.pack(side="left", fill="both", expand=True, padx=(4, 0))
-
-        cli_hdr = tk.Frame(right, bg=self.BG)
-        cli_hdr.pack(fill="x")
-        tk.Label(cli_hdr, text="배포 대상",
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM, bg=self.BG).pack(side="left")
-        self._small_btn(cli_hdr, "전체 해제", self.TEXT_DIM,
-                        self._single_client_uncheck_all, self.BG).pack(side="right", padx=4)
-        self._small_btn(cli_hdr, "전체 선택", self.BLUE,
-                        self._single_client_check_all, self.BG).pack(side="right", padx=4)
-
-        cli_outer = self._card(right)
-        cli_outer.pack(fill="both", expand=True, pady=6)
+        cli_outer, cli_hdr = self._table_card(body, "배포 대상")
+        cli_outer.pack(side="left", fill="both", expand=True, padx=(14, 0))
+        cli_btn_row = tk.Frame(cli_hdr, bg=self.PANEL)
+        cli_btn_row.pack(side="right")
+        self._sec_btn(cli_btn_row, "전체 선택", self._single_client_check_all).pack(side="left", padx=(8, 0))
+        self._sec_btn(cli_btn_row, "전체 해제", self._single_client_uncheck_all).pack(side="left", padx=(8, 0))
 
         # 컬럼 헤더
-        cli_col_hdr = tk.Frame(cli_outer, bg=self.PANEL)
-        cli_col_hdr.pack(fill="x")
-        tk.Label(cli_col_hdr, text="", width=2, bg=self.PANEL).pack(side="left")  # 체크박스 공간
-        for col, w, anchor in [("CLIENT", 10, "w"), ("IP", 16, "w"), ("배포 상태", 10, "center")]:
-            tk.Label(cli_col_hdr, text=col, width=w, anchor=anchor,
-                     font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
-                     bg=self.PANEL, pady=4).pack(side="left")
-        tk.Frame(cli_outer, bg=self.BORDER, height=1).pack(fill="x")
+        self._table_header(cli_outer, self.SINGLE_COLS)
 
-        self.single_client_frame = self._make_scroll_frame(cli_outer, bg=self.PANEL)
+        self.single_client_frame = self._table_region(cli_outer)
 
         self._rebuild_single_client_rows()
-
-        # 하단 로그
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill="x", pady=(4, 6))
-        log_frame = tk.Frame(parent, bg=self.BG)
-        log_frame.pack(fill="both", expand=True, pady=(0, 6))
-        self.single_log_text = self._build_log_view(log_frame, "단일 배포 LOG", 6)
 
     # ── 공용 UI 헬퍼 ─────────────────────
     def _card(self, parent, **kwargs) -> tk.Frame:
@@ -1027,22 +1056,107 @@ class AuroraServerApp:
                         highlightbackground=self.BORDER,
                         highlightcolor=self.BORDER, **kwargs)
 
+    def _card_border(self, parent) -> tk.Frame:
+        """입력 테두리(INPUT_BORDER)가 있는 흰 Frame — Listbox 를 안쪽 여백과 함께 감쌀 때 사용"""
+        return tk.Frame(parent, bg=self.PANEL, highlightthickness=1,
+                        highlightbackground=self.INPUT_BORDER,
+                        highlightcolor=self.INPUT_BORDER)
+
     def _entry(self, parent, var, width, font=None, **kwargs) -> tk.Entry:
         return tk.Entry(parent, textvariable=var, width=width,
-                        font=font or self.FONT_MONO_L,
+                        font=font or self.FONT_MONO,
                         bg=self.PANEL, fg=self.TEXT, insertbackground=self.TEXT,
                         relief="flat", bd=0, highlightthickness=1,
-                        highlightbackground=self.BORDER,
+                        highlightbackground=self.INPUT_BORDER,
                         highlightcolor=self.BLUE, **kwargs)
 
-    def _build_log_view(self, log_frame, title: str, text_pady: int) -> tk.Text:
-        """제목 + 스크롤 가능한 읽기 전용 로그 Text 를 log_frame 안에 만들고 Text 를 반환."""
-        tk.Label(log_frame, text=title,
-                 font=self.FONT_TITLE, fg=self.TEXT_DIM, bg=self.BG).pack(anchor="w", pady=(0, 4))
-        log_inner = self._card(log_frame)
-        log_inner.pack(fill="both", expand=True)
-        text = tk.Text(log_inner, font=self.FONT_MONO, bg=self.PANEL,
-                 fg=self.TEXT_DIM, bd=0, padx=10, pady=text_pady,
+    def _field_label(self, parent, text: str):
+        """입력 행 왼쪽의 고정 폭 라벨 (행끼리 입력 시작 위치를 맞춤)"""
+        cell = tk.Frame(parent, bg=self.PANEL, width=116, height=34)
+        cell.pack(side="left")
+        cell.pack_propagate(False)
+        tk.Label(cell, text=text, font=self.FONT, fg=self.TEXT_DIM,
+                 bg=self.PANEL).pack(side="left")
+
+    def _table_card(self, parent, title: str):
+        """표 카드 + 툴바(제목 왼쪽, 버튼은 호출부에서 오른쪽에 배치). (카드, 툴바) 반환"""
+        card = self._card(parent)
+        toolbar = tk.Frame(card, bg=self.PANEL)
+        toolbar.pack(fill="x", padx=20, pady=(16, 10))
+        tk.Label(toolbar, text=title, font=self.FONT_TITLE,
+                 fg=self.TEXT, bg=self.PANEL).pack(side="left")
+        # 버튼 높이(34)만큼 툴바 높이를 확보해 카드마다 높이를 통일
+        tk.Frame(toolbar, bg=self.PANEL, width=1, height=34).pack(side="right")
+        return card, toolbar
+
+    def _count_badge(self, toolbar) -> tk.Label:
+        lbl = tk.Label(toolbar, text="0", font=self.FONT_MONO_BOLD, padx=8, pady=1,
+                       fg=self.TEXT_DIM, bg=self.IDLE_BG)
+        lbl.pack(side="left", padx=(8, 0))
+        return lbl
+
+    def _scrollbar_width(self) -> int:
+        if not hasattr(self, "_sb_width"):
+            probe = ttk.Scrollbar(self.root, orient="vertical")
+            self._sb_width = probe.winfo_reqwidth()
+            probe.destroy()
+        return self._sb_width
+
+    def _cell(self, parent, width, bg, height=None, side="left") -> tk.Frame:
+        """표의 한 칸 — 폭(px)을 고정해 헤더와 행의 열이 정확히 맞도록 함. width None 이면 남는 폭을 채움."""
+        cell = tk.Frame(parent, bg=bg, width=width or 1, height=height or self.ROW_H)
+        cell.pack_propagate(False)
+        if width:
+            cell.pack(side=side)
+        else:
+            cell.pack(side="left", fill="x", expand=True)
+        return cell
+
+    def _table_header(self, card, cols) -> list:
+        """표 헤더 행(PANEL_ALT) 생성. 열 라벨 목록 반환."""
+        tk.Frame(card, bg=self.BORDER, height=1).pack(fill="x")
+        hdr = tk.Frame(card, bg=self.PANEL_ALT)
+        hdr.pack(fill="x")
+        tk.Frame(hdr, bg=self.PANEL_ALT, width=14, height=1).pack(side="left")
+        # 데이터 영역 스크롤바 폭만큼 오른쪽을 비워 열을 맞춤
+        tk.Frame(hdr, bg=self.PANEL_ALT, width=self._scrollbar_width(), height=1).pack(side="right")
+        labels = []
+        for col in cols:
+            text, width = col[0], col[1]
+            side = col[2] if len(col) > 2 else "left"
+            cell = self._cell(hdr, width, self.PANEL_ALT, self.HDR_H, side)
+            lbl = tk.Label(cell, text=text, font=self.FONT_SMALL, fg=self.TEXT_DIM,
+                           bg=self.PANEL_ALT, anchor="w")
+            lbl.pack(side="left")
+            labels.append(lbl)
+        return labels
+
+    def _table_region(self, card, height=None) -> tk.Frame:
+        """표 데이터 영역(스크롤 가능). 내부 Frame 반환."""
+        box = tk.Frame(card, bg=self.PANEL)
+        if height:
+            box.configure(height=height)
+            box.pack(fill="x")
+            box.pack_propagate(False)
+        else:
+            box.pack(fill="both", expand=True)
+        return self._make_scroll_frame(box, bg=self.PANEL)
+
+    def _row_line(self, parent):
+        tk.Frame(parent, bg=self.ROW_LINE, height=1).pack(fill="x")
+
+    def _build_log_view(self, parent, title: str, height: int) -> tk.Text:
+        """제목 + 스크롤 가능한 읽기 전용 다크 로그 Text 를 담은 고정 높이 카드를 parent 하단에 만들고 Text 를 반환."""
+        card = self._card(parent, height=height)
+        card.pack(side="bottom", fill="x", pady=(14, 0))
+        card.pack_propagate(False)
+        tk.Label(card, text=title,
+                 font=self.FONT_TITLE, fg=self.TEXT, bg=self.PANEL).pack(anchor="w", padx=20, pady=(16, 10))
+        log_inner = tk.Frame(card, bg=self.LOG_BG)
+        log_inner.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        text = tk.Text(log_inner, font=self.FONT_MONO, bg=self.LOG_BG,
+                 fg=self.LOG_FG, insertbackground=self.LOG_FG, relief="flat", bd=0,
+                 padx=12, pady=10, spacing1=2, height=1,
                  state="disabled", wrap="word", highlightthickness=0)
         sb = ttk.Scrollbar(log_inner, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=sb.set)
@@ -1051,27 +1165,57 @@ class AuroraServerApp:
         return text
 
     def _make_status_labels(self, row, row_bg, name_text: str, ip: str) -> dict:
-        """서버 뷰 표의 상태 라벨 한 줄(name/ip/online/aurora/last/ping)을 만들어 dict 로 반환."""
+        """서버 뷰 표의 상태 라벨 한 줄(name/ip/online/aurora/last/ping)을 만들어 dict 로 반환.
+        online/aurora 는 배지, 나머지는 글자색만."""
         labels = {}
+        tk.Frame(row, bg=row_bg, width=14, height=1).pack(side="left")
         for col, w, val in [
-            ("name",   12, name_text),
-            ("ip",     20, ip),
-            ("online", 14, "○ 오프라인"),
-            ("aurora", 14, "—"),
-            ("last",   14, "—"),
-            ("ping",   10, "—"),
+            ("name",   98, name_text),
+            ("ip",    138, ip),
+            ("online", 104, "○ 오프라인"),
+            ("aurora", 98, "—"),
+            ("last",   98, "—"),
+            ("ping",   78, "—"),
         ]:
-            fg = self.TEXT if col == "name" else self.TEXT_DIM
-            lbl = tk.Label(row, text=val, width=w, anchor="center",
-                           font=self.FONT_MONO, fg=fg, bg=row_bg, pady=6)
+            cell = self._cell(row, w, row_bg)
+            if col in ("online", "aurora"):
+                lbl = tk.Label(cell, text=val, font=self.FONT_SMALL, padx=8, pady=2,
+                               fg=self.TEXT_DIM, bg=self.IDLE_BG)
+            elif col == "name":
+                lbl = tk.Label(cell, text=val, font=self.FONT_BOLD, anchor="w",
+                               fg=self.TEXT, bg=row_bg)
+            elif col == "ping":
+                lbl = tk.Label(cell, text=val, font=self.FONT_MONO_BOLD, anchor="w",
+                               fg=self.TEXT_DIM, bg=row_bg)
+            else:
+                lbl = tk.Label(cell, text=val, font=self.FONT_MONO, anchor="w",
+                               fg=self.TEXT if col == "ip" else self.TEXT_DIM, bg=row_bg)
             lbl.pack(side="left")
             labels[col] = lbl
         return labels
 
+    def _badge_bg(self, fg: str) -> str:
+        """글자색(fg)으로부터 배지 배경색 결정"""
+        if fg == self.GREEN:
+            return self.OK_BG
+        if fg == self.RED:
+            return self.ERR_BG
+        if fg == self.YELLOW:
+            return self.WARN_BG
+        if fg == self.BLUE:
+            return self.NAV_ON_BG
+        return self.IDLE_BG
+
+    def _set_badge(self, lbl, text: str, fg: str):
+        """상태 라벨을 배지(글자색 + 옅은 배경)로 표시. 빈 문구면 배지를 숨김(부모 배경색)."""
+        bg = self._badge_bg(fg) if text else lbl.master.cget("bg")
+        if lbl.cget("text") != text or lbl.cget("fg") != fg or lbl.cget("bg") != bg:
+            lbl.config(text=text, fg=fg, bg=bg)
+
     def _make_scroll_frame(self, parent, bg=None) -> tk.Frame:
         """스크롤 가능한 캔버스+내부 Frame을 생성해 내부 Frame을 반환."""
         bg = bg or self.BG
-        canvas = tk.Canvas(parent, bg=bg, highlightthickness=0)
+        canvas = tk.Canvas(parent, bg=bg, highlightthickness=0, width=1, height=1)
         vsb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
@@ -1105,25 +1249,42 @@ class AuroraServerApp:
         canvas.bind("<Enter>", _on_enter)
         canvas.bind("<Leave>", _on_leave)
 
-    def _btn(self, parent, text, bg, abg, cmd, width=16):
-        b = tk.Button(parent, text=text, font=self.FONT_TITLE,
-                      fg=self.WHITE, bg=bg, activeforeground=self.WHITE,
-                      disabledforeground=self.WHITE,
-                      activebackground=abg, bd=0, cursor="hand2",
-                      relief="flat", width=width, pady=8, command=cmd)
+    def _btn(self, parent, text, bg, abg, cmd, fg=None, border=None, padx=14, pady=7):
+        """채워진 버튼(기본) / fg·border 를 주면 보조 버튼. hover 는 base_bg/hover_bg 속성 사용."""
+        fg = fg or self.WHITE
+        border = border or bg
+        b = _StyledButton(parent, border, text=text, font=self.FONT_BOLD,
+                          fg=fg, bg=bg, activeforeground=fg,
+                          disabledforeground=self.DISABLED_TEXT,
+                          activebackground=abg, bd=0, cursor="hand2",
+                          relief="flat", padx=padx, pady=pady, command=cmd,
+                          highlightthickness=0)
         b.base_bg = bg
         b.hover_bg = abg
-        b.bind("<Enter>", lambda e: b.config(bg=b.hover_bg))
-        b.bind("<Leave>", lambda e: b.config(bg=b.base_bg))
+        b.base_border = border
+        b.bind("<Enter>", lambda e: b.config(bg=b.hover_bg) if str(b.cget("state")) != "disabled" else None)
+        b.bind("<Leave>", lambda e: b.config(bg=b.base_bg) if str(b.cget("state")) != "disabled" else None)
         return b
 
-    def _small_btn(self, parent, text, fg, cmd, bg=None):
-        bg = bg or self.PANEL
-        b = tk.Button(parent, text=text, font=self.FONT_SMALL_BOLD,
-                      fg=fg, bg=bg, activeforeground=fg,
-                      activebackground=self.BORDER, bd=0, cursor="hand2",
-                      relief="flat", padx=10, pady=3, command=cmd)
-        return b
+    def _sec_btn(self, parent, text, cmd):
+        """보조 버튼: 흰 배경 + 테두리 + 본문 글자"""
+        return self._btn(parent, text, self.PANEL, self.BG, cmd,
+                         fg=self.TEXT, border=self.INPUT_BORDER)
+
+    def _set_btn_look(self, b, bg, abg, fg, border):
+        """이미 만든 버튼의 모양(배경/hover/글자/테두리)을 바꿈 — 토글·세그먼트 용"""
+        b.base_bg = bg
+        b.hover_bg = abg
+        b.config(fg=fg, activeforeground=fg, activebackground=abg)
+        b.set_border(border)
+        if str(b.cget("state")) != "disabled":
+            b.config(bg=bg)
+
+    def _set_autostart_look(self, enabled: bool):
+        if enabled:
+            self._set_btn_look(self._autostart_btn, self.OK_BG, self.OK_BG_H, self.GREEN, self.OK_BORDER)
+        else:
+            self._set_btn_look(self._autostart_btn, self.PANEL, self.BG, self.TEXT_DIM, self.INPUT_BORDER)
 
     # ── 서버 탭 클라이언트 행 재구성 ─────
     def _rebuild_rows(self):
@@ -1135,8 +1296,11 @@ class AuroraServerApp:
             ip_list = sorted(shared_state["clients"].keys(), key=_ip_sort_key)
             shared_state["clients"] = {ip: shared_state["clients"][ip] for ip in ip_list}
 
+        self.all_count_lbl.config(text=str(len(ip_list)))
+
         for idx, ip in enumerate(ip_list):
-            row_bg = self.BG if idx % 2 == 0 else self.ROW_ALT
+            row_bg = self.PANEL
+            self._row_line(self.rows_frame)
             row = tk.Frame(self.rows_frame, bg=row_bg)
             row.pack(fill="x")
             saved_name = config.get("client_names", {}).get(ip, f"CLIENT {idx+1:02d}")
@@ -1163,10 +1327,12 @@ class AuroraServerApp:
             self.single_client_users[ip] = user_var
             self.single_client_pws[ip]   = pw_var
 
-            self._entry(row, user_var, 8, self.FONT_MONO
-                        ).pack(side="left", padx=(4, 2), ipady=3)
-            self._entry(row, pw_var, 8, self.FONT_MONO, show="*"
-                        ).pack(side="left", padx=(2, 4), ipady=3)
+            user_cell = self._cell(row, 108, row_bg)
+            self._entry(user_cell, user_var, 8, self.FONT_MONO
+                        ).pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=4)
+            pw_cell = self._cell(row, 108, row_bg)
+            self._entry(pw_cell, pw_var, 8, self.FONT_MONO, show="*"
+                        ).pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=4)
 
             def _save_cred(*_, _ip=ip, _u=user_var, _p=pw_var):
                 config.setdefault("deploy_client_creds", {})[_ip] = {
@@ -1179,10 +1345,11 @@ class AuroraServerApp:
 
             with state_lock:
                 cur_path = shared_state["clients"].get(ip, {}).get("aurora_path", "")
-            path_lbl = tk.Label(row, text=cur_path if cur_path else "—", width=30, anchor="w",
+            path_cell = self._cell(row, None, row_bg)
+            path_lbl = tk.Label(path_cell, text=cur_path if cur_path else "—", anchor="w",
                                 font=self.FONT_MONO, fg=self.TEXT if cur_path else self.TEXT_DIM,
-                                bg=row_bg, pady=6)
-            path_lbl.pack(side="left", padx=(4, 4))
+                                bg=row_bg)
+            path_lbl.pack(side="left")
             labels["path"] = path_lbl
 
             self.client_rows[ip] = labels
@@ -1210,52 +1377,60 @@ class AuroraServerApp:
         saved_folders    = config.get("deploy_client_folders", {})
 
         for idx, ip in enumerate(ip_list):
-            row_bg = self.BG if idx % 2 == 0 else self.ROW_ALT
+            row_bg = self.PANEL
+            self._row_line(self.deploy_rows_frame)
             row = tk.Frame(self.deploy_rows_frame, bg=row_bg)
             row.pack(fill="x")
+            tk.Frame(row, bg=row_bg, width=14, height=1).pack(side="left")
 
             # 체크박스
             chk_var = tk.BooleanVar(value=True)
             self.deploy_check_vars[ip] = chk_var
-            chk = tk.Checkbutton(row, variable=chk_var,
+            chk_cell = self._cell(row, 48, row_bg)
+            chk = tk.Checkbutton(chk_cell, variable=chk_var,
                                  bg=row_bg, activebackground=row_bg,
-                                 selectcolor=self.PANEL, bd=0)
-            chk.pack(side="left", padx=(8, 0))
+                                 selectcolor=self.PANEL, bd=0, highlightthickness=0)
+            chk.pack(side="left")
 
             # CLIENT 이름
             client_name = config.get("client_names", {}).get(ip, f"CLIENT {idx+1:02d}")
-            tk.Label(row, text=client_name, width=11, anchor="center",
-                     font=self.FONT_MONO, fg=self.TEXT, bg=row_bg, pady=6).pack(side="left")
+            name_cell = self._cell(row, 98, row_bg)
+            tk.Label(name_cell, text=client_name, anchor="w",
+                     font=self.FONT_BOLD, fg=self.TEXT, bg=row_bg).pack(side="left")
 
             # IP
-            tk.Label(row, text=ip, width=18, anchor="center",
-                     font=self.FONT_MONO, fg=self.TEXT_DIM, bg=row_bg, pady=6).pack(side="left")
+            ip_cell = self._cell(row, 138, row_bg)
+            tk.Label(ip_cell, text=ip, anchor="w",
+                     font=self.FONT_MONO, fg=self.TEXT, bg=row_bg).pack(side="left")
 
             # 소스 폴더 콤보박스 — 저장된 선택값 복원
             saved_folder = saved_folders.get(ip, "")
             init_folder  = saved_folder if saved_folder in current_versions else (current_versions[0] if current_versions else "")
             combo_var = tk.StringVar(value=init_folder)
             self.deploy_combo_vars[ip] = combo_var
-            combo = ttk.Combobox(row, textvariable=combo_var,
+            combo_cell = self._cell(row, 198, row_bg)
+            combo = ttk.Combobox(combo_cell, textvariable=combo_var,
                                  values=current_versions,
                                  font=self.FONT_MONO,
-                                 state="readonly", width=24)
-            combo.pack(side="left", padx=(8, 6), pady=4)
+                                 state="readonly")
+            combo.pack(side="left", fill="x", expand=True, padx=(0, 8))
             combo.bind("<MouseWheel>", lambda e: "break")
             self.deploy_combos[ip] = combo
 
             # 저장 경로 라벨
             dst_text = self._dst_label_text()
             # 진행률 바를 오른쪽에 고정 (헤더 "진행률"과 맞춤)
-            prog_lbl = tk.Label(row, text="", font=self.FONT_MONO,
-                                fg=self.TEXT_DIM, bg=row_bg, width=6, anchor="w")
-            prog_lbl.pack(side="right", padx=(0, 4))
-            prog = ttk.Progressbar(row, orient="horizontal", mode="determinate", length=160)
-            prog.pack(side="right", padx=(0, 4))
+            prog_cell = self._cell(row, 220, row_bg, side="right")
+            prog_lbl = tk.Label(prog_cell, text="", font=self.FONT_MONO,
+                                fg=self.TEXT_DIM, bg=row_bg, width=6, anchor="e")
+            prog_lbl.pack(side="right")
+            prog = ttk.Progressbar(prog_cell, orient="horizontal", mode="determinate")
+            prog.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-            dst_lbl = tk.Label(row, text=dst_text, anchor="w",
-                               font=self.FONT_MONO, fg=self.BLUE, bg=row_bg, pady=6)
-            dst_lbl.pack(side="left", padx=(0, 4), fill="x", expand=True)
+            dst_cell = self._cell(row, None, row_bg)
+            dst_lbl = tk.Label(dst_cell, text=dst_text, anchor="w",
+                               font=self.FONT_MONO, fg=self.BLUE, bg=row_bg)
+            dst_lbl.pack(side="left")
             self.deploy_dst_labels[ip] = dst_lbl
             self.deploy_row_progress[ip] = prog
             self.deploy_row_prog_lbl[ip] = prog_lbl
@@ -1271,12 +1446,10 @@ class AuroraServerApp:
 
     def _update_ping_mode_btns(self):
         is_auto = self._ping_mode == "auto"
-        auto_bg = self.BLUE if is_auto else self.TEXT_DIM
-        manual_bg = self.BLUE if not is_auto else self.TEXT_DIM
-        self.ping_auto_btn.base_bg = auto_bg
-        self.ping_manual_btn.base_bg = manual_bg
-        self.ping_auto_btn.config(bg=auto_bg)
-        self.ping_manual_btn.config(bg=manual_bg)
+        selected   = (self.BLUE, self.BLUE_H, self.WHITE, self.BLUE)
+        unselected = (self.PANEL, self.BG, self.TEXT_DIM, self.INPUT_BORDER)
+        self._set_btn_look(self.ping_auto_btn, *(selected if is_auto else unselected))
+        self._set_btn_look(self.ping_manual_btn, *(unselected if is_auto else selected))
         self.ping_now_btn.config(state="normal" if not is_auto else "disabled")
 
     def _set_ping_mode(self, mode: str):
@@ -1386,23 +1559,30 @@ class AuroraServerApp:
             ip_list = sorted(shared_state["clients"].keys(), key=_ip_sort_key)
 
         for idx, ip in enumerate(ip_list):
-            row_bg = self.PANEL if idx % 2 == 0 else self.PANEL_ALT
+            row_bg = self.PANEL
+            self._row_line(self.single_client_frame)
             row = tk.Frame(self.single_client_frame, bg=row_bg)
             row.pack(fill="x")
+            tk.Frame(row, bg=row_bg, width=14, height=1).pack(side="left")
 
             var = tk.BooleanVar(value=True)
             self.single_client_vars[ip] = var
-            tk.Checkbutton(row, variable=var, bg=row_bg,
+            chk_cell = self._cell(row, 32, row_bg)
+            tk.Checkbutton(chk_cell, variable=var, bg=row_bg,
                            activebackground=row_bg,
-                           selectcolor=self.BG, bd=0).pack(side="left", padx=(6, 0))
+                           selectcolor=self.PANEL, bd=0, highlightthickness=0).pack(side="left")
             client_name = config.get("client_names", {}).get(ip, f"CLIENT {idx+1:02d}")
-            tk.Label(row, text=client_name, width=10, anchor="w",
-                     font=self.FONT_MONO, fg=self.TEXT, bg=row_bg, pady=5).pack(side="left")
-            tk.Label(row, text=ip, width=16, anchor="w",
-                     font=self.FONT_MONO, fg=self.TEXT_DIM, bg=row_bg, pady=5).pack(side="left", padx=(4, 0))
-            status_lbl = tk.Label(row, text="배포 예정", width=10, anchor="center",
-                                  font=self.FONT_MONO, fg=self.TEXT_DIM, bg=row_bg, pady=5)
-            status_lbl.pack(side="left", padx=(4, 8))
+            name_cell = self._cell(row, 118, row_bg)
+            tk.Label(name_cell, text=client_name, anchor="w",
+                     font=self.FONT_BOLD, fg=self.TEXT, bg=row_bg).pack(side="left")
+            ip_cell = self._cell(row, 158, row_bg)
+            tk.Label(ip_cell, text=ip, anchor="w",
+                     font=self.FONT_MONO, fg=self.TEXT, bg=row_bg).pack(side="left")
+            status_cell = self._cell(row, None, row_bg)
+            status_lbl = tk.Label(status_cell, text="", anchor="w",
+                                  font=self.FONT_SMALL, padx=8, pady=2, fg=self.TEXT_DIM, bg=self.IDLE_BG)
+            status_lbl.pack(side="left")
+            self._set_badge(status_lbl, "배포 예정", self.TEXT_DIM)
             self.single_client_status_lbls[ip] = status_lbl
 
     def _single_browse(self):
@@ -1432,31 +1612,33 @@ class AuroraServerApp:
 
         if not files:
             tk.Label(self.single_file_frame, text="파일이 없습니다",
-                     font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.PANEL).pack(padx=12, pady=8)
-            self.single_status_lbl.config(text="파일 없음", fg=self.YELLOW)
+                     font=self.FONT_DESC, fg=self.TEXT_DIM, bg=self.PANEL).pack(padx=12, pady=8)
+            self._set_badge(self.single_status_lbl, "파일 없음", self.YELLOW)
             return
 
         for idx, fname in enumerate(files):
-            row_bg = self.PANEL if idx % 2 == 0 else self.PANEL_ALT
-            row = tk.Frame(self.single_file_frame, bg=row_bg)
+            row_bg = self.PANEL
+            self._row_line(self.single_file_frame)
+            row = tk.Frame(self.single_file_frame, bg=row_bg, height=self.ROW_H)
             row.pack(fill="x")
+            row.pack_propagate(False)
 
             var = tk.BooleanVar(value=True)
             self.single_file_vars[fname] = var
             tk.Checkbutton(row, variable=var, bg=row_bg,
                            activebackground=row_bg,
-                           selectcolor=self.BG, bd=0).pack(side="left", padx=(6, 0))
+                           selectcolor=self.PANEL, bd=0, highlightthickness=0).pack(side="left", padx=(10, 0))
             tk.Label(row, text=fname, anchor="w",
-                     font=self.FONT_MONO, fg=self.TEXT, bg=row_bg, pady=5
-                     ).pack(side="left", padx=(4, 12))
+                     font=self.FONT_MONO, fg=self.TEXT, bg=row_bg
+                     ).pack(side="left", padx=(6, 12))
 
         self.single_file_canvas.update_idletasks()
         self.single_file_canvas.configure(
             scrollregion=(0, 0,
                           self.single_file_frame.winfo_width(),
                           self.single_file_frame.winfo_height()))
-        self.single_status_lbl.config(
-            text=f"✓ 파일 {len(files)}개 로드됨", fg=self.GREEN)
+        self._set_badge(self.single_status_lbl,
+                        f"✓ 파일 {len(files)}개 로드됨", self.GREEN)
         self._single_log(f"소스 폴더 적용: {src}  ({len(files)}개 파일)")
 
     def _single_file_check_all(self):
@@ -1508,8 +1690,8 @@ class AuroraServerApp:
         cur_ips    = set(config.get("current_process_ips", []))
         cur_total  = len([ip for ip in checked_targets if ip in cur_ips])
 
-        self.single_status_lbl.config(
-            text=f"배포 중... ({total}대 / {len(checked_files)}개 파일)", fg=self.YELLOW)
+        self._set_badge(self.single_status_lbl,
+                        f"배포 중... ({total}대 / {len(checked_files)}개 파일)", self.YELLOW)
         self._single_log(f"▲ 단일 배포 시작 — 파일 {len(checked_files)}개 / 대상 {total}대")
 
         # 프로그레스바 초기화
@@ -1523,9 +1705,9 @@ class AuroraServerApp:
         # 상태 라벨 초기화
         for ip in self.single_client_status_lbls:
             if ip in checked_targets:
-                self.single_client_status_lbls[ip].config(text="배포 중...", fg=self.YELLOW)
+                self._set_badge(self.single_client_status_lbls[ip], "배포 중...", self.YELLOW)
             else:
-                self.single_client_status_lbls[ip].config(text="배포 예정", fg=self.TEXT_DIM)
+                self._set_badge(self.single_client_status_lbls[ip], "배포 예정", self.TEXT_DIM)
 
         completed_all = [0]
         completed_cur = [0]
@@ -1540,7 +1722,7 @@ class AuroraServerApp:
             cc = completed_cur[0]
             def _ui():
                 if ip in self.single_client_status_lbls:
-                    self.single_client_status_lbls[ip].config(text=status_text, fg=status_fg)
+                    self._set_badge(self.single_client_status_lbls[ip], status_text, status_fg)
                 self.prog_all["value"] = ca
                 self.prog_all_lbl.config(text=f"{ca} / {total}")
                 self.prog_cur["value"] = cc
@@ -1552,11 +1734,11 @@ class AuroraServerApp:
                                             self._single_log, done_fn)
             ok = total - fail_count
             if fail_count == 0:
-                self.root.after(0, lambda: self.single_status_lbl.config(
-                    text=f"✓ 배포 완료 ({total}대)", fg=self.GREEN))
+                self.root.after(0, lambda: self._set_badge(
+                    self.single_status_lbl, f"✓ 배포 완료 ({total}대)", self.GREEN))
             else:
-                self.root.after(0, lambda: self.single_status_lbl.config(
-                    text=f"⚠ 완료 {ok}대 / 실패 {fail_count}대", fg=self.YELLOW))
+                self.root.after(0, lambda: self._set_badge(
+                    self.single_status_lbl, f"⚠ 완료 {ok}대 / 실패 {fail_count}대", self.YELLOW))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1608,9 +1790,10 @@ class AuroraServerApp:
 
         config["deploy_src"] = src
         save_config(config)
-        self.deploy_status_lbl.config(
-            text=f"✓ 적용 완료 — 버전 {len(versions)}개: {', '.join(versions)}",
-            fg=self.GREEN
+        self._set_badge(
+            self.deploy_status_lbl,
+            f"✓ 적용 완료 — 버전 {len(versions)}개: {', '.join(versions)}",
+            self.GREEN
         )
         add_log(f"배포 소스 폴더 적용: {src}  버전: {versions}")
 
@@ -1619,7 +1802,7 @@ class AuroraServerApp:
         for ip, var in self.deploy_combo_vars.items():
             config.setdefault("deploy_client_folders", {})[ip] = var.get()
         save_config(config)
-        self.deploy_status_lbl.config(text="✓ 소스 폴더 선택 저장됨", fg=self.GREEN)
+        self._set_badge(self.deploy_status_lbl, "✓ 소스 폴더 선택 저장됨", self.GREEN)
 
     def _apply_deploy_inner(self):
         inner = self.deploy_inner_var.get().strip()
@@ -1641,7 +1824,7 @@ class AuroraServerApp:
             elif versions:
                 combo.set(versions[0])
                 self.deploy_combo_vars[ip].set(versions[0])
-        self.deploy_status_lbl.config(text="↺ 마지막 저장 값으로 복원됨", fg=self.BLUE)
+        self._set_badge(self.deploy_status_lbl, "↺ 마지막 저장 값으로 복원됨", self.BLUE)
 
     # ── 배포하기 ─────────────────────────
     def _cmd_deploy_selected(self):
@@ -1678,7 +1861,7 @@ class AuroraServerApp:
         save_config(config)
         total = len(targets)
         self._deploy_cancel = threading.Event()
-        self.deploy_status_lbl.config(text=f"배포 중... ({total}대)", fg=self.YELLOW)
+        self._set_badge(self.deploy_status_lbl, f"배포 중... ({total}대)", self.YELLOW)
         self.deploy_progress_overall.configure(maximum=total, value=0)
         self.deploy_overall_lbl.config(text=f"0 / {total}")
         self.deploy_stop_btn.config(state="normal")
@@ -1692,8 +1875,8 @@ class AuroraServerApp:
         done_count = [0]
 
         def _progress(msg):
-            self.root.after(0, lambda m=msg: self.deploy_status_lbl.config(
-                text=m, fg=self.YELLOW))
+            self.root.after(0, lambda m=msg: self._set_badge(
+                self.deploy_status_lbl, m, self.YELLOW))
 
         def _file_progress(ip_t, cur, tot):
             def _update(_ip=ip_t, c=cur, t=tot):
@@ -1720,14 +1903,14 @@ class AuroraServerApp:
             def _finish(f=fail_count, o=ok_count, c=cancelled):
                 self.deploy_stop_btn.config(state="disabled")
                 if c:
-                    self.deploy_status_lbl.config(text=f"■ 중단됨 (완료 {o}대)", fg=self.RED)
+                    self._set_badge(self.deploy_status_lbl, f"■ 중단됨 (완료 {o}대)", self.RED)
                 elif f == 0:
-                    self.deploy_status_lbl.config(text=f"✓ 배포 완료 ({total}대)", fg=self.GREEN)
+                    self._set_badge(self.deploy_status_lbl, f"✓ 배포 완료 ({total}대)", self.GREEN)
                     self.deploy_progress_overall.configure(value=total)
                     self.deploy_overall_lbl.config(text=f"{total} / {total}")
                 else:
-                    self.deploy_status_lbl.config(
-                        text=f"⚠ 완료 {ok_count}대 / 실패 {f}대", fg=self.YELLOW)
+                    self._set_badge(
+                        self.deploy_status_lbl, f"⚠ 완료 {ok_count}대 / 실패 {f}대", self.YELLOW)
             self.root.after(0, _finish)
 
         threading.Thread(target=run, daemon=True).start()
@@ -1781,14 +1964,16 @@ class AuroraServerApp:
         popup.grab_set()
 
         tk.Label(popup, text="삭제할 IP를 선택하세요  (Ctrl/Shift 다중 선택)",
-                 font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.BG).pack(pady=10)
+                 font=self.FONT_DESC, fg=self.TEXT_DIM, bg=self.BG).pack(pady=10)
 
-        listbox = tk.Listbox(popup, font=self.FONT_MONO_L,
+        list_box = self._card_border(popup)
+        list_box.pack(fill="both", expand=True, padx=16)
+        listbox = tk.Listbox(list_box, font=self.FONT_MONO,
                              bg=self.PANEL, fg=self.TEXT,
-                             selectbackground=self.RED, bd=0,
-                             highlightthickness=0,
+                             selectbackground=self.BLUE, selectforeground=self.WHITE, bd=0,
+                             highlightthickness=0, activestyle="none",
                              selectmode=tk.EXTENDED)
-        listbox.pack(fill="both", expand=True, padx=16)
+        listbox.pack(fill="both", expand=True, padx=8, pady=8)
         for ip in ip_list:
             listbox.insert("end", ip)
 
@@ -1810,7 +1995,7 @@ class AuroraServerApp:
                 add_log(f"클라이언트 삭제: {ip}")
             popup.destroy()
 
-        self._btn(popup, "삭제", self.BTN_STOP, self.BTN_STOP_H, confirm, 16).pack(pady=10)
+        self._btn(popup, "삭제", self.BTN_STOP, self.BTN_STOP_H, confirm).pack(pady=14)
 
     # ── 현재 공정 IP 관리 ────────────────
     def _rebuild_current_rows(self):
@@ -1819,8 +2004,10 @@ class AuroraServerApp:
         self.current_client_rows = {}
 
         ips = config.get("current_process_ips", [])
+        self.current_count_lbl.config(text=str(len(ips)))
         for idx, ip in enumerate(ips):
-            row_bg = self.BG if idx % 2 == 0 else self.ROW_ALT
+            row_bg = self.PANEL
+            self._row_line(self.current_rows_frame)
             row = tk.Frame(self.current_rows_frame, bg=row_bg)
             row.pack(fill="x")
             labels = self._make_status_labels(row, row_bg, f"공정 {idx+1:02d}", ip)
@@ -1854,11 +2041,13 @@ class AuroraServerApp:
         tk.Label(popup, text="삭제할 IP를 선택하세요",
                  font=self.FONT, fg=self.TEXT_DIM, bg=self.BG).pack(pady=10)
 
-        listbox = tk.Listbox(popup, font=self.FONT_MONO_L,
+        list_box = self._card_border(popup)
+        list_box.pack(fill="both", expand=True, padx=16)
+        listbox = tk.Listbox(list_box, font=self.FONT_MONO,
                              bg=self.PANEL, fg=self.TEXT,
-                             selectbackground=self.RED, bd=0,
-                             highlightthickness=0)
-        listbox.pack(fill="both", expand=True, padx=16)
+                             selectbackground=self.BLUE, selectforeground=self.WHITE, bd=0,
+                             highlightthickness=0, activestyle="none")
+        listbox.pack(fill="both", expand=True, padx=8, pady=8)
         for ip in ips:
             listbox.insert("end", ip)
 
@@ -1873,15 +2062,15 @@ class AuroraServerApp:
             add_log(f"현재 공정 삭제: {ip}")
             popup.destroy()
 
-        self._btn(popup, "삭제", self.BTN_STOP, self.BTN_STOP_H, confirm, 16).pack(pady=10)
+        self._btn(popup, "삭제", self.BTN_STOP, self.BTN_STOP_H, confirm).pack(pady=14)
 
     def _toggle_autostart(self):
         try:
             new_state = not autostart_enabled()
             set_autostart(new_state)
             self._autostart_btn.config(
-                text="ON  ●" if new_state else "OFF ○",
-                fg=self.GREEN if new_state else self.TEXT_DIM)
+                text="ON  ●" if new_state else "OFF ○")
+            self._set_autostart_look(new_state)
             add_log(f"자동 시작 {'활성화' if new_state else '비활성화'}")
         except Exception as e:
             messagebox.showerror("오류", f"레지스트리 쓰기 실패:\n{e}")
@@ -1950,20 +2139,22 @@ class AuroraServerApp:
             if lbl.cget("text") != text or lbl.cget("fg") != fg:
                 lbl.config(text=text, fg=fg)
 
+        _set_badge = self._set_badge
+
         def _apply_status(labels, info):
             online  = info["online"]
             aurora  = info["aurora_running"]
             last    = info["last_seen"]
             ping_ms = info.get("ping_ms")
-            _set(labels["online"],
-                 "● 온라인" if online else "○ 오프라인",
-                 self.GREEN if online else self.TEXT_DIM)
+            _set_badge(labels["online"],
+                       "● 온라인" if online else "○ 오프라인",
+                       self.GREEN if online else self.TEXT_DIM)
             if not online:
-                _set(labels["aurora"], "—", self.TEXT_DIM)
+                _set_badge(labels["aurora"], "—", self.TEXT_DIM)
             elif aurora:
-                _set(labels["aurora"], "● 실행중", self.GREEN)
+                _set_badge(labels["aurora"], "● 실행중", self.GREEN)
             else:
-                _set(labels["aurora"], "○ 중지", self.RED)
+                _set_badge(labels["aurora"], "○ 중지", self.RED)
             if last:
                 elapsed = int(now - last)
                 _set(labels["last"],
@@ -1989,8 +2180,8 @@ class AuroraServerApp:
             if ip in clients_copy:
                 _apply_status(labels, clients_copy[ip])
             else:
-                labels["online"].config(text="○ 오프라인", fg=self.TEXT_DIM)
-                labels["aurora"].config(text="—", fg=self.TEXT_DIM)
+                _set_badge(labels["online"], "○ 오프라인", self.TEXT_DIM)
+                _set_badge(labels["aurora"], "—", self.TEXT_DIM)
                 labels["last"].config(text="—", fg=self.TEXT_DIM)
                 labels["ping"].config(text="—", fg=self.TEXT_DIM)
 
@@ -2023,8 +2214,8 @@ class AuroraServerApp:
         threading.Thread(target=run_http_server, daemon=True).start()
         threading.Thread(target=check_offline,   daemon=True).start()
         add_log(f"HTTP 서버 시작: 0.0.0.0:{SERVER_PORT}")
-        self.server_status_lbl.config(
-            text=f"● HTTP 서버 실행중  :{SERVER_PORT}", fg=self.GREEN)
+        self._set_badge(self.server_status_lbl,
+                        f"● HTTP 서버 실행중  :{SERVER_PORT}", self.GREEN)
         if config.get("ping_mode", "manual") == "auto":
             self._start_auto_ping()
 
@@ -2070,6 +2261,25 @@ def set_autostart(enable: bool):
             pass
     winreg.CloseKey(key)
 
+def _apply_font_fallback(root):
+    """Pretendard 가 없는 PC 에서는 맑은 고딕으로 대체 (사이즈 동일)"""
+    available = set(tkfont.families(root))
+    fallback = {
+        "Pretendard": "맑은 고딕",
+        "Pretendard Medium": "맑은 고딕",
+        "Pretendard SemiBold": "맑은 고딕",
+    }
+    for name, value in list(vars(AuroraServerApp).items()):
+        if not (name.startswith("FONT") and isinstance(value, tuple)):
+            continue
+        family = value[0]
+        if family in available or family not in fallback:
+            continue
+        attrs = value[2:]
+        if "SemiBold" in family and "bold" not in attrs:
+            attrs = attrs + ("bold",)
+        setattr(AuroraServerApp, name, (fallback[family], value[1]) + attrs)
+
 def main():
     _acquire_lock(19700)
     root = tk.Tk()
@@ -2081,22 +2291,15 @@ def main():
             root.iconbitmap(ico_path)
             break
 
+    _apply_font_fallback(root)
     A = AuroraServerApp
     style = ttk.Style()
     style.theme_use("clam")
     style.configure("Vertical.TScrollbar",
                     background=A.BORDER, troughcolor=A.BG,
-                    arrowcolor=A.TEXT_DIM, bordercolor=A.BORDER,
-                    lightcolor=A.BORDER, darkcolor=A.BORDER)
-    style.configure("TNotebook",
-                    background=A.BG, borderwidth=0, tabmargins=0)
-    style.configure("TNotebook.Tab",
-                    background=A.BORDER, foreground=A.TEXT_DIM,
-                    font=A.FONT_BOLD, padding=[16, 8],
-                    borderwidth=0)
-    style.map("TNotebook.Tab",
-              background=[("selected", A.PANEL)],
-              foreground=[("selected", A.BLUE)])
+                    arrowcolor=A.TEXT_DIM, bordercolor=A.BG,
+                    lightcolor=A.BORDER, darkcolor=A.BORDER,
+                    arrowsize=12, borderwidth=0)
     style.configure("Treeview",
                     background=A.PANEL, fieldbackground=A.PANEL,
                     foreground=A.TEXT, rowheight=26, borderwidth=0,
@@ -2115,14 +2318,16 @@ def main():
                     fieldbackground=A.PANEL, background=A.PANEL,
                     foreground=A.TEXT, selectbackground=A.SELECT_BG,
                     selectforeground=A.TEXT, arrowcolor=A.TEXT_DIM,
-                    bordercolor=A.BORDER, lightcolor=A.BORDER,
-                    darkcolor=A.BORDER)
+                    bordercolor=A.INPUT_BORDER, lightcolor=A.INPUT_BORDER,
+                    darkcolor=A.INPUT_BORDER, padding=6)
+    root.option_add("*TCombobox*Listbox.font", A.FONT_MONO)
     style.map("TCombobox",
               fieldbackground=[("readonly", A.PANEL)],
               foreground=[("readonly", A.TEXT)])
     style.configure("Horizontal.TProgressbar",
-                    background=A.BLUE, troughcolor=A.BORDER,
-                    bordercolor=A.BORDER, lightcolor=A.BLUE, darkcolor=A.BLUE)
+                    background=A.BRAND, troughcolor=A.BORDER,
+                    bordercolor=A.BORDER, lightcolor=A.BRAND, darkcolor=A.BRAND,
+                    thickness=8, borderwidth=0)
 
     app = AuroraServerApp(root)
 
