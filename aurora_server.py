@@ -94,6 +94,7 @@ CLIENT_PORT = config.get("client_port", 9001)
 shared_state = {
     "clients": {},   # { ip: {online, aurora_running, last_seen, ping_ms, aurora_path} }
     "log": [],
+    "log_seq": 0,    # 지금까지 추가된 로그 누적 개수 (앞부분 잘림과 무관)
 }
 state_lock = threading.Lock()
 
@@ -165,6 +166,7 @@ def add_log(message: str):
     ts = datetime.now().strftime("%H:%M:%S")
     with state_lock:
         shared_state["log"].append(f"[{ts}] {message}")
+        shared_state["log_seq"] += 1
         if len(shared_state["log"]) > 200:
             shared_state["log"] = shared_state["log"][-200:]
 
@@ -497,6 +499,7 @@ def check_offline():
                     info["online"] = False
                     info["aurora_running"] = False
                     shared_state["log"].append(f"[{ts}] [{ip}] 오프라인")
+                    shared_state["log_seq"] += 1
             if len(shared_state["log"]) > 300:
                 del shared_state["log"][:-300]
         time.sleep(3)
@@ -730,7 +733,7 @@ class AuroraServerApp:
 
         hdr = tk.Frame(tbl_outer, bg=self.PANEL)
         hdr.pack(fill="x")
-        for col, w in [("CLIENT", 12), ("IP", 20), ("연결 상태", 14), ("Aurora", 14), ("마지막 응답", 14), ("ID", 10), ("PW", 10), ("경로", 30)]:
+        for col, w in [("CLIENT", 12), ("IP", 20), ("연결 상태", 14), ("Aurora", 14), ("마지막 응답", 14), ("핑", 10), ("ID", 10), ("PW", 10), ("경로", 30)]:
             tk.Label(hdr, text=col, width=w, anchor="center",
                      font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
                      bg=self.PANEL, pady=5).pack(side="left")
@@ -760,7 +763,7 @@ class AuroraServerApp:
 
         cur_col_hdr = tk.Frame(cur_tbl, bg=self.PANEL)
         cur_col_hdr.pack(fill="x")
-        for col, w in [("CLIENT", 12), ("IP", 20), ("연결 상태", 14), ("Aurora", 14), ("마지막 응답", 14)]:
+        for col, w in [("CLIENT", 12), ("IP", 20), ("연결 상태", 14), ("Aurora", 14), ("마지막 응답", 14), ("핑", 10)]:
             tk.Label(cur_col_hdr, text=col, width=w, anchor="center",
                      font=self.FONT_MONO_BOLD, fg=self.TEXT_DIM,
                      bg=self.PANEL, pady=5).pack(side="left")
@@ -979,6 +982,7 @@ class AuroraServerApp:
         file_outer.pack(fill="both", expand=True, pady=6)
 
         self.single_file_frame = self._make_scroll_frame(file_outer, bg=self.PANEL)
+        self.single_file_canvas = self.single_file_frame.canvas
 
         # ── 우측: 클라이언트 목록 (확장) ─
         right = tk.Frame(body, bg=self.BG)
@@ -1052,7 +1056,7 @@ class AuroraServerApp:
         for col, w, val in [
             ("name",   12, name_text),
             ("ip",     20, ip),
-            ("online", 14, "○  오프라인"),
+            ("online", 14, "○ 오프라인"),
             ("aurora", 14, "—"),
             ("last",   14, "—"),
             ("ping",   10, "—"),
@@ -1077,6 +1081,7 @@ class AuroraServerApp:
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=(0, 0, e.width, e.height)))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
         self._bind_scroll(canvas)
+        inner.canvas = canvas
         return inner
 
     def _bind_scroll(self, canvas):
@@ -1106,8 +1111,10 @@ class AuroraServerApp:
                       disabledforeground=self.WHITE,
                       activebackground=abg, bd=0, cursor="hand2",
                       relief="flat", width=width, pady=8, command=cmd)
-        b.bind("<Enter>", lambda e: b.config(bg=abg))
-        b.bind("<Leave>", lambda e: b.config(bg=bg))
+        b.base_bg = bg
+        b.hover_bg = abg
+        b.bind("<Enter>", lambda e: b.config(bg=b.hover_bg))
+        b.bind("<Leave>", lambda e: b.config(bg=b.base_bg))
         return b
 
     def _small_btn(self, parent, text, fg, cmd, bg=None):
@@ -1264,8 +1271,12 @@ class AuroraServerApp:
 
     def _update_ping_mode_btns(self):
         is_auto = self._ping_mode == "auto"
-        self.ping_auto_btn.config(bg=self.BLUE if is_auto else self.TEXT_DIM)
-        self.ping_manual_btn.config(bg=self.BLUE if not is_auto else self.TEXT_DIM)
+        auto_bg = self.BLUE if is_auto else self.TEXT_DIM
+        manual_bg = self.BLUE if not is_auto else self.TEXT_DIM
+        self.ping_auto_btn.base_bg = auto_bg
+        self.ping_manual_btn.base_bg = manual_bg
+        self.ping_auto_btn.config(bg=auto_bg)
+        self.ping_manual_btn.config(bg=manual_bg)
         self.ping_now_btn.config(state="normal" if not is_auto else "disabled")
 
     def _set_ping_mode(self, mode: str):
@@ -1467,7 +1478,7 @@ class AuroraServerApp:
     def _single_log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
-        add_log(line)
+        add_log(msg)
         self.single_log_text.config(state="normal")
         self.single_log_text.insert("end", line + "\n")
         self.single_log_text.see("end")
@@ -1981,32 +1992,34 @@ class AuroraServerApp:
                 labels["online"].config(text="○ 오프라인", fg=self.TEXT_DIM)
                 labels["aurora"].config(text="—", fg=self.TEXT_DIM)
                 labels["last"].config(text="—", fg=self.TEXT_DIM)
+                labels["ping"].config(text="—", fg=self.TEXT_DIM)
 
     def _update_log(self):
         with state_lock:
             logs = list(shared_state["log"])
+            seq  = shared_state["log_seq"]
 
-        # 배포 탭 로그 — 새 줄만 append
-        deploy_logs = [l for l in logs if any(
+        # 배포 탭 로그 — 누적 개수로 새 줄만 판별 (로그 앞부분이 잘려도 정확)
+        new_count = min(seq - self._log_seq_shown, len(logs))
+        self._log_seq_shown = seq
+        new_lines = logs[len(logs) - new_count:] if new_count > 0 else []
+        d_new = [l for l in new_lines if any(
             kw in l for kw in ["배포", "복사", "공유", "Aurora 경로", "▲", "◆"]
         )]
-        d_visible = deploy_logs[-50:]
-        if len(d_visible) < self._deploy_log_shown:
-            self._deploy_log_shown = 0
-            self.deploy_log_text.config(state="normal")
-            self.deploy_log_text.delete("1.0", "end")
-            self.deploy_log_text.config(state="disabled")
-        d_new = d_visible[self._deploy_log_shown:]
         if d_new:
             self.deploy_log_text.config(state="normal")
             for line in d_new:
                 self.deploy_log_text.insert("end", line + "\n")
+            # 최근 50줄만 유지
+            # 각 줄이 "\n" 으로 끝나므로 end-1c 는 마지막 빈 줄 → 실제 줄 수는 그보다 1 적음
+            line_count = int(self.deploy_log_text.index("end-1c").split(".")[0]) - 1
+            if line_count > 50:
+                self.deploy_log_text.delete("1.0", f"{line_count - 50 + 1}.0")
             self.deploy_log_text.see("end")
             self.deploy_log_text.config(state="disabled")
-            self._deploy_log_shown = len(d_visible)
 
     def _start_services(self):
-        self._deploy_log_shown = 0
+        self._log_seq_shown = 0
         threading.Thread(target=run_http_server, daemon=True).start()
         threading.Thread(target=check_offline,   daemon=True).start()
         add_log(f"HTTP 서버 시작: 0.0.0.0:{SERVER_PORT}")
