@@ -31,7 +31,7 @@ from PIL import Image as PILImage
 from PIL import ImageTk
 import aurora_update
 
-APP_VERSION = "2.10.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.10.1"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -1239,15 +1239,19 @@ class _FileGrid(tk.Frame):
     """탐색기 '타일' 보기 — 아이콘 + 이름 + 크기·수정일, 창 너비에 맞춰 여러 열.
     보이는 줄만 그려서 파일이 많아도 가벼움. 선택: 클릭/Ctrl/Shift/드래그 영역/Ctrl+A/방향키"""
 
-    def __init__(self, parent, app, on_open, on_menu, on_key):
+    ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.6, 2.0, 0.1
+
+    def __init__(self, parent, app, on_open, on_menu, on_key, zoom=1.0, on_zoom=None):
         super().__init__(parent, bg=app.PANEL)
         self.app, self.on_open, self.on_menu, self.on_key = app, on_open, on_menu, on_key
-        self.icons  = _FileIcons(_px(40))
-        self.tile_w = _px(260)
-        self.tile_h = _px(60)
+        self.on_zoom = on_zoom
         self.pad    = _px(4)
         self.font     = tkfont.Font(font=app.FONT_INPUT)
         self.font_sub = tkfont.Font(font=app.FONT_MONO_SMALL)
+        self._font_pt = (self.font.actual("size"), self.font_sub.actual("size"))
+        self._wheel_acc = 0
+        self._zoom_tip = None
+        self._apply_zoom(zoom)
         self.items, self.sel = [], set()
         self.anchor = self.cursor = self.hover = None
         self.mode = "extended"
@@ -1274,7 +1278,8 @@ class _FileGrid(tk.Frame):
         cv.bind("<Button-3>", self._right)
         cv.bind("<Motion>", self._motion)
         cv.bind("<Leave>", lambda e: self._set_hover(None))
-        cv.bind("<MouseWheel>", lambda e: self._scroll(-1 if e.delta > 0 else 1, 3))
+        cv.bind("<MouseWheel>", self._wheel)
+        cv.bind("<Control-Key-0>", lambda e: self.set_zoom(1.0))
         cv.bind("<Control-a>", lambda e: self._select_all())
         cv.bind("<Return>", lambda e: self._open_cursor())
         for k, d in (("Left", -1), ("Right", 1), ("Up", "up"), ("Down", "down")):
@@ -1282,6 +1287,62 @@ class _FileGrid(tk.Frame):
             cv.bind(f"<Shift-{k}>", lambda e, d=d: self._move(d, True))
         for k in ("Delete", "F2", "BackSpace", "F5"):
             cv.bind(f"<{k}>", lambda e, k=k: self.on_key(k))
+
+    # ── 크기 (Ctrl+휠) ──
+    def _z(self, v):
+        """100% 기준 픽셀 → 화면 배율 × 타일 크기 배율"""
+        return int(round(v * SCALE * self.zoom))
+
+    def _apply_zoom(self, zoom: float):
+        self.zoom = zoom
+        self.icons  = _FileIcons(self._z(40))
+        self.tile_w = self._z(260)
+        self.tile_h = self._z(60)
+        for f, pt in zip((self.font, self.font_sub), self._font_pt):
+            f.configure(size=-max(7, self._z(pt * 4 / 3)))   # 음수 = 픽셀 크기
+
+    def _wheel(self, e):
+        if not e.state & 0x4:
+            return self._scroll(-1 if e.delta > 0 else 1, 3)
+        self._wheel_acc += e.delta     # 터치패드처럼 잘게 오는 휠도 한 칸(120) 단위로
+        n = int(self._wheel_acc / 120)
+        if n:
+            self._wheel_acc -= n * 120
+            self.set_zoom(self.zoom + n * self.ZOOM_STEP)
+        return "break"
+
+    def set_zoom(self, zoom: float):
+        """Ctrl+휠 위/아래 = 타일 크게/작게, Ctrl+0 = 기본 크기"""
+        zoom = round(min(self.ZOOM_MAX, max(self.ZOOM_MIN, zoom)), 2)
+        if zoom != self.zoom:
+            # 맨 위에 보이던 줄을 기준으로 스크롤 위치 유지
+            row = max(0, int((self.cv.canvasy(0) - self.pad) // self.tile_h))
+            top = min(row * self.cols, len(self.items) - 1) if self.items else None
+            self.cancel_edit()
+            self._apply_zoom(zoom)
+            self._fit_cache.clear()
+            self._layout()
+            keep = self.cursor if self.cursor is not None else top
+            if keep is not None:
+                self.see(keep)
+            if self.on_zoom:
+                self.on_zoom(zoom)
+        self._show_zoom_tip()
+
+    def _show_zoom_tip(self):
+        cv = self.cv
+        cv.delete("zoomtip")
+        x, y = cv.winfo_width() / 2, cv.canvasy(0) + cv.winfo_height() / 2
+        t = cv.create_text(x, y, text=f"{round(self.zoom * 100)}%", fill="#FFFFFF",
+                           font=self.app.FONT_HEAD, tags="zoomtip")
+        x0, y0, x1, y1 = cv.bbox(t)
+        p = _px(10)
+        cv.create_rectangle(x0 - p, y0 - p // 2, x1 + p, y1 + p // 2, fill="#1F2937", outline="",
+                            tags="zoomtip")
+        cv.tag_raise(t)
+        if self._zoom_tip:
+            self.after_cancel(self._zoom_tip)
+        self._zoom_tip = self.after(800, lambda: cv.delete("zoomtip"))
 
     # ── 데이터 ──
     def set_items(self, items: list, empty_text: str = "", select_name: str | None = None):
@@ -1356,7 +1417,7 @@ class _FileGrid(tk.Frame):
         r0 = max(0, int((top - self.pad) // self.tile_h))
         r1 = int((top + h - self.pad) // self.tile_h) + 1
         ic = self.icons.size
-        text_w = int(self.tw - ic - _px(28))
+        text_w = int(self.tw - ic - self._z(28))
         for i in range(r0 * self.cols, min(len(self.items), (r1 + 1) * self.cols)):
             it = self.items[i]
             x0, y0, x1, y1 = self._tile_box(i)
@@ -1365,18 +1426,19 @@ class _FileGrid(tk.Frame):
             elif i == self.hover:
                 cv.create_rectangle(x0, y0, x1, y1, fill=app.PANEL_ALT, outline=app.BORDER, tags="tile")
             cy = (y0 + y1) / 2
-            cv.create_image(x0 + _px(8), cy, image=self.icons.get(it), anchor="w", tags="tile")
-            tx = x0 + _px(8) + ic + _px(10)
+            cv.create_image(x0 + self._z(8), cy, image=self.icons.get(it), anchor="w", tags="tile")
+            tx = x0 + self._z(8) + ic + self._z(10)
             sub = self._sub_text(it)
-            cv.create_text(tx, cy - (_px(9) if sub else 0), anchor="w", tags="tile",
+            cv.create_text(tx, cy - (self._z(9) if sub else 0), anchor="w", tags="tile",
                            text=self._fit(self.font, it["name"], text_w),
                            fill=app.TEXT, font=self.font)
             if sub:
-                cv.create_text(tx, cy + _px(10), anchor="w", tags="tile",
+                cv.create_text(tx, cy + self._z(10), anchor="w", tags="tile",
                                text=self._fit(self.font_sub, sub, text_w),
                                fill=app.TEXT_DIM, font=self.font_sub)
         if self._band:
             cv.tag_raise("band")
+        cv.tag_raise("zoomtip")
 
     def _sub_text(self, it: dict) -> str:
         if it.get("root"):
@@ -1538,7 +1600,7 @@ class _FileGrid(tk.Frame):
             return
         self.see(i)
         x0, y0, x1, y1 = self._tile_box(i)
-        tx = x0 + _px(8) + self.icons.size + _px(8)
+        tx = x0 + self._z(8) + self.icons.size + self._z(8)
         var = tk.StringVar(value=item["name"])
         ent = tk.Entry(self.cv, textvariable=var, font=self.font, relief="solid", bd=1,
                        highlightthickness=0, fg=self.app.TEXT, bg=self.app.PANEL)
@@ -2703,7 +2765,9 @@ class AuroraClientApp:
                              highlightbackground=self.BORDER, highlightcolor=self.BORDER)
         grid_wrap.pack(fill="both", expand=True, padx=_px(20), pady=(0, _px(16)))
         self._exp_grid = _FileGrid(grid_wrap, self, on_open=self._export_open_item,
-                                   on_menu=self._export_menu, on_key=self._export_key)
+                                   on_menu=self._export_menu, on_key=self._export_key,
+                                   zoom=config.get("export_grid_zoom", 1.0),
+                                   on_zoom=self._export_grid_zoomed)
         self._exp_grid.pack(fill="both", expand=True)
         self._exp_grid.set_items([], "장비를 선택하세요")
         # 탐색기에서 파일·폴더를 끌어다 놓으면 반입 (폴더 타일 위 → 그 폴더, 빈 곳 → 현재 폴더)
@@ -3020,6 +3084,13 @@ class AuroraClientApp:
             m.tk_popup(event.x_root, event.y_root)
         finally:
             m.grab_release()
+
+    def _export_grid_zoomed(self, zoom: float):
+        """파일 목록 타일 크기(Ctrl+휠) — 다음 실행에도 유지. 휠을 연달아 돌릴 땐 마지막에 한 번만 저장"""
+        config["export_grid_zoom"] = zoom
+        if getattr(self, "_grid_zoom_save", None):
+            self.root.after_cancel(self._grid_zoom_save)
+        self._grid_zoom_save = self.root.after(800, lambda: save_config(config))
 
     def _export_key(self, key: str):
         sel = [it for it in self._exp_grid.selection() if not it.get("root")]
