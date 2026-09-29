@@ -1,5 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+# 사용하지 않는데 의존성으로 딸려오는 무거운 모듈 제외 (빌드 시간·EXE 크기 단축)
+EXCLUDES = [
+    'numpy', 'setuptools', 'pkg_resources', 'packaging',
+    'unittest', 'pydoc', 'doctest', '_pyrepl', 'lib2to3', 'xmlrpc', 'sqlite3',
+    'tkinter.test', 'test', 'idlelib',
+    'PIL._avif', 'PIL.AvifImagePlugin', 'PIL._webp', 'PIL.WebPImagePlugin',
+    'PIL.ImageQt', 'PIL.ImageMath', 'PIL.ImageCms', 'PIL._imagingcms', 'PIL._imagingmath',
+    'gi', 'Xlib', 'pystray._gtk', 'pystray._xorg', 'pystray._appindicator', 'pystray._darwin',
+]
+
 
 a = Analysis(
     ['aurora_client.py'],
@@ -10,7 +20,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=EXCLUDES,
     noarchive=False,
     optimize=0,
 )
