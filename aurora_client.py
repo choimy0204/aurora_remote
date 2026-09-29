@@ -7,7 +7,6 @@ Aurora Remote Controller - Client
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from tkinter import font as tkfont
 import threading
 import subprocess
 import re
@@ -19,6 +18,7 @@ import os
 import json
 import shutil
 import sys
+import ctypes
 import winreg
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, date, timedelta
@@ -26,22 +26,33 @@ import pystray
 from PIL import Image as PILImage
 from PIL import ImageTk
 
-# ── 글꼴 등록 (fonts/ 폴더) ───────────────
+# ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, rel)
 
-def _register_fonts():
-    """fonts/ 폴더의 글꼴을 이 프로세스에서만 사용하도록 등록 (실패 시 무시 → 폴백 폰트)"""
+def _enable_dpi_awareness():
+    """고해상도(배율) 화면에서 글자가 흐리지 않도록 DPI 인식 모드로 실행"""
     try:
-        import ctypes, glob
-        gdi = ctypes.WinDLL("gdi32")
-        for f in glob.glob(_resource_path(os.path.join("fonts", "*.[ot]tf"))):
-            gdi.AddFontResourceExW(f, 0x10, 0)   # FR_PRIVATE
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)   # SYSTEM_DPI_AWARE
     except Exception:
-        pass
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
-_register_fonts()
+_enable_dpi_awareness()
+
+SCALE = 1.0   # 화면 배율 (100% → 1.0, 150% → 1.5) — tk 루트 생성 직후 _init_scale 로 설정
+
+def _init_scale(root):
+    """tk 루트 기준으로 화면 배율 계수 계산"""
+    global SCALE
+    SCALE = root.winfo_fpixels("1i") / 96.0
+
+def _px(v):
+    """100% 기준 픽셀 값을 현재 화면 배율에 맞춰 환산"""
+    return int(round(v * SCALE))
 
 # ── 중복 실행 방지 ────────────────────────
 _LOCK_SOCK = None
@@ -475,7 +486,7 @@ class AuroraClientApp:
     BORDER   = "#E1E5E8"
     INPUT_BORDER = "#CDD3D7"
     ROW_LINE = "#EEF1F3"
-    TEXT     = "#1D2327"
+    TEXT     = "#111418"
     TEXT_DIM = "#5F686B"
     DISABLED_TEXT = "#9AA2A5"
     WHITE    = "#FFFFFF"
@@ -502,32 +513,21 @@ class AuroraClientApp:
     SELECT_BG    = "#E8F2FE"
 
     # ── 폰트 ─────────────────────────────
-    FONT             = ("Pretendard Medium", 9)
-    FONT_BOLD        = ("Pretendard SemiBold", 9)
-    FONT_TITLE       = ("Pretendard", 10, "bold")
-    FONT_HEAD        = ("Pretendard", 11, "bold")
-    FONT_VALUE       = ("Pretendard", 10, "bold")
-    FONT_TAB         = ("Pretendard Medium", 10)
-    FONT_TAB_ON      = ("Pretendard", 10, "bold")
-    FONT_SMALL       = ("Pretendard SemiBold", 8)
-    FONT_SMALL_BOLD  = ("Pretendard SemiBold", 8)
-    # 데이터(입력·IP·로그)도 Pretendard 로 통일 — 고정폭 글꼴은 한글이 없어 대체 글꼴이 섞임
-    FONT_INPUT       = ("Pretendard", 9)
-    FONT_MONO        = ("Pretendard", 9)
-    FONT_MONO_SMALL  = ("Pretendard", 8)
-    FONT_MONO_BOLD   = ("Pretendard SemiBold", 9)
-    FONT_COUNTDOWN   = ("Pretendard SemiBold", 13)
-
-    @classmethod
-    def apply_font_fallback(cls):
-        """Pretendard 가 없으면 맑은 고딕으로 대체 (tk 루트 생성 후 호출)"""
-        if "Pretendard" in tkfont.families():
-            return
-        for name in [n for n in dir(cls) if n.startswith("FONT")]:
-            font = getattr(cls, name)
-            family, size = font[0], font[1]
-            heavy = "SemiBold" in family or "bold" in font[2:]
-            setattr(cls, name, ("맑은 고딕", size, "bold") if heavy else ("맑은 고딕", size))
+    FONT             = ("맑은 고딕", 9)
+    FONT_BOLD        = ("맑은 고딕", 9, "bold")
+    FONT_TITLE       = ("맑은 고딕", 10, "bold")
+    FONT_HEAD        = ("맑은 고딕", 11, "bold")
+    FONT_VALUE       = ("맑은 고딕", 10, "bold")
+    FONT_TAB         = ("맑은 고딕", 10)
+    FONT_TAB_ON      = ("맑은 고딕", 10, "bold")
+    FONT_SMALL       = ("맑은 고딕", 8, "bold")
+    FONT_SMALL_BOLD  = ("맑은 고딕", 8, "bold")
+    # 데이터(입력·IP·로그)도 같은 글꼴로 통일 — 고정폭 글꼴은 한글이 없어 대체 글꼴이 섞임
+    FONT_INPUT       = ("맑은 고딕", 9)
+    FONT_MONO        = ("맑은 고딕", 9)
+    FONT_MONO_SMALL  = ("맑은 고딕", 8)
+    FONT_MONO_BOLD   = ("맑은 고딕", 9, "bold")
+    FONT_COUNTDOWN   = ("맑은 고딕", 13, "bold")
 
     @classmethod
     def setup_styles(cls):
@@ -538,11 +538,11 @@ class AuroraClientApp:
                         background=cls.BORDER, troughcolor=cls.BG,
                         arrowcolor=cls.TEXT_DIM, bordercolor=cls.BG,
                         lightcolor=cls.BORDER, darkcolor=cls.BORDER,
-                        width=10, arrowsize=10)
+                        width=_px(10), arrowsize=_px(10))
         style.configure("Countdown.Horizontal.TProgressbar",
                         troughcolor=cls.BORDER, background=cls.BRAND,
                         bordercolor=cls.BORDER, lightcolor=cls.BRAND, darkcolor=cls.BRAND,
-                        borderwidth=0, thickness=8)
+                        borderwidth=0, thickness=_px(8))
 
     def __init__(self, root: tk.Tk):
         global app_instance
@@ -551,7 +551,7 @@ class AuroraClientApp:
         self.root = root
         self.my_ip = self._get_local_ip()
         self.root.title(f"Aurora Client  |  {self.my_ip}")
-        self.root.geometry("660x900")
+        self.root.geometry(f"{_px(660)}x{_px(900)}")
         self.root.resizable(False, False)
         self.root.configure(bg=self.BG)
 
@@ -578,7 +578,7 @@ class AuroraClientApp:
 
     # ── 위젯 헬퍼 ────────────────────────
     def _separator(self, parent, **pack_opts):
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill="x", **pack_opts)
+        tk.Frame(parent, bg=self.BORDER, height=max(1, _px(1))).pack(fill="x", **pack_opts)
 
     def _card(self, parent):
         """흰 배경 + 얇은 테두리 프레임"""
@@ -593,7 +593,8 @@ class AuroraClientApp:
         return tk.Entry(parent, textvariable=var, font=font or self.FONT_INPUT,
                         bg=self.PANEL, fg=self.TEXT, insertbackground=self.TEXT,
                         disabledbackground=self.BG, disabledforeground=self.DISABLED_TEXT,
-                        relief="flat", bd=0, highlightthickness=1,
+                        relief="flat", bd=_px(6),   # flat 테두리가 안쪽 여백 역할
+                        highlightthickness=1,
                         highlightbackground=self.INPUT_BORDER, highlightcolor=self.BLUE,
                         width=width)
 
@@ -621,7 +622,7 @@ class AuroraClientApp:
         lbl.config(text=text, fg=fg, bg=self._badge_bg(fg))
 
     def _make_badge(self, parent, text: str, fg: str):
-        lbl = tk.Label(parent, font=self.FONT_SMALL, padx=8, pady=2)
+        lbl = tk.Label(parent, font=self.FONT_SMALL, padx=_px(8), pady=_px(2))
         self._set_badge(lbl, text, fg)
         return lbl
 
@@ -639,17 +640,17 @@ class AuroraClientApp:
         """다크 로그 카드. Text 위젯 반환"""
         card = self._card(parent)
         if height:
-            card.configure(height=height)
+            card.configure(height=_px(height))
             card.pack_propagate(False)
-            card.pack(fill="x", side="bottom", pady=(14, 0))
+            card.pack(fill="x", side="bottom", pady=(_px(14), 0))
         else:
             card.pack(fill="both", expand=True)
-        self._section_title(card, title).pack(anchor="w", padx=20, pady=(16, 10))
+        self._section_title(card, title).pack(anchor="w", padx=_px(20), pady=(_px(16), _px(10)))
         dark = tk.Frame(card, bg=self.LOG_BG)
-        dark.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        dark.pack(fill="both", expand=True, padx=_px(20), pady=(0, _px(16)))
         text = tk.Text(dark, font=self.FONT_MONO, bg=self.LOG_BG, fg=self.LOG_FG,
                        insertbackground=self.LOG_FG, relief="flat", bd=0,
-                       padx=12, pady=10, spacing1=2, state="disabled", wrap="word",
+                       padx=_px(12), pady=_px(10), spacing1=_px(2), state="disabled", wrap="word",
                        highlightthickness=0)
         sb = ttk.Scrollbar(dark, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=sb.set)
@@ -660,19 +661,19 @@ class AuroraClientApp:
     # ── UI ───────────────────────────────
     def _build_ui(self):
         # 헤더
-        header = tk.Frame(self.root, bg=self.PANEL, height=52)
+        header = tk.Frame(self.root, bg=self.PANEL, height=_px(52))
         header.pack(fill="x")
         header.pack_propagate(False)
-        self._logo_img = self._load_logo(18)
-        name_padx = (18, 0)
+        self._logo_img = self._load_logo(_px(18))
+        name_padx = (_px(18), 0)
         if self._logo_img:
-            tk.Label(header, image=self._logo_img, bg=self.PANEL).pack(side="left", padx=(18, 12))
-            tk.Frame(header, bg=self.BORDER, width=1, height=18).pack(side="left", padx=(0, 12))
+            tk.Label(header, image=self._logo_img, bg=self.PANEL).pack(side="left", padx=(_px(18), _px(12)))
+            tk.Frame(header, bg=self.BORDER, width=max(1, _px(1)), height=_px(18)).pack(side="left", padx=(0, _px(12)))
             name_padx = (0, 0)
         tk.Label(header, text="Aurora Client",
                  font=self.FONT_HEAD, fg=self.TEXT, bg=self.PANEL).pack(side="left", padx=name_padx)
         tk.Label(header, text=self.my_ip,
-                 font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="right", padx=18)
+                 font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="right", padx=_px(18))
 
         # 탭바
         tabbar = tk.Frame(self.root, bg=self.PANEL)
@@ -687,16 +688,16 @@ class AuroraClientApp:
         self._tab_lines  = []
         for i, title in enumerate(["설정", "프로세스 관리", "자동 삭제"]):
             cell = tk.Frame(tabbar, bg=self.PANEL)
-            cell.pack(side="left", padx=(8 if i == 0 else 0, 0))
+            cell.pack(side="left", padx=(_px(8) if i == 0 else 0, 0))
             lbl = tk.Label(cell, text=title, font=self.FONT_TAB, fg=self.TEXT_DIM,
-                           bg=self.PANEL, padx=16, pady=10, cursor="hand2")
+                           bg=self.PANEL, padx=_px(16), pady=_px(10), cursor="hand2")
             lbl.pack()
-            line = tk.Frame(cell, bg=self.PANEL, height=2)
+            line = tk.Frame(cell, bg=self.PANEL, height=_px(2))
             line.pack(fill="x")
             lbl.bind("<Button-1>", lambda e, n=i: self._select_tab(n))
             self._tab_labels.append(lbl)
             self._tab_lines.append(line)
-            self._tab_frames.append(tk.Frame(content, bg=self.BG, padx=18, pady=16))
+            self._tab_frames.append(tk.Frame(content, bg=self.BG, padx=_px(18), pady=_px(16)))
 
         self._build_main_tab(self._tab_frames[0])
         self._build_process_tab(self._tab_frames[1])
@@ -718,9 +719,9 @@ class AuroraClientApp:
     def _build_main_tab(self, parent):
         # 상태 카드
         st = self._card(parent)
-        st.pack(fill="x", pady=(0, 14))
+        st.pack(fill="x", pady=(0, _px(14)))
         st_in = tk.Frame(st, bg=self.PANEL)
-        st_in.pack(fill="x", padx=20, pady=16)
+        st_in.pack(fill="x", padx=_px(20), pady=_px(16))
         for c in range(3):
             st_in.columnconfigure(c, weight=1, uniform="stat")
         for col, (label, attr) in enumerate([("서버 연결", "server_lbl"),
@@ -728,26 +729,26 @@ class AuroraClientApp:
                                               ("마지막 명령", "cmd_lbl")]):
             tile = tk.Frame(st_in, bg=self.PANEL_ALT, highlightthickness=1,
                             highlightbackground=self.BORDER, highlightcolor=self.BORDER)
-            tile.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 8, 0))
+            tile.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else _px(8), 0))
             tk.Label(tile, text=label, anchor="w", font=self.FONT,
-                     fg=self.TEXT_DIM, bg=self.PANEL_ALT).pack(fill="x", padx=12, pady=(10, 0))
+                     fg=self.TEXT_DIM, bg=self.PANEL_ALT).pack(fill="x", padx=_px(12), pady=(_px(10), 0))
             lbl = tk.Label(tile, text="—", anchor="w",
                            font=self.FONT_VALUE, fg=self.TEXT, bg=self.PANEL_ALT)
-            lbl.pack(fill="x", padx=12, pady=(4, 10))
+            lbl.pack(fill="x", padx=_px(12), pady=(_px(4), _px(10)))
             setattr(self, attr, lbl)
 
         # 서버 카드 (좌: 서버 IP 목록 / 우: 핑 모드)
         srv = self._card(parent)
-        srv.pack(fill="x", pady=(0, 14))
+        srv.pack(fill="x", pady=(0, _px(14)))
         srv_in = tk.Frame(srv, bg=self.PANEL)
-        srv_in.pack(fill="x", padx=20, pady=16)
+        srv_in.pack(fill="x", padx=_px(20), pady=_px(16))
 
         srv_left = tk.Frame(srv_in, bg=self.PANEL)
         srv_left.pack(side="left", fill="both", expand=True)
-        self._section_title(srv_left, "서버 IP 목록").pack(anchor="w", pady=(0, 10))
+        self._section_title(srv_left, "서버 IP 목록").pack(anchor="w", pady=(0, _px(10)))
 
         # 리스트박스
-        lb_frame = tk.Frame(srv_left, bg=self.PANEL, padx=8, pady=6,
+        lb_frame = tk.Frame(srv_left, bg=self.PANEL, padx=_px(8), pady=_px(6),
                             highlightthickness=1, highlightbackground=self.INPUT_BORDER,
                             highlightcolor=self.BLUE)
         lb_frame.pack(fill="x")
@@ -765,21 +766,21 @@ class AuroraClientApp:
 
         # 추가/삭제 버튼
         srv_btn = tk.Frame(srv_left, bg=self.PANEL)
-        srv_btn.pack(fill="x", pady=(10, 0))
+        srv_btn.pack(fill="x", pady=(_px(10), 0))
         self.server_ip_input = tk.StringVar()
         ip_entry = self._entry(srv_btn, self.server_ip_input, 15, self.FONT_MONO)
-        ip_entry.pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 8))
+        ip_entry.pack(side="left", fill="x", expand=True, ipady=_px(1), padx=(0, _px(8)))
         ip_entry.bind("<Return>", lambda e: self._add_server_ip())
-        self._button(srv_btn, "+ 추가", "primary", self._add_server_ip).pack(side="left", padx=(0, 8))
+        self._button(srv_btn, "+ 추가", "primary", self._add_server_ip).pack(side="left", padx=(0, _px(8)))
         self._button(srv_btn, "− 삭제", "danger",  self._del_server_ip).pack(side="left")
 
-        tk.Frame(srv_in, bg=self.ROW_LINE, width=1).pack(side="left", fill="y", padx=20)
+        tk.Frame(srv_in, bg=self.ROW_LINE, width=max(1, _px(1))).pack(side="left", fill="y", padx=_px(20))
 
         pf = tk.Frame(srv_in, bg=self.PANEL)
         pf.pack(side="left", fill="y")
-        tk.Frame(pf, bg=self.PANEL, width=220, height=1).pack()
+        tk.Frame(pf, bg=self.PANEL, width=_px(220), height=max(1, _px(1))).pack()
         hdr_row = tk.Frame(pf, bg=self.PANEL)
-        hdr_row.pack(fill="x", pady=(0, 8))
+        hdr_row.pack(fill="x", pady=(0, _px(8)))
         self._section_title(hdr_row, "핑 모드").pack(side="left")
         seg = tk.Frame(hdr_row, bg=self.PANEL)
         seg.pack(side="right")
@@ -793,9 +794,9 @@ class AuroraClientApp:
         self._ping_result_labels = {}
         for i, ip in enumerate(config.get("server_ips", [])):
             if i > 0:
-                tk.Frame(pf, bg=self.ROW_LINE, height=1).pack(fill="x")
+                tk.Frame(pf, bg=self.ROW_LINE, height=max(1, _px(1))).pack(fill="x")
             row = tk.Frame(pf, bg=self.PANEL)
-            row.pack(fill="x", pady=6)
+            row.pack(fill="x", pady=_px(6))
             tk.Label(row, text=ip, anchor="w", font=self.FONT_MONO,
                      fg=self.TEXT, bg=self.PANEL).pack(side="left")
             lbl = tk.Label(row, text="—", anchor="e",
@@ -805,22 +806,22 @@ class AuroraClientApp:
 
         # 설정 카드
         cfg = self._card(parent)
-        cfg.pack(fill="x", pady=(0, 14))
+        cfg.pack(fill="x", pady=(0, _px(14)))
 
         self.server_port_var = tk.StringVar(value=str(config.get("server_port", 9000)))
         self.listen_port_var = tk.StringVar(value=str(config.get("listen_port", 9001)))
         row_p = tk.Frame(cfg, bg=self.PANEL)
-        row_p.pack(fill="x", padx=20, pady=(16, 0))
-        self._field_label(row_p, "서버 포트", width=8).pack(side="left", padx=(0, 8))
-        self._entry(row_p, self.server_port_var, 10).pack(side="left", ipady=7, padx=(0, 28))
-        self._field_label(row_p, "수신 포트", width=8).pack(side="left", padx=(0, 8))
-        self._entry(row_p, self.listen_port_var, 10).pack(side="left", ipady=7, padx=(0, 8))
+        row_p.pack(fill="x", padx=_px(20), pady=(_px(16), 0))
+        self._field_label(row_p, "서버 포트", width=8).pack(side="left", padx=(0, _px(8)))
+        self._entry(row_p, self.server_port_var, 10).pack(side="left", ipady=_px(1), padx=(0, _px(28)))
+        self._field_label(row_p, "수신 포트", width=8).pack(side="left", padx=(0, _px(8)))
+        self._entry(row_p, self.listen_port_var, 10).pack(side="left", ipady=_px(1), padx=(0, _px(8)))
         self._button(row_p, "적용", "primary", self._apply_ports).pack(side="left")
 
         # ── PC 시작 시 자동 실행 ─────────────
         auto_row = tk.Frame(cfg, bg=self.PANEL)
-        auto_row.pack(fill="x", padx=20, pady=(10, 16))
-        self._field_label(auto_row, "자동 시작", width=8).pack(side="left", padx=(0, 8))
+        auto_row.pack(fill="x", padx=_px(20), pady=(_px(10), _px(16)))
+        self._field_label(auto_row, "자동 시작", width=8).pack(side="left", padx=(0, _px(8)))
         self._autostart_btn = self._button(
             auto_row, "OFF ○", "secondary", self._toggle_autostart)
         self._style_autostart_btn(autostart_enabled())
@@ -830,16 +831,16 @@ class AuroraClientApp:
 
         # 수동 제어
         mf = self._card(parent)
-        mf.pack(fill="x", pady=(0, 14))
+        mf.pack(fill="x", pady=(0, _px(14)))
         mf_in = tk.Frame(mf, bg=self.PANEL)
-        mf_in.pack(fill="x", padx=20, pady=16)
+        mf_in.pack(fill="x", padx=_px(20), pady=_px(16))
         self._section_title(mf_in, "수동 제어").pack(side="left")
         tk.Label(mf_in, text=" (긴급용)", font=self.FONT,
                  fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
         self._button(mf_in, "■  프로그램 종료", "stop",
                      self._manual_stop).pack(side="right")
         self._button(mf_in, "▶  프로그램 실행", "start",
-                     self._manual_start).pack(side="right", padx=(0, 8))
+                     self._manual_start).pack(side="right", padx=(0, _px(8)))
 
         # 로그
         self.log_text = self._log_panel(parent, "LOG")
@@ -848,14 +849,14 @@ class AuroraClientApp:
     def _build_process_tab(self, parent):
         # ── 실행 프로그램 섹션 ────────────────
         run_panel = self._card(parent)
-        run_panel.pack(fill="x", pady=(0, 14))
+        run_panel.pack(fill="x", pady=(0, _px(14)))
 
-        self._section_title(run_panel, "실행 프로그램").pack(anchor="w", padx=20, pady=(16, 10))
+        self._section_title(run_panel, "실행 프로그램").pack(anchor="w", padx=_px(20), pady=(_px(16), _px(10)))
 
         path_row = tk.Frame(run_panel, bg=self.PANEL)
-        path_row.pack(fill="x", padx=20, pady=(0, 16))
+        path_row.pack(fill="x", padx=_px(20), pady=(0, _px(16)))
 
-        self._field_label(path_row, "실행 경로", width=8).pack(side="left", padx=(0, 8))
+        self._field_label(path_row, "실행 경로", width=8).pack(side="left", padx=(0, _px(8)))
 
         self.aurora_path_var = tk.StringVar(
             value=config.get("aurora_path", DEFAULT_CONFIG["aurora_path"]))
@@ -868,37 +869,37 @@ class AuroraClientApp:
             if path:
                 self.aurora_path_var.set(path)
 
-        self._button(path_row, "찾아보기", "secondary", _browse_exe).pack(side="right", padx=(0, 8))
+        self._button(path_row, "찾아보기", "secondary", _browse_exe).pack(side="right", padx=(0, _px(8)))
         self._entry(path_row, self.aurora_path_var, 30
-                    ).pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 8))
+                    ).pack(side="left", fill="x", expand=True, ipady=_px(1), padx=(0, _px(8)))
 
         # ── 프로세스 종료 섹션 ────────────────
         kill_panel = self._card(parent)
         kill_panel.pack(fill="both", expand=True)
 
         top = tk.Frame(kill_panel, bg=self.PANEL)
-        top.pack(fill="x", padx=20, pady=(16, 12))
-        self._section_title(top, "프로세스 종료 목록").pack(anchor="w", pady=(0, 10))
+        top.pack(fill="x", padx=_px(20), pady=(_px(16), _px(12)))
+        self._section_title(top, "프로세스 종료 목록").pack(anchor="w", pady=(0, _px(10)))
 
         add_row = tk.Frame(top, bg=self.PANEL)
         add_row.pack(fill="x")
         self._kill_input_var = tk.StringVar()
         kill_entry = self._entry(add_row, self._kill_input_var, 28)
-        kill_entry.pack(side="left", ipady=7, padx=(0, 8))
+        kill_entry.pack(side="left", ipady=_px(1), padx=(0, _px(8)))
         kill_entry.bind("<Return>", lambda e: self._add_kill_process())
         tk.Label(add_row, text="예: notepad.exe",
-                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, 10))
+                 font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left", padx=(0, _px(10)))
         self._button(add_row, "− 삭제", "danger", self._del_kill_process).pack(side="right")
-        self._button(add_row, "+ 추가", "primary", self._add_kill_process).pack(side="right", padx=(0, 8))
+        self._button(add_row, "+ 추가", "primary", self._add_kill_process).pack(side="right", padx=(0, _px(8)))
 
         # 하단 버튼
         btn_bar = tk.Frame(kill_panel, bg=self.PANEL)
         btn_bar.pack(side="bottom", fill="x")
         self._separator(btn_bar)
         btn_row = tk.Frame(btn_bar, bg=self.PANEL)
-        btn_row.pack(fill="x", padx=20, pady=16)
+        btn_row.pack(fill="x", padx=_px(20), pady=_px(16))
         self._button(btn_row, "선택 프로세스 종료", "stop",
-                     self._kill_selected).pack(side="left", padx=(0, 8))
+                     self._kill_selected).pack(side="left", padx=(0, _px(8)))
         self._button(btn_row, "전체 종료", "danger",
                      self._kill_all).pack(side="left")
         self._button(btn_row, "새로고침", "secondary",
@@ -909,10 +910,10 @@ class AuroraClientApp:
         col_hdr.pack(fill="x")
         self._configure_kill_grid(col_hdr)
         tk.Label(col_hdr, text="프로세스 이름", anchor="w", font=self.FONT_SMALL,
-                 fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=8
-                 ).grid(row=0, column=1, sticky="w", padx=(0, 8))
+                 fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=_px(8)
+                 ).grid(row=0, column=1, sticky="w", padx=(0, _px(8)))
         tk.Label(col_hdr, text="상태", anchor="w", font=self.FONT_SMALL,
-                 fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=8
+                 fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=_px(8)
                  ).grid(row=0, column=2, sticky="w")
 
         self._kill_rows_frame = tk.Frame(kill_panel, bg=self.PANEL)
@@ -922,10 +923,10 @@ class AuroraClientApp:
 
     def _configure_kill_grid(self, frame):
         """프로세스 표 열 규격 (헤더·행 공통)"""
-        frame.columnconfigure(0, minsize=44)
-        frame.rowconfigure(0, minsize=38)
+        frame.columnconfigure(0, minsize=_px(44))
+        frame.rowconfigure(0, minsize=_px(38))
         frame.columnconfigure(1, weight=1)
-        frame.columnconfigure(2, minsize=110)
+        frame.columnconfigure(2, minsize=_px(110))
 
     def _rebuild_kill_rows(self):
         for w in self._kill_rows_frame.winfo_children():
@@ -937,12 +938,12 @@ class AuroraClientApp:
         if not procs:
             tk.Label(self._kill_rows_frame, text="등록된 프로세스가 없습니다.",
                      font=self.FONT_MONO, fg=self.TEXT_DIM, bg=self.PANEL,
-                     pady=12).pack(anchor="w", padx=12)
+                     pady=_px(12)).pack(anchor="w", padx=_px(12))
             return
 
         running_map = get_running_processes(procs)
         for name in procs:
-            tk.Frame(self._kill_rows_frame, bg=self.ROW_LINE, height=1).pack(fill="x")
+            tk.Frame(self._kill_rows_frame, bg=self.ROW_LINE, height=max(1, _px(1))).pack(fill="x")
             row = tk.Frame(self._kill_rows_frame, bg=self.PANEL)
             row.pack(fill="x")
             self._configure_kill_grid(row)
@@ -951,11 +952,11 @@ class AuroraClientApp:
             self._kill_check_vars[name] = var
             tk.Checkbutton(row, variable=var, bg=self.PANEL,
                            activebackground=self.PANEL, selectcolor=self.PANEL, bd=0
-                           ).grid(row=0, column=0, padx=(14, 0))
+                           ).grid(row=0, column=0, padx=(_px(14), 0))
 
             tk.Label(row, text=name, anchor="w",
                      font=self.FONT_INPUT, fg=self.TEXT, bg=self.PANEL
-                     ).grid(row=0, column=1, sticky="w", padx=(0, 8))
+                     ).grid(row=0, column=1, sticky="w", padx=(0, _px(8)))
 
             status_lbl = self._make_badge(row, "", self.TEXT_DIM)
             self._set_badge(status_lbl, **self._running_style(running_map.get(name, False)))
@@ -1034,23 +1035,23 @@ class AuroraClientApp:
 
     def _configure_delete_grid(self, frame):
         for i, (minsize, weight) in enumerate(self._DELETE_COLS):
-            frame.columnconfigure(i, minsize=minsize, weight=weight)
+            frame.columnconfigure(i, minsize=_px(minsize), weight=weight)
 
     def _build_delete_tab(self, parent):
         # ── 프로그레스바 (다음 실행까지) ─────
         pb_frame = self._card(parent)
-        pb_frame.pack(fill="x", pady=(0, 14))
+        pb_frame.pack(fill="x", pady=(0, _px(14)))
 
         pb_top = tk.Frame(pb_frame, bg=self.PANEL)
-        pb_top.pack(fill="x", padx=20, pady=16)
+        pb_top.pack(fill="x", padx=_px(20), pady=_px(16))
         tk.Label(pb_top, text="다음 자동 삭제까지",
                  font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL).pack(side="left")
         self.delete_countdown_lbl = tk.Label(pb_top, text="—",
                  font=self.FONT_COUNTDOWN, fg=self.BLUE, bg=self.PANEL)
-        self.delete_countdown_lbl.pack(side="left", padx=12)
+        self.delete_countdown_lbl.pack(side="left", padx=_px(12))
 
         self.delete_progress = ttk.Progressbar(pb_top, orient="horizontal",
-                                               length=200, maximum=86400, value=0,
+                                               length=_px(200), maximum=86400, value=0,
                                                style="Countdown.Horizontal.TProgressbar")
         self.delete_progress.pack(side="left", fill="x", expand=True)
 
@@ -1062,7 +1063,7 @@ class AuroraClientApp:
         rules_card.pack(fill="both", expand=True)
 
         tool = tk.Frame(rules_card, bg=self.PANEL)
-        tool.pack(fill="x", padx=20, pady=16)
+        tool.pack(fill="x", padx=_px(20), pady=_px(16))
         self._section_title(tool, "자동 삭제 규칙").pack(side="left")
         self._button(tool, "+ 추가", "primary", self._add_delete_rule).pack(side="right")
 
@@ -1071,22 +1072,22 @@ class AuroraClientApp:
         bot_bar.pack(side="bottom", fill="x")
         self._separator(bot_bar)
         bot = tk.Frame(bot_bar, bg=self.PANEL)
-        bot.pack(fill="x", padx=20, pady=16)
+        bot.pack(fill="x", padx=_px(20), pady=_px(16))
         self._button(bot, "지금 실행", "primary", self._run_delete_now).pack(side="left")
         self.delete_status_lbl = tk.Label(bot, text="",
                  font=self.FONT, fg=self.TEXT_DIM, bg=self.PANEL)
-        self.delete_status_lbl.pack(side="left", padx=10)
+        self.delete_status_lbl.pack(side="left", padx=_px(10))
 
         # 컬럼 헤더 (스크롤바 폭만큼 우측 여백)
         col = tk.Frame(rules_card, bg=self.PANEL_ALT)
         col.pack(fill="x")
         col_in = tk.Frame(col, bg=self.PANEL_ALT)
-        col_in.pack(side="left", fill="x", expand=True, padx=14)
+        col_in.pack(side="left", fill="x", expand=True, padx=_px(14))
         self._configure_delete_grid(col_in)
         for i, text in enumerate(["ON", "폴더 경로", "확장자", "기한(일)", "폴더삭제"]):
             tk.Label(col_in, text=text, anchor="w", font=self.FONT_SMALL,
-                     fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=8
-                     ).grid(row=0, column=i, sticky="w", padx=2)
+                     fg=self.TEXT_DIM, bg=self.PANEL_ALT, pady=_px(8)
+                     ).grid(row=0, column=i, sticky="w", padx=_px(2))
 
         # 규칙 목록 (스크롤)
         list_outer = tk.Frame(rules_card, bg=self.PANEL)
@@ -1097,7 +1098,7 @@ class AuroraClientApp:
         canvas.configure(yscrollcommand=sb2.set)
         sb2.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
-        tk.Frame(col, bg=self.PANEL_ALT, width=sb2.winfo_reqwidth(), height=1).pack(side="left")
+        tk.Frame(col, bg=self.PANEL_ALT, width=sb2.winfo_reqwidth(), height=max(1, _px(1))).pack(side="left")
 
         self._delete_rules_frame = tk.Frame(canvas, bg=self.PANEL)
         rules_win = canvas.create_window((0, 0), window=self._delete_rules_frame, anchor="nw")
@@ -1127,11 +1128,11 @@ class AuroraClientApp:
         # 규칙 1개 = item(구분선 + 행 1 + 행 2)
         item = tk.Frame(self._delete_rules_frame, bg=bg)
         item.pack(fill="x")
-        tk.Frame(item, bg=self.ROW_LINE, height=1).pack(fill="x")
+        tk.Frame(item, bg=self.ROW_LINE, height=max(1, _px(1))).pack(fill="x")
 
         # ── 행 1: 컨트롤 ─────────────────────
         row1 = tk.Frame(item, bg=bg)
-        row1.pack(fill="x", padx=14, pady=(10, 0))
+        row1.pack(fill="x", padx=_px(14), pady=(_px(10), 0))
         self._configure_delete_grid(row1)
 
         ena_var        = tk.BooleanVar(value=rule.get("enabled", True))
@@ -1142,12 +1143,12 @@ class AuroraClientApp:
 
         tk.Checkbutton(row1, variable=ena_var, bg=bg,
                        activebackground=bg, selectcolor=self.PANEL, bd=0
-                       ).grid(row=0, column=0, padx=2)
+                       ).grid(row=0, column=0, padx=_px(2))
 
         path_cell = tk.Frame(row1, bg=bg)
-        path_cell.grid(row=0, column=1, sticky="ew", padx=2)
+        path_cell.grid(row=0, column=1, sticky="ew", padx=_px(2))
         self._entry(path_cell, path_var, 1, self.FONT_MONO
-                    ).pack(side="left", fill="x", expand=True, ipady=7)
+                    ).pack(side="left", fill="x", expand=True, ipady=_px(1))
 
         def _browse(_pv=path_var):
             folder = filedialog.askdirectory(parent=self.root)
@@ -1156,23 +1157,23 @@ class AuroraClientApp:
         self._button(path_cell, "…", "secondary", _browse, small=True).pack(side="left")
 
         ext_entry = self._entry(row1, ext_var, 1, self.FONT_MONO)
-        ext_entry.grid(row=0, column=2, sticky="ew", padx=2, ipady=7)
+        ext_entry.grid(row=0, column=2, sticky="ew", padx=_px(2), ipady=_px(1))
 
         self._entry(row1, min_var, 1, self.FONT_MONO
-                    ).grid(row=0, column=3, sticky="ew", padx=2, ipady=7)
+                    ).grid(row=0, column=3, sticky="ew", padx=_px(2), ipady=_px(1))
 
         tk.Checkbutton(row1, text="폴더삭제", variable=folder_del_var,
                        font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=bg,
-                       activebackground=bg, selectcolor=self.PANEL, bd=0, padx=6
-                       ).grid(row=0, column=4, sticky="w", padx=2)
+                       activebackground=bg, selectcolor=self.PANEL, bd=0, padx=_px(6)
+                       ).grid(row=0, column=4, sticky="w", padx=_px(2))
 
         # ── 적용 버튼 + 상태 표시 ─────────────
         applied_init = rule.get("applied", False)
-        status_lbl = tk.Label(row1, font=self.FONT_SMALL, padx=6, pady=2)
+        status_lbl = tk.Label(row1, font=self.FONT_SMALL, padx=_px(6), pady=_px(2))
         self._set_badge(status_lbl,
                         "적용됨" if applied_init else "미적용",
                         self.GREEN if applied_init else self.RED)
-        status_lbl.grid(row=0, column=5, sticky="w", padx=2)
+        status_lbl.grid(row=0, column=5, sticky="w", padx=_px(2))
 
         widget_info = {
             "item": item,
@@ -1201,7 +1202,7 @@ class AuroraClientApp:
             self._save_delete_rules()
 
         self._button(row1, "적용", "primary", _apply_rule, small=True
-                     ).grid(row=0, column=6, sticky="ew", padx=2)
+                     ).grid(row=0, column=6, sticky="ew", padx=_px(2))
 
         def _del_rule(_wi=widget_info):
             self._delete_rule_widgets.remove(_wi)
@@ -1213,7 +1214,7 @@ class AuroraClientApp:
             self._refresh_delete_canvas()
 
         self._button(row1, "✕", "danger", _del_rule, small=True
-                     ).grid(row=0, column=7, sticky="ew", padx=2)
+                     ).grid(row=0, column=7, sticky="ew", padx=_px(2))
 
         # ── 행 2: 마지막 삭제 일자 ───────────
         row2 = tk.Frame(item, bg=bg)
@@ -1222,7 +1223,7 @@ class AuroraClientApp:
         last_del_lbl = tk.Label(row2,
                                 text=f"마지막 삭제: {last_del_text}" if last_del_text else "마지막 삭제: —",
                                 font=self.FONT_MONO_SMALL, fg=self.TEXT_DIM, bg=bg)
-        last_del_lbl.pack(anchor="w", padx=(48, 14), pady=(4, 10))
+        last_del_lbl.pack(anchor="w", padx=(_px(48), _px(14)), pady=(_px(4), _px(10)))
         widget_info["last_del_lbl"] = last_del_lbl
         last_del_lbl.master = row2
 
@@ -1351,7 +1352,7 @@ class AuroraClientApp:
                       fg=fg, bg=bg, activeforeground=fg, activebackground=hover,
                       disabledforeground=self.DISABLED_TEXT,
                       bd=0, cursor="hand2", relief="flat", highlightthickness=0,
-                      padx=10 if small else 14, pady=6 if small else 7,
+                      padx=_px(10) if small else _px(14), pady=_px(6) if small else _px(7),
                       command=cmd)
         b.pack(fill="both", expand=True, padx=1, pady=1)
         b.border_frame = border_frame
@@ -1618,7 +1619,7 @@ def main():
             root.iconbitmap(ico_path)
             break
 
-    AuroraClientApp.apply_font_fallback()
+    _init_scale(root)
     AuroraClientApp.setup_styles()
 
     app = AuroraClientApp(root)

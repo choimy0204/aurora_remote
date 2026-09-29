@@ -5,7 +5,7 @@ a = Analysis(
     ['aurora_server.py'],
     pathex=[],
     binaries=[],
-    datas=[('aurora_server.ico', '.'), ('fonts', 'fonts'), ('assets', 'assets')],
+    datas=[('aurora_server.ico', '.'), ('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -5,7 +5,7 @@ a = Analysis(
     ['aurora_client.py'],
     pathex=[],
     binaries=[],
-    datas=[('aurora_client.ico', '.'), ('fonts', 'fonts'), ('assets', 'assets')],
+    datas=[('aurora_client.ico', '.'), ('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
