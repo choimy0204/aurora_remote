@@ -10,6 +10,7 @@
 - 보는 쪽은 화면 요청 1개, 입력 요청 1개만 동시에 보낸다 → 느리면 덜 보낼 뿐 요청이 쌓이지 않음
 - 장비 캡처·압축은 한 번에 하나, 낮은 우선순위 스레드에서, 걸린 시간의 DUTY 배를 쉰다
   → CPU 한 코어의 1/(1+DUTY) 이하. 화면이 그대로면 압축·전송을 건너뜀
+- 바뀐 곳만 복사·축소·압축해 조각으로 보낸다 (숫자 몇 개가 바뀌면 그 칸만) — 보는 쪽은 붙여 넣기만
 - 입력은 재전송하지 않는다 (중복 클릭 방지). STALE 초 넘게 늦은 클릭·키 누름은 버린다
 - 화면이 FRAME_STALE 초 넘게 갱신되지 않으면 보는 쪽이 조작을 잠근다 (옛 화면을 보고 누르지 않도록)
 - 입력 요청마다 '지금 눌려 있어야 할 키·버튼' 을 함께 보내 장비가 어긋난 것을 스스로 뗀다
@@ -208,10 +209,11 @@ def _grab(rect) -> bytes:
 
 STRIP_PIXELS = 256_000      # GDI 로 한 번에 찍는 최대 픽셀 수 (2560 폭이면 100줄)
 STRIP_GAP    = 0.017        # 띠 사이에 쉬는 시간 — 화면 합성이 한 프레임씩 숨 쉴 틈
+_slept = [0.0]              # 띠 사이에 쉰 시간 누적 — 캡처 비용(CPU)에서 빼기 위함
 
 
-def _grab_gentle(rect) -> bytes:
-    """GDI 캡처를 얇은 띠로 나눠 사이사이 쉬며 찍음.
+def _grab_strips(rect) -> list:
+    """GDI 캡처를 얇은 띠로 나눠 사이사이 쉬며 찍음 → [(띠 위쪽 y, 줄 수, BGRX)].
     한 번에 전체를 찍으면 장비 화면이 멈칫하지만(실측 밀린 프레임 5개/회) 이렇게 하면 0개"""
     x, y, w, h = rect
     rows = max(8, STRIP_PIXELS // max(1, w))
@@ -219,13 +221,98 @@ def _grab_gentle(rect) -> bytes:
     for top in range(0, h, rows):
         if top:
             time.sleep(STRIP_GAP)
-        parts.append(_grab((x, y + top, w, min(rows, h - top))))
-    return b"".join(parts)
+            _slept[0] += STRIP_GAP
+        n = min(rows, h - top)
+        parts.append((top, n, _grab((x, y + top, w, n))))
+    return parts
 
 
 def _bgrx_image(raw, w: int, h: int, pitch: int = 0) -> Image.Image:
     """BGRX 원시 데이터 → RGB 이미지 (항상 복사본 — 원본 메모리를 바로 돌려줘도 됨)"""
     return Image.frombytes("RGB", (w, h), raw, "raw", "BGRX", pitch, 1)
+
+
+def _bgrx_at(addr: int, pitch: int, x: int, y: int, w: int, h: int) -> Image.Image:
+    """매핑된 메모리(주소·줄 간격)의 일부 사각형만 RGB 이미지로 — 필요한 바이트만 읽음"""
+    start = addr + y * pitch + x * 4
+    return _bgrx_image((ctypes.c_char * (pitch * (h - 1) + w * 4)).from_address(start), w, h, pitch)
+
+
+# ─────────────────────────────────────────
+# 바뀐 영역만 처리
+#   화면 전체를 매번 복사·축소·압축하면 숫자 몇 개만 바뀌어도 한 장에 수십 ms 가 든다.
+#   바뀐 사각형을 격자 칸으로 모아 그 칸만 복사·축소·압축해 보낸다 (보는 쪽은 붙여 넣기만).
+# ─────────────────────────────────────────
+def _merge_tiles(tiles: set, t: int, w: int, h: int) -> list:
+    """격자 칸 {(열, 행)} → 겹치지 않는 사각형 [(x0, y0, x1, y1)] (가로로 잇고, 같은 폭은 세로로 이음)"""
+    rows = {}
+    for cx, cy in tiles:
+        rows.setdefault(cy, []).append(cx)
+    runs = {}   # (시작 열, 끝 열) → 마지막으로 이어 붙인 사각형
+    out = []
+    for cy in sorted(rows):
+        cols = sorted(rows[cy])
+        start = prev = cols[0]
+        segs = []
+        for c in cols[1:] + [None]:
+            if c is not None and c == prev + 1:
+                prev = c
+                continue
+            segs.append((start, prev))
+            if c is not None:
+                start = prev = c
+        nxt = {}
+        for seg in segs:
+            r = runs.get(seg)
+            if r is not None and r[3] == cy:          # 바로 윗줄에 같은 폭 → 아래로 늘림
+                r[3] = cy + 1
+            else:
+                r = [seg[0], cy, seg[1] + 1, cy + 1]
+                out.append(r)
+            nxt[seg] = r
+        runs = nxt
+    return [(r[0] * t, r[1] * t, min(w, r[2] * t), min(h, r[3] * t)) for r in out]
+
+
+def _tiles_of(rects, t: int, w: int, h: int, sx: float = 1.0, sy: float = 1.0, margin: int = 0) -> set:
+    """사각형들(원본 좌표) → 크기 t 격자 칸 집합 (sx, sy 로 나눈 좌표 기준, margin 만큼 넓혀서)"""
+    tiles = set()
+    for x0, y0, x1, y1 in rects:
+        a = max(0, int(x0 / sx) - margin) // t
+        b = max(0, int(y0 / sy) - margin) // t
+        c = min(w - 1, int(-(-x1 // sx)) + margin) // t
+        d = min(h - 1, int(-(-y1 // sy)) + margin) // t
+        for cy in range(b, d + 1):
+            for cx in range(a, c + 1):
+                tiles.add((cx, cy))
+    return tiles
+
+
+def _fit(size: tuple, box: tuple) -> tuple:
+    """size 를 box 안에 맞춘 크기 (확대는 안 함)"""
+    f = max(size[0] / box[0], size[1] / box[1], 1.0)
+    return max(1, min(box[0], round(size[0] / f))), max(1, min(box[1], round(size[1] / f)))
+
+
+def _scaled_part(im: Image.Image, ss: tuple, x0: int, y0: int, x1: int, y1: int) -> Image.Image:
+    """im 을 ss 크기로 줄인 그림의 (x0, y0)~(x1, y1) 부분만 계산.
+    정수배 축소(싸다) 후 나머지만 보간 — 조각으로 나눠 계산해도 전체를 줄인 것과 같음 (실측 차이 ≤ 2/255)"""
+    W, H = im.size
+    fx, fy = W / ss[0], H / ss[1]
+    k = max(1, int(min(fx, fy)))
+    if k == 1:
+        if (fx, fy) == (1.0, 1.0):
+            return im.crop((x0, y0, x1, y1))
+        return im.resize((x1 - x0, y1 - y0), _RESAMPLE, box=(x0 * fx, y0 * fy, x1 * fx, y1 * fy))
+    gx, gy = fx / k, fy / k
+    sx0, sy0, sx1, sy1 = x0 * gx, y0 * gy, x1 * gx, y1 * gy
+    m = 3                                        # 보간이 참조하는 주변 픽셀 여유
+    rx0, ry0 = max(0, int(sx0) - m), max(0, int(sy0) - m)
+    rx1, ry1 = min(-(-W // k), int(sx1) + m + 1), min(-(-H // k), int(sy1) + m + 1)
+    r = im.reduce(k, box=(rx0 * k, ry0 * k, min(W, rx1 * k), min(H, ry1 * k)))
+    if gx == 1.0 and gy == 1.0:
+        return r.crop((x0 - rx0, y0 - ry0, x1 - rx0, y1 - ry0))
+    return r.resize((x1 - x0, y1 - y0), _RESAMPLE, box=(sx0 - rx0, sy0 - ry0, sx1 - rx0, sy1 - ry0))
 
 
 # ─────────────────────────────────────────
@@ -281,6 +368,16 @@ class _D3D11_MAPPED_SUBRESOURCE(ctypes.Structure):
     _fields_ = [("pData", ctypes.c_void_p), ("RowPitch", wt.UINT), ("DepthPitch", wt.UINT)]
 
 
+class _D3D11_BOX(ctypes.Structure):
+    _fields_ = [("left", wt.UINT), ("top", wt.UINT), ("front", wt.UINT),
+                ("right", wt.UINT), ("bottom", wt.UINT), ("back", wt.UINT)]
+
+
+DIRTY_TILE = 64         # 바뀐 영역을 모으는 격자 크기 (장비 화면 픽셀)
+DIRTY_FULL = 0.6        # 바뀐 칸이 이 비율을 넘으면 통째로 복사 (조각이 더 비쌈)
+PATCH_TILE = 64         # 보내는 조각의 격자 크기 (줄인 화면 픽셀, JPEG 블록 16 의 배수)
+
+
 _HR = ctypes.c_long
 _P  = ctypes.c_void_p
 _PP = ctypes.POINTER(ctypes.c_void_p)
@@ -331,7 +428,8 @@ class _DesktopDup:
         self._devs = []   # [(device, context)]
         self._outs = []   # [dict]
         self._sig  = None
-        self._last = None # (rect, image)
+        self._last_rect = None
+        self._comp = None # 모니터 여럿에 걸친 영역을 붙여 둔 그림
         self.note  = ""
 
     # ── 열기·닫기 ──
@@ -342,7 +440,7 @@ class _DesktopDup:
         for dev, ctx in self._devs:
             _rel(ctx)
             _rel(dev)
-        self._devs, self._outs, self._sig, self._last = [], [], None, None
+        self._devs, self._outs, self._sig, self._last_rect, self._comp = [], [], None, None, None
 
     @staticmethod
     def _close_dup(o: dict):
@@ -399,11 +497,17 @@ class _DesktopDup:
                 out1 = _qi(out, _IID_OUTPUT1)
                 if out1 is None:
                     continue
+                # DesktopCoordinates 는 프로세스 DPI 모드에 따라 배율 적용 좌표(예 1707×1067)로 올 수 있음
+                # → 실제 픽셀 위치는 모니터 정보로 (호출하는 쪽이 _physical_pixels 안)
                 r = desc.DesktopCoordinates
+                mi = _MONITORINFO()
+                mi.cbSize = ctypes.sizeof(mi)
+                if desc.Monitor and _GetMonitorInfoW(desc.Monitor, ctypes.byref(mi)):
+                    r = mi.rcMonitor
                 self._outs.append({"out1": out1, "dev": dev, "ctx": ctx,
                                    "rect": (r.left, r.top, r.right - r.left, r.bottom - r.top),
                                    "rot": desc.Rotation, "dup": None, "stage": None,
-                                   "sysmem": False, "img": None, "retry": 0.0})
+                                   "sysmem": False, "img": None, "full": True, "retry": 0.0})
             finally:
                 _rel(out)
 
@@ -422,20 +526,25 @@ class _DesktopDup:
         d = _DXGI_OUTDUPL_DESC()
         _com(dup, 7, ctypes.POINTER(_DXGI_OUTDUPL_DESC), res=None)(dup, ctypes.byref(d))
         o["dup"], o["sysmem"] = dup, bool(d.DesktopImageInSystemMemory)
+        if o["sysmem"]:
+            o["tex_size"] = (d.Width, d.Height)
         o["rot"] = d.Rotation or o["rot"]
+        o["full"] = True       # 연 직후 첫 화면은 통째로 받음 (여는 사이에 바뀐 곳이 있을 수 있음)
         return True
 
     # ── 한 모니터 ──
-    def _grab_out(self, o: dict) -> bool:
-        """이 모니터 화면이 바뀌어 새로 받았으면 True"""
-        seeded = False
+    def _grab_out(self, o: dict) -> list:
+        """이 모니터에서 바뀐 사각형 [(x0, y0, x1, y1)] (모니터 기준 좌표) — 그대로면 []"""
+        w, h = o["rect"][2], o["rect"][3]
+        whole = [(0, 0, w, h)]
+        seeded = []
         if o["dup"] is None:
             if o["img"] is None and time.monotonic() >= o["retry"]:
                 # 복제를 연 직후 첫 프레임은 비어 있음(검은 화면) → 여는 '앞'에 GDI 로 천천히 한 번 채움.
                 # 복제가 열린 상태에서 GDI 를 찍으면 화면이 한 번 멈칫함(실측) — 그래서 순서가 중요
                 try:
-                    o["img"] = _bgrx_image(_grab_gentle(o["rect"]), o["rect"][2], o["rect"][3])
-                    seeded = True
+                    o["img"] = _bgrx_image(b"".join(s[2] for s in _grab_strips(o["rect"])), w, h)
+                    seeded = whole
                 except OSError:
                     pass
             if not self._open_dup(o):
@@ -445,67 +554,118 @@ class _DesktopDup:
         hr = _com(dup, 8, wt.UINT, ctypes.POINTER(_DXGI_OUTDUPL_FRAME_INFO), _PP)(
             dup, 0, ctypes.byref(info), ctypes.byref(res))         # AcquireNextFrame, 기다리지 않음
         if hr == _WAIT_TIMEOUT:
-            return False
+            return seeded
         if hr < 0:                                                 # 화면 전환 등 → 다음에 다시 엶
             self._close_dup(o)
-            return False
-        w, h = o["rect"][2], o["rect"][3]
+            return seeded
         if info.LastPresentTime == 0:
             # 화면 갱신 없이 마우스만 움직임 (여는 직후 첫 프레임도 이렇게 옴 — 텍스처가 비어 있어 쓰지 않음)
             _rel(res)
             _com(dup, 14)(dup)                                     # ReleaseFrame
             return seeded
-        mapped = None
+        rects = None                                               # None = 통째로
+        tex = None
         try:
+            if not o["full"] and o["img"] is not None:
+                rects = self._dirty(dup, info, w, h)
+                if rects == []:
+                    return seeded
             if o["sysmem"]:
+                if o["tex_size"] != (w, h):
+                    rects = None
                 mr = _DXGI_MAPPED_RECT()
                 if _com(dup, 12, ctypes.POINTER(_DXGI_MAPPED_RECT))(dup, ctypes.byref(mr)) < 0:
-                    return False
+                    return seeded
                 try:
-                    o["img"] = _bgrx_image((ctypes.c_char * (mr.Pitch * h)).from_address(mr.pBits),
-                                           w, h, mr.Pitch)
+                    self._read(o, mr.pBits, mr.Pitch, rects)
                 finally:
                     _com(dup, 13)(dup)                             # UnMapDesktopSurface
-                return True
+                o["full"] = False
+                return whole if rects is None else rects
             tex = _qi(res, _IID_TEX2D)
             if tex is None:
-                return False
-            try:
-                if o["stage"] is None:
-                    td = _D3D11_TEXTURE2D_DESC()
-                    _com(tex, 10, ctypes.POINTER(_D3D11_TEXTURE2D_DESC), res=None)(tex, ctypes.byref(td))
-                    td.MipLevels = td.ArraySize = td.SampleCount = 1
-                    td.SampleQuality = td.BindFlags = td.MiscFlags = 0
-                    td.Usage, td.CPUAccessFlags = 3, 0x20000        # STAGING, CPU 읽기
-                    stage = _P()
-                    if _com(o["dev"], 5, ctypes.POINTER(_D3D11_TEXTURE2D_DESC), _P, _PP)(
-                            o["dev"], ctypes.byref(td), None, ctypes.byref(stage)) < 0:
-                        raise _Unsupported("CreateTexture2D 실패")
-                    o["stage"], o["tex_size"] = stage, (td.Width, td.Height)
-                _com(o["ctx"], 47, _P, _P, res=None)(o["ctx"], o["stage"], tex)   # CopyResource (GPU 에서)
-                mapped = True
-            finally:
-                _rel(tex)
+                return seeded
+            if o["stage"] is None:
+                td = _D3D11_TEXTURE2D_DESC()
+                _com(tex, 10, ctypes.POINTER(_D3D11_TEXTURE2D_DESC), res=None)(tex, ctypes.byref(td))
+                td.MipLevels = td.ArraySize = td.SampleCount = 1
+                td.SampleQuality = td.BindFlags = td.MiscFlags = 0
+                td.Usage, td.CPUAccessFlags = 3, 0x20000            # STAGING, CPU 읽기
+                stage = _P()
+                if _com(o["dev"], 5, ctypes.POINTER(_D3D11_TEXTURE2D_DESC), _P, _PP)(
+                        o["dev"], ctypes.byref(td), None, ctypes.byref(stage)) < 0:
+                    raise _Unsupported("CreateTexture2D 실패")
+                o["stage"], o["tex_size"] = stage, (td.Width, td.Height)
+            if rects is None or o["tex_size"] != (w, h):
+                rects = None
+                _com(o["ctx"], 47, _P, _P, res=None)(o["ctx"], o["stage"], tex)      # CopyResource (GPU 에서)
+            else:
+                copy = _com(o["ctx"], 46, _P, wt.UINT, wt.UINT, wt.UINT, wt.UINT, _P, wt.UINT,
+                            ctypes.POINTER(_D3D11_BOX), res=None)                     # CopySubresourceRegion
+                for x0, y0, x1, y1 in rects:
+                    box = _D3D11_BOX(x0, y0, 0, x1, y1, 1)
+                    copy(o["ctx"], o["stage"], 0, x0, y0, 0, tex, 0, ctypes.byref(box))
         finally:
+            _rel(tex)
             _rel(res)
             _com(dup, 14)(dup)                    # ReleaseFrame — 복사는 GPU 에 맡기고 바로 돌려줌
-        if not mapped:
-            return False
-        tw, th = o["tex_size"]
         ms = _D3D11_MAPPED_SUBRESOURCE()
         if _com(o["ctx"], 14, _P, wt.UINT, wt.UINT, wt.UINT, ctypes.POINTER(_D3D11_MAPPED_SUBRESOURCE))(
                 o["ctx"], o["stage"], 0, 1, 0, ctypes.byref(ms)) < 0:   # Map(READ)
-            return False
+            return seeded
         try:   # 매핑된 메모리에서 바로 변환 (중간 복사 없음)
-            img = _bgrx_image((ctypes.c_char * (ms.RowPitch * th)).from_address(ms.pData), tw, th, ms.RowPitch)
+            self._read(o, ms.pData, ms.RowPitch, rects)
         finally:
             _com(o["ctx"], 15, _P, wt.UINT, res=None)(o["ctx"], o["stage"], 0)    # Unmap
-        o["img"] = img if (tw, th) == (w, h) else img.resize((w, h), _RESAMPLE)
-        return True
+        o["full"] = False
+        return whole if rects is None else rects
+
+    @staticmethod
+    def _dirty(dup, info, w: int, h: int):
+        """이번 화면에서 바뀐 곳 → 격자로 모은 사각형. 알 수 없거나 넓으면 None (통째로)"""
+        n = info.TotalMetadataBufferSize
+        if n <= 0:
+            return None
+        buf, need = ctypes.create_string_buffer(n), wt.UINT()
+
+        def get(idx):
+            return _com(dup, idx, wt.UINT, _P, ctypes.POINTER(wt.UINT))(dup, n, buf, ctypes.byref(need))
+        rects = []
+        if get(10) < 0:                                   # GetFrameMoveRects — 옮겨진 곳(스크롤 등)의 도착 영역
+            return None
+        for i in range(need.value // 24):
+            rects.append(struct.unpack_from("<6i", buf, i * 24)[2:])
+        if get(9) < 0:                                    # GetFrameDirtyRects
+            return None
+        for i in range(need.value // 16):
+            rects.append(struct.unpack_from("<4i", buf, i * 16))
+        rects = [(max(0, a), max(0, b), min(w, c), min(h, d)) for a, b, c, d in rects]
+        rects = [r for r in rects if r[0] < r[2] and r[1] < r[3]]
+        tiles = _tiles_of(rects, DIRTY_TILE, w, h)
+        if len(tiles) > (-(-w // DIRTY_TILE)) * (-(-h // DIRTY_TILE)) * DIRTY_FULL:
+            return None
+        return _merge_tiles(tiles, DIRTY_TILE, w, h)
+
+    @staticmethod
+    def _read(o: dict, addr: int, pitch: int, rects):
+        w, h = o["rect"][2], o["rect"][3]
+        if rects is None:
+            tw, th = o["tex_size"]
+            img = _bgrx_image((ctypes.c_char * (pitch * th)).from_address(addr), tw, th, pitch)
+            if (tw, th) != (w, h):
+                img = img.resize((w, h), _RESAMPLE)
+            if o["img"] is not None and o["img"].size == (w, h):
+                o["img"].paste(img)          # 같은 이미지에 덮어씀 → 보는 쪽 기록이 끊기지 않음
+            else:
+                o["img"] = img
+            return
+        for x0, y0, x1, y1 in rects:
+            o["img"].paste(_bgrx_at(addr, pitch, x0, y0, x1 - x0, y1 - y0), (x0, y0))
 
     # ── 영역 ──
     def grab(self, rect: tuple, sig) -> tuple:
-        """(image, 바뀜) — 이 PC 에서 복제를 못 쓰면 _Unsupported"""
+        """(화면, 바뀐 사각형 [(x0, y0, x1, y1)] — rect 기준, 그대로면 []). 이 PC 에서 복제를 못 쓰면 _Unsupported.
+        화면 이미지는 제자리에서 고쳐지므로 호출하는 쪽 잠금 안에서만 읽을 것"""
         if sig != self._sig or not self._outs:
             self._build(sig)
         x, y, w, h = rect
@@ -518,22 +678,28 @@ class _DesktopDup:
         if any(o["rot"] not in (0, 1) for o in parts):
             raise _Unsupported("회전된 모니터")
         self.note = ""
-        changed = False
-        for o in parts:
-            changed |= self._grab_out(o)
-        if self._last is None or self._last[0] != rect:
-            changed = True
-        if not changed:
-            return self._last[1], False
+        changes = [(o, self._grab_out(o)) for o in parts]
+        whole = [(0, 0, w, h)]
+        fresh = self._last_rect != rect
+        self._last_rect = rect
         if len(parts) == 1 and parts[0]["rect"] == rect and parts[0]["img"] is not None:
-            img = parts[0]["img"]
-        else:
-            img = Image.new("RGB", (w, h))
-            for o in parts:
-                if o["img"] is not None:
-                    img.paste(o["img"], (o["rect"][0] - x, o["rect"][1] - y))
-        self._last = (rect, img)
-        return img, True
+            self._comp = None                    # 모니터 하나 → 복사 없이 그대로
+            return parts[0]["img"], (whole if fresh else changes[0][1])
+        comp = self._comp
+        if fresh or comp is None or comp.size != (w, h):
+            comp = self._comp = Image.new("RGB", (w, h))
+            fresh = True
+        dirty = []
+        for o, d in changes:
+            if o["img"] is None:
+                continue
+            ox, oy = o["rect"][0] - x, o["rect"][1] - y
+            for x0, y0, x1, y1 in ([(0, 0, o["rect"][2], o["rect"][3])] if fresh else d):
+                a, b, c, e = max(0, x0 + ox), max(0, y0 + oy), min(w, x1 + ox), min(h, y1 + oy)
+                if a < c and b < e:
+                    comp.paste(o["img"].crop((a - ox, b - oy, c - ox, e - oy)), (a, b))
+                    dirty.append((a, b, c, e))
+        return comp, (whole if fresh else dirty)
 
 
 class _Screen:
@@ -544,7 +710,7 @@ class _Screen:
         self._log = log
         self._dxgi = _DesktopDup()
         self._gdi_only = False
-        self._gdi_raw = None     # (rect, raw)
+        self._gdi_prev = None    # (rect, [띠별 원시 데이터], 이미지)
 
     @property
     def gdi(self) -> bool:
@@ -556,10 +722,11 @@ class _Screen:
 
     def close(self):
         self._dxgi.close()
-        self._gdi_raw = None
+        self._gdi_prev = None
         self._gdi_only = False   # 다음 세션에서 DXGI 다시 시도
 
     def grab(self, rect: tuple, sig) -> tuple:
+        """(화면, 바뀐 사각형 목록) — _DesktopDup.grab 과 같음"""
         if not self._gdi_only:
             try:
                 return self._dxgi.grab(rect, sig)
@@ -567,28 +734,26 @@ class _Screen:
                 self._dxgi.close()
                 self._gdi_only = True
                 self._log(f"🖥 원격: 빠른 화면 복제를 쓸 수 없어 호환 방식으로 봅니다 ({e})")
-        raw = _grab_gentle(rect)
-        prev = self._gdi_raw
-        if prev and prev[0] == rect and prev[1] == raw:
-            return prev[2], False
-        img = _bgrx_image(raw, rect[2], rect[3])
-        self._gdi_raw = (rect, raw, img)
-        return img, True
+        strips = _grab_strips(rect)
+        w, h = rect[2], rect[3]
+        prev = self._gdi_prev
+        if prev is None or prev[0] != rect or len(prev[1]) != len(strips):
+            img = _bgrx_image(b"".join(s[2] for s in strips), w, h)
+            self._gdi_prev = (rect, [s[2] for s in strips], img)
+            return img, [(0, 0, w, h)]
+        dirty = []
+        for i, (top, n, raw) in enumerate(strips):       # 바뀐 띠만 바꿔 끼움
+            if raw != prev[1][i]:
+                prev[2].paste(_bgrx_image(raw, w, n), (0, top))
+                prev[1][i] = raw
+                dirty.append((0, top, w, top + n))
+        return prev[2], dirty
 
 
-def _encode(im: Image.Image, box: tuple, quality: int) -> tuple:
-    """화면 → box(w, h) 안에 맞춘 JPEG (확대는 안 함). (jpeg, w, h)"""
-    w, h = im.size
-    f = max(w / box[0], h / box[1])              # 이만큼 줄여야 box 에 들어감
-    k = int(f)
-    if k >= 2:
-        im = im.reduce(k)                        # 정수배 축소는 매우 쌈 (일반 축소의 1/4)
-        f /= k
-    if f > 1.25:                                 # 그래도 많이 크면 마저 줄임 (조금 큰 건 보는 쪽이 맞춤)
-        im = im.resize((max(1, int(im.width / f)), max(1, int(im.height / f))), _RESAMPLE)
+def _jpeg(im: Image.Image, quality: int) -> bytes:
     buf = io.BytesIO()
     im.save(buf, "JPEG", quality=quality)
-    return buf.getvalue(), im.width, im.height
+    return buf.getvalue()
 
 
 def _pack(meta: dict, jpeg: bytes = b"") -> bytes:
@@ -614,8 +779,10 @@ def _qint(q: dict, name: str, default: int, lo: int, hi: int) -> int:
 # ─────────────────────────────────────────
 class RemoteHost:
     MIN_INTERVAL = 1 / 15   # 캡처 최소 간격 (초)
-    DUTY         = 3.0      # 캡처·압축에 걸린 시간의 이 배수만큼 쉼
+    DUTY         = 10.0     # 캡처·압축에 걸린 시간의 이 배수만큼 쉼 → 한 코어의 1/11 이하
+    HISTORY      = 300      # 바뀐 영역 기록 개수 (보는 쪽이 이보다 뒤처지면 통째로 보냄)
     IDLE_INTERVAL = 0.3     # 화면이 그대로일 때 캡처 간격
+    MAX_FRESH_GAP = 1.0     # 처음 여는 캡처(준비 비용 포함) 뒤 쉬는 시간 상한
     IDLE_RELEASE = 3.0      # 입력 소식이 이만큼 없으면 눌린 키·버튼을 뗌
     SESSION_END  = 15.0     # 보는 쪽 소식이 이만큼 없으면 세션 종료
     MAX_EVENTS   = 200      # 입력 요청 1개에 담을 수 있는 최대 이벤트
@@ -630,7 +797,10 @@ class RemoteHost:
         self._watchdog = None
         self._screen   = _Screen(self._log)  # _cap_lock 안에서만 사용
         self._frame    = None                # {"rect", "img", "seq"}
-        self._jpeg     = {}                  # (seq, w, h, q) → (jpeg, w, h) — 현재 화면 것만
+        self._jpeg     = {}                  # (seq, last, 크기, 화질) → 보낼 조각 — 현재 화면 것만
+        self._hist     = []                  # [(seq, 바뀐 사각형들)] — 보는 쪽 화면 위에 붙일 조각 계산용
+        self._hist_base = 0                  # 이 번호 이후의 변화는 모두 _hist 에 있음
+        self._streams  = {}                  # (영역, 줄인 크기) → 줄인 화면 (바뀐 칸만 다시 줄임)
         self._seq      = int(time.time() * 1000)   # 클라이언트를 다시 켜도 번호가 겹치지 않게
         self._next_cap = 0.0
         self._mons     = (0.0, [])
@@ -673,7 +843,7 @@ class RemoteHost:
                             continue
                         self._watchdog = None
                     self._screen.close()
-                    self._frame, self._jpeg = None, {}
+                    self._frame, self._jpeg, self._hist, self._streams = None, {}, [], {}
                     return
                 finally:
                     self._cap_lock.release()
@@ -719,23 +889,79 @@ class RemoteHost:
         fr = self._frame
         if fr and fr["rect"] == rect and time.monotonic() < self._next_cap:
             return fr
-        t0 = time.perf_counter()
+        t0, s0 = time.perf_counter(), _slept[0]
         with low_priority(-2):
-            img, changed = self._screen.grab(rect, tuple(mons))
-        same = bool(fr) and fr["rect"] == rect and not changed
-        if not same:
+            img, dirty = self._screen.grab(rect, tuple(mons))
+        same = bool(fr) and fr["rect"] == rect and fr["img"] is img and not dirty
+        fresh = not fr or fr["rect"] != rect or fr["img"] is not img
+        if fresh:
+            # 처음이거나 영역이 바뀜 → 기록을 새로 시작 (보는 쪽은 통째로 받음)
             self._seq += 1
             fr = self._frame = {"rect": rect, "img": img, "seq": self._seq}
+            self._hist, self._hist_base, self._streams, self._jpeg = [], self._seq, {}, {}
+        elif dirty:
+            self._seq += 1
+            fr["seq"] = self._seq
+            self._hist.append((self._seq, dirty))
+            if len(self._hist) > self.HISTORY:
+                self._hist_base = self._hist.pop(0)[0]
             self._jpeg = {}
         cost = time.perf_counter() - t0
         if self._screen.gdi:
             # GDI 는 띠 사이 쉬는 시간이 cost 에 들어 있음 → 배수 없이 그만큼 더 쉼
             gap = max(self._screen.GDI_INTERVAL, cost * (2 if same else 1))
         else:
-            # 화면이 그대로면 더 드물게 확인 (DXGI 는 안 바뀌었으면 거의 비용 없음)
+            # 화면이 그대로면 더 드물게 확인 (DXGI 는 안 바뀌었으면 거의 비용 없음).
+            # 띠 사이에 쉰 시간은 CPU 를 안 쓰므로 뺌. 처음 여는 준비 비용(한 번뿐)은 1초까지만 쉼
+            cost -= _slept[0] - s0
+            if fresh:
+                cost = min(cost, self.MAX_FRESH_GAP / self.DUTY)
             gap = max(self.IDLE_INTERVAL if same else self.MIN_INTERVAL, cost * self.DUTY)
         self._next_cap = time.monotonic() + gap
         return fr
+
+    def _dirty_since(self, seq: int) -> list:
+        return [r for s, rs in self._hist if s > seq for r in rs]
+
+    def _tiles(self, fr: dict, ss: tuple, since: int):
+        """seq 이후 바뀐 곳 → 줄인 화면(ss) 기준 격자 사각형. 너무 넓으면 None (통째로가 쌈)"""
+        w, h = fr["img"].size
+        tiles = _tiles_of(self._dirty_since(since), PATCH_TILE, ss[0], ss[1],
+                          w / ss[0], h / ss[1], margin=2)   # 축소 보간이 주변 1~2 픽셀에 번짐
+        if len(tiles) > (-(-ss[0] // PATCH_TILE)) * (-(-ss[1] // PATCH_TILE)) * DIRTY_FULL:
+            return None
+        return _merge_tiles(tiles, PATCH_TILE, ss[0], ss[1])
+
+    def _stream(self, fr: dict, ss: tuple) -> Image.Image:
+        """보는 쪽 창 크기(ss)로 줄인 화면 — 바뀐 칸만 다시 줄여 최신으로 유지"""
+        key = (fr["rect"], ss)
+        st = self._streams.get(key)
+        rects = None
+        if st is not None and st["seq"] >= self._hist_base:
+            rects = [] if st["seq"] == fr["seq"] else self._tiles(fr, ss, st["seq"])
+        if rects is None:
+            if st is None and len(self._streams) >= 2:     # 창 크기가 다른 보는 쪽이 여럿 → 오래된 것 버림
+                self._streams.pop(min(self._streams, key=lambda k: self._streams[k]["used"]))
+            st = self._streams[key] = {"img": _scaled_part(fr["img"], ss, 0, 0, *ss)}
+        else:
+            for r in rects:
+                st["img"].paste(_scaled_part(fr["img"], ss, *r), r[:2])
+        st["seq"], st["used"] = fr["seq"], time.monotonic()
+        return st["img"]
+
+    def _encode(self, fr: dict, ss: tuple, qual: int, last: int) -> tuple:
+        """(조각 목록 [[x, y, w, h, 길이]], JPEG 들, 기준 번호 또는 None=통째로)"""
+        img = self._stream(fr, ss)
+        rects = self._tiles(fr, ss, last) if self._hist_base <= last < fr["seq"] else None
+        if rects is not None:
+            parts, chunks = [], []
+            for r in rects:
+                j = _jpeg(img.crop(r), qual)
+                parts.append([r[0], r[1], r[2] - r[0], r[3] - r[1], len(j)])
+                chunks.append(j)
+            return parts, b"".join(chunks), last
+        j = _jpeg(img, qual)
+        return [[0, 0, ss[0], ss[1], len(j)]], j, None
 
     def frame(self, q: dict, who: str) -> bytes:
         self._session(q, who)
@@ -761,17 +987,26 @@ class RemoteHost:
                 if fr["seq"] == last:
                     meta["next"] = self._until_next()
                     return _pack(meta)                    # 화면 그대로 → 압축·전송 생략
-                key = (fr["seq"], box[0], box[1], qual)
+                ss = _fit(fr["img"].size, box)
+                key = (fr["seq"], last, ss, qual)
                 hit = self._jpeg.get(key)
                 if hit is None:
                     t0 = time.perf_counter()
                     with low_priority(-2):
-                        hit = _encode(fr["img"], box, qual)
+                        hit = self._encode(fr, ss, qual, last)
+                    if len(self._jpeg) >= 8:
+                        self._jpeg = {}
                     self._jpeg[key] = hit
-                    self._next_cap += (time.perf_counter() - t0) * self.DUTY
-                meta["size"] = [hit[1], hit[2]]
+                    spent = (time.perf_counter() - t0) * self.DUTY
+                    if not self._hist:                     # 처음 한 장(압축기 준비 비용 포함)
+                        spent = min(spent, self.MAX_FRESH_GAP)
+                    self._next_cap += spent
+                meta["size"] = list(ss)
+                meta["parts"] = hit[0]
+                if hit[2] is not None:
+                    meta["base"] = hit[2]                 # 보는 쪽이 가진 이 번호 화면 위에 붙일 조각
                 meta["next"] = self._until_next()
-                return _pack(meta, hit[0])
+                return _pack(meta, hit[1])
         except OSError as e:
             meta["err"] = str(e)
             return _pack(meta)
@@ -933,7 +1168,10 @@ class RemoteViewer:
         self._mon        = -1
         self._quality    = quality if quality in self.QUALITY else "보통"
         self._frame_lock = threading.Lock()
-        self._latest     = None
+        self._ops        = []            # UI 가 그릴 작업 (통째 또는 조각) — 화면 스레드가 쌓음
+        self._meta       = None
+        self._base       = None          # 받은 화면 (화면 스레드 전용) — 조각을 이 위에 붙임
+        self._base_seq   = -1
         self._ui_pending = False
         self._photo      = None
         self._box        = None          # 캔버스 안 화면 위치 (x, y, w, h)
@@ -1057,6 +1295,7 @@ class RemoteViewer:
             key = (self._mon, self._want, q)
             if key != prev_key:
                 last, prev_key = -1, key          # 화면·크기·화질이 바뀌면 새 화면을 받음
+                self._base = None
             t0 = time.monotonic()
             try:
                 r = self._req("/remote/frame", {"mon": self._mon, "w": self._want[0], "h": self._want[1],
@@ -1071,18 +1310,12 @@ class RemoteViewer:
                 continue
             try:
                 meta, jpeg = _unpack(r.content)
-                im = None
-                if jpeg:
-                    im = Image.open(io.BytesIO(jpeg))
-                    im.load()                          # 압축 풀기는 여기(백그라운드)서
-                    # 장비는 싼 정수배 축소만 하므로 창보다 조금 클 수 있음 → 맞춤은 이 PC 가
-                    bw, bh = self._want
-                    if im.width > bw or im.height > bh:
-                        s = min(bw / im.width, bh / im.height)
-                        im = im.resize((max(1, int(im.width * s)), max(1, int(im.height * s))),
-                                       _RESAMPLE, reducing_gap=2.0)
+                ops = None
+                if not meta.get("err") and not meta.get("busy"):
+                    ops = self._apply(meta, jpeg)      # 압축 풀기·붙이기는 여기(백그라운드)서
             except Exception:
                 self._error = "받은 화면을 읽지 못했습니다"
+                self._base, last = None, -1
                 self._sleep(1.0)
                 continue
             if meta.get("err"):
@@ -1092,15 +1325,22 @@ class RemoteViewer:
             if meta.get("busy"):
                 self._sleep(0.3)
                 continue
+            if ops is None:                            # 가진 화면과 조각이 안 맞음 → 통째로 다시 받음
+                self._base, last = None, -1
+                continue
             self._error = ""
             self._note, self._gdi = meta.get("note", ""), bool(meta.get("gdi"))
             last = meta.get("seq", -1)
             rtt = time.monotonic() - t0
-            self._net = f"{len(jpeg) // 1024} KB · {int(rtt * 1000)} ms" if jpeg else self._net
+            self._net = f"{max(1, len(jpeg) // 1024)} KB · {int(rtt * 1000)} ms" if jpeg else self._net
             with self._frame_lock:
-                prev = self._latest
-                # UI 가 아직 못 그린 화면이 있으면 새 것으로 교체 (그림은 최신 1장만)
-                self._latest = (im if im is not None else (prev[0] if prev else None), meta)
+                if ops and ops[0][0] == "full":
+                    self._ops = ops
+                else:
+                    self._ops.extend(ops)
+                if len(self._ops) > 48:                # UI 가 밀림 → 조각 대신 지금 화면 한 장으로
+                    self._ops = [("full", self._base.copy())]
+                self._meta = meta
                 schedule = not self._ui_pending
                 self._ui_pending = True
             if schedule:
@@ -1116,20 +1356,51 @@ class RemoteViewer:
             wait = max(1.0 / fps - (time.monotonic() - t0), nxt) if jpeg else max(nxt, 0.04)
             self._sleep(wait)
 
+    def _apply(self, meta: dict, data: bytes):
+        """받은 조각을 가진 화면(_base)에 붙임 → UI 에 넘길 작업 목록. 기준 화면이 안 맞으면 None"""
+        parts = meta.get("parts")
+        if not data or not parts:
+            return []
+        size = tuple(meta.get("size") or ())
+        base = meta.get("base")
+        if base is not None and (self._base is None or self._base_seq != base or self._base.size != size):
+            return None
+        ops, pos = [], 0
+        for x, y, w, h, n in parts:
+            im = Image.open(io.BytesIO(data[pos:pos + n]))
+            im.load()
+            pos += n
+            if im.mode != "RGB":
+                im = im.convert("RGB")
+            if base is None:                           # 통째로 — UI 에는 사본을 넘김 (이후 조각은 _base 에 붙음)
+                self._base = im
+                ops = [("full", im.copy())]
+            else:
+                self._base.paste(im, (x, y))
+                ops.append(("part", im, x, y))
+        self._base_seq = meta.get("seq", -1)
+        return ops
+
     def _show(self):
         with self._frame_lock:
-            item, self._latest = self._latest, None
+            ops, meta = self._ops, self._meta
+            self._ops, self._meta = [], None
             self._ui_pending = False
-        if not item or not self.alive:
+        if meta is None or not self.alive:
             return
-        im, meta = item
-        if im is not None:
-            if self._photo is None or (self._photo.width(), self._photo.height()) != im.size:
-                self._photo = self._ImageTk.PhotoImage(im)
-                self.canvas.itemconfigure(self._img_item, image=self._photo)
-            else:
-                self._photo.paste(im)
-            self._layout(im.size)
+        for op in ops:
+            if op[0] == "full":
+                im = op[1]
+                if self._photo is None or (self._photo.width(), self._photo.height()) != im.size:
+                    self._photo = self._ImageTk.PhotoImage(im)
+                    self.canvas.itemconfigure(self._img_item, image=self._photo)
+                else:
+                    self._photo.paste(im)
+            elif self._photo is not None:              # 바뀐 조각만 화면에 복사
+                tmp = self._ImageTk.PhotoImage(op[1])
+                self.canvas.tk.call(str(self._photo), "copy", str(tmp), "-to", op[2], op[3])
+        if ops and self._photo is not None:
+            self._layout((self._photo.width(), self._photo.height()))
             now = time.monotonic()
             self._shown = [t for t in self._shown if now - t < 1.0] + [now]
         self._frame_time = time.monotonic()
