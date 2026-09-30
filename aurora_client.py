@@ -30,8 +30,9 @@ import pystray
 from PIL import Image as PILImage
 from PIL import ImageTk
 import aurora_update
+import aurora_remote
 
-APP_VERSION = "2.10.2"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.11.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -109,6 +110,9 @@ DEFAULT_CONFIG = {
     "export_save_dir":   os.path.join(os.path.expanduser("~"), "Downloads", "AuroraExport"),
     "export_devices":    {},                # {ip: 표시 이름} — 서버 목록에 없는 장비용
     "export_device_list": [],               # 서버에 등록된 클라이언트 [{ip, name}] (서버에서 받아 저장)
+    # ── 원격 화면 보기·조작 ──
+    "remote_enabled":    True,              # False 면 이 PC 는 원격 보기·조작을 거부
+    "remote_quality":    "보통",            # 원격 창 화질 (낮음/보통/높음)
     # 사용자가 직접 자동 시작을 끈 경우에만 True — 기본은 자동 시작 ON
     "autostart_off":     False,
 }
@@ -397,7 +401,7 @@ app_instance = None
 # ─────────────────────────────────────────
 EXPORT_KEY_HEADER = "X-Aurora-Key"
 EXPORT_CHUNK      = 1024 * 1024   # 1MB 단위 스트리밍
-EXPORT_API_VER    = 1
+EXPORT_API_VER    = 2   # 2: 원격 화면 보기·조작 (/remote/*)
 
 def _desktop_dir() -> str:
     """현재 사용자 바탕화면 경로 (OneDrive 리디렉션 포함)"""
@@ -505,6 +509,18 @@ def export_walk(path: str) -> dict:
             files.append({"rel": os.path.join(rel_dir, fn) if rel_dir else fn,
                           "size": st.st_size, "mtime": st.st_mtime})
     return {"files": files, "dirs": dirs}
+
+# 원격 화면 보기·조작 (장비 쪽) — 요청이 처음 올 때 만듦
+_remote_host = None
+_remote_host_lock = threading.Lock()
+
+def _remote() -> "aurora_remote.RemoteHost":
+    global _remote_host
+    with _remote_host_lock:
+        if _remote_host is None:
+            _remote_host = aurora_remote.RemoteHost(
+                log=lambda m: app_instance and app_instance.add_log(m))
+        return _remote_host
 
 def _export_peer(ip: str) -> str | None:
     """중계 대상은 사설망 IPv4 만 허용"""
@@ -634,6 +650,8 @@ class CommandHandler(BaseHTTPRequestHandler):
                 return self._send_json(export_discover(force=q.get("refresh") == "1", only=only))
             if route == "/fs/roots":
                 return self._send_json(export_roots())
+            if route.startswith("/remote/"):
+                return self._remote_route(route, q)
 
             path = export_resolve(q.get("path", ""))
             if path is None:
@@ -679,8 +697,35 @@ class CommandHandler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
 
+    def _remote_route(self, route: str, q: dict):
+        """원격 화면 보기·조작 — 반출과 같은 키로만 (remote_enabled 가 False 면 거부)"""
+        if not config.get("remote_enabled", True):
+            return self._send_json({"error": "이 장비는 원격 보기·조작이 꺼져 있습니다 (remote_enabled)"}, 403)
+        who = self.client_address[0]
+        if route == "/remote/frame":
+            body = _remote().frame(q, who)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if route == "/remote/input":
+            return self._send_json(_remote().input(q, who))
+        if route == "/remote/end":
+            return self._send_json(_remote().end(q, who))
+        self._send_json({"error": "not found"}, 404)
+
     def _relay(self, parsed, q: dict):
         """via=IP1,IP2… 의 첫 IP 로 요청을 그대로 넘기고 응답을 스트리밍 (디스크 저장 없음)"""
+        if parsed.path.startswith("/remote/"):
+            # 원격 화면·입력 중계는 이 PC 본래 작업(오로라 등)보다 낮은 우선순위로
+            with aurora_remote.low_priority(-1):
+                return self._relay_stream(parsed, q)
+        return self._relay_stream(parsed, q)
+
+    def _relay_stream(self, parsed, q: dict):
         hops = [h for h in q.pop("via").split(",") if h.strip()]
         peer = _export_peer(hops[0])
         if peer is None:
@@ -2747,6 +2792,8 @@ class AuroraClientApp:
                                  lambda e: (self._export_update_route(), self._export_nav(""),
                                             self._export_fill("", [])))
         self._button(r2, "이름", "secondary", self._export_rename_device).pack(side="right")
+        self._exp_remote_btn = self._button(r2, "🖥 원격", "secondary", self._export_open_remote)
+        self._exp_remote_btn.pack(side="right", padx=(0, _px(8)))
         self._exp_scan_btn = self._button(r2, "장비 검색", "secondary",
                                           lambda: self._export_discover(force=True))
         self._exp_scan_btn.pack(side="right", padx=(0, _px(8)))
@@ -2886,6 +2933,7 @@ class AuroraClientApp:
             self._set_badge(self._exp_conn_lbl, f"○ {hostname or '연결 안됨'}", self.RED)
         state = "normal" if ok else "disabled"
         self._exp_scan_btn.config(state=state)
+        self._exp_remote_btn.config(state=state)
         self._exp_go_btn.config(state=state if not self._exp_busy else "disabled")
         self._exp_dev_combo.config(state="readonly" if ok else "disabled")
         if ok:
@@ -3015,6 +3063,33 @@ class AuroraClientApp:
         if 0 <= idx < len(self._exp_devices):
             return self._exp_devices[idx]["ip"]
         return None
+
+    def _export_open_remote(self):
+        """선택한 장비의 화면을 보고 조작하는 창 (장비마다 1개)"""
+        ip = self._export_target()
+        if not ip:
+            messagebox.showinfo("안내", "장비를 먼저 선택하세요.", parent=self.root)
+            return
+        if not self._exp_connected:
+            messagebox.showinfo("안내", "중계 PC 에 연결된 뒤에 사용할 수 있습니다.", parent=self.root)
+            return
+        views = self.__dict__.setdefault("_remote_views", {})
+        if ip in views and views[ip].alive:
+            views[ip].focus()
+            return
+        label = self._exp_devices[self._exp_dev_combo.current()]["label"]
+
+        def _quality(q):
+            config["remote_quality"] = q
+            save_config(config)
+
+        views[ip] = aurora_remote.RemoteViewer(
+            self.root, f"원격 — {label}",
+            lambda route, params, timeout: self._export_request(route, params, target=ip, timeout=timeout),
+            px=_px, quality=config.get("remote_quality", "보통"), on_quality=_quality,
+            on_closed=lambda v: views.pop(ip, None) if views.get(ip) is v else None,
+            font=self.FONT_INPUT)
+        self._export_log(f"🖥 원격 창 열기: {label}")
 
     def _export_rename_device(self):
         ip = self._export_target()
