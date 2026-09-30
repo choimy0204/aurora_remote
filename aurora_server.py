@@ -23,7 +23,7 @@ import sys
 import ctypes
 import aurora_update
 
-APP_VERSION = "2.10.1"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.10.2"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 번들 리소스(이미지) ──────────────
 def _resource_path(rel):
@@ -178,8 +178,12 @@ class AuroraHandler(BaseHTTPRequestHandler):
                                 shared_state["clients"][target_ip]["aurora_path"] = aurora_path
             except Exception:
                 pass
+            # 등록된 클라이언트 목록(IP·이름)을 응답에 실어 보냄 → 클라이언트 반입/반출 장비 목록으로 사용
+            names = config.get("client_names", {})
+            clients = [{"ip": c, "name": names.get(c, f"CLIENT {i+1:02d}")}
+                       for i, c in enumerate(config.get("client_ips", []))]
             self._set_headers()
-            self.wfile.write(b'{"ok": true}')
+            self.wfile.write(json.dumps({"ok": True, "clients": clients}, ensure_ascii=False).encode("utf-8"))
         else:
             self._set_headers(404)
             self.wfile.write(b'{"error": "not found"}')

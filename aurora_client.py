@@ -31,7 +31,7 @@ from PIL import Image as PILImage
 from PIL import ImageTk
 import aurora_update
 
-APP_VERSION = "2.10.1"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.10.2"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -107,7 +107,8 @@ DEFAULT_CONFIG = {
     "export_relay":      "192.168.110.152", # 중계 PC (LHS)
     "export_peer_port":  9001,              # 다른 PC 클라이언트의 수신 포트
     "export_save_dir":   os.path.join(os.path.expanduser("~"), "Downloads", "AuroraExport"),
-    "export_devices":    {},                # {ip: 표시 이름}
+    "export_devices":    {},                # {ip: 표시 이름} — 서버 목록에 없는 장비용
+    "export_device_list": [],               # 서버에 등록된 클라이언트 [{ip, name}] (서버에서 받아 저장)
     # 사용자가 직접 자동 시작을 끈 경우에만 True — 기본은 자동 시작 ON
     "autostart_off":     False,
 }
@@ -518,8 +519,11 @@ def _export_peer(ip: str) -> str | None:
 _discover_cache = {"time": 0.0, "result": []}
 _discover_lock  = threading.Lock()
 
-def export_discover(force: bool = False) -> list[dict]:
-    """자기 NIC 대역(/24)을 스캔해 반출 API 가 켜진 클라이언트 목록 반환 (60초 캐시)"""
+def export_discover(force: bool = False, only: list[str] | None = None) -> list[dict]:
+    """반출 API 가 켜진 클라이언트 목록. only 가 있으면 그 IP 들만 확인,
+    없으면 자기 NIC 대역(/24) 전체 스캔 (60초 캐시)"""
+    if only:
+        return _discover_probe({ip.strip() for ip in only if _export_peer(ip)})
     with _discover_lock:
         if not force and time.time() - _discover_cache["time"] < 60:
             return _discover_cache["result"]
@@ -535,29 +539,33 @@ def export_discover(force: bool = False) -> list[dict]:
                 except ValueError:
                     continue
                 hosts.update(str(h) for h in net.hosts())
-        hosts -= my_ips
-        port = config.get("export_peer_port", 9001)
-        key  = config.get("export_key", "")
-
-        found, found_lock = [], threading.Lock()
-        def _probe(ip):
-            try:
-                with socket.create_connection((ip, port), timeout=0.4):
-                    pass
-                r = requests.get(f"http://{ip}:{port}/info",
-                                 headers={EXPORT_KEY_HEADER: key}, timeout=2)
-                if r.ok:
-                    info = r.json()
-                    with found_lock:
-                        found.append({"ip": ip, "hostname": info.get("hostname", "")})
-            except Exception:
-                pass
-        with ThreadPoolExecutor(max_workers=128) as ex:
-            list(ex.map(_probe, sorted(hosts)))
-
-        found.sort(key=lambda d: [int(x) for x in d["ip"].split(".")])
+        found = _discover_probe(hosts - my_ips)
         _discover_cache.update(time=time.time(), result=found)
         return found
+
+def _discover_probe(hosts: set) -> list[dict]:
+    """hosts 중 반출 API 가 응답하는 PC → [{ip, hostname}] (IP 순)"""
+    port = config.get("export_peer_port", 9001)
+    key  = config.get("export_key", "")
+
+    found, found_lock = [], threading.Lock()
+    def _probe(ip):
+        try:
+            with socket.create_connection((ip, port), timeout=0.4):
+                pass
+            r = requests.get(f"http://{ip}:{port}/info",
+                             headers={EXPORT_KEY_HEADER: key}, timeout=2)
+            if r.ok:
+                info = r.json()
+                with found_lock:
+                    found.append({"ip": ip, "hostname": info.get("hostname", "")})
+        except Exception:
+            pass
+    with ThreadPoolExecutor(max_workers=128) as ex:
+        list(ex.map(_probe, sorted(hosts)))
+
+    found.sort(key=lambda d: [int(x) for x in d["ip"].split(".")])
+    return found
 
 
 class _BodyReader:
@@ -622,7 +630,8 @@ class CommandHandler(BaseHTTPRequestHandler):
                 return self._send_json({"hostname": socket.gethostname(),
                                         "api": EXPORT_API_VER})
             if route == "/discover":
-                return self._send_json(export_discover(force=q.get("refresh") == "1"))
+                only = [x for x in q.get("ips", "").split(",") if x.strip()]
+                return self._send_json(export_discover(force=q.get("refresh") == "1", only=only))
             if route == "/fs/roots":
                 return self._send_json(export_roots())
 
@@ -2627,6 +2636,7 @@ class AuroraClientApp:
     def _build_export_tab(self, parent):
         self._exp_connected = False
         self._exp_devices   = []      # [{ip, label}] — 콤보박스 순서와 동일
+        self._exp_found     = []      # 검색된 장비 전부 (서버 목록으로 거르기 전)
 
         self._exp_path      = ""      # "" = 루트(허용 경로 목록)
         self._exp_roots     = []
@@ -2813,8 +2823,7 @@ class AuroraClientApp:
         idx = self._exp_dev_combo.current()
         if 0 <= idx < len(self._exp_devices):
             d = self._exp_devices[idx]
-            name = config.get("export_devices", {}).get(d["ip"]) or d["host"] or d["ip"]
-            target = (name, d["ip"])
+            target = (self._export_device_name(d["ip"], d["host"]), d["ip"])
         if self._export_relay_is_self():
             # 이 PC 가 곧 중계 PC (예: LHS 에서 CCW 반출) → 2대
             nodes = [("내 PC · 중계", me[0], relay)]
@@ -2938,15 +2947,34 @@ class AuroraClientApp:
         self._export_update_route()
         self._export_log(f"중계 PC 변경: {config['export_relay']}")
 
+    @staticmethod
+    def _export_server_names() -> dict:
+        """서버에 등록된 클라이언트 {ip: 이름} — 비어 있으면 서버 목록을 아직 못 받은 것"""
+        return {d["ip"]: d["name"] for d in config.get("export_device_list", [])}
+
+    def _export_device_name(self, ip: str, hostname: str) -> str:
+        """서버 목록 이름 > '이름' 버튼으로 붙인 이름 > 호스트명 > IP"""
+        return (self._export_server_names().get(ip) or config.get("export_devices", {}).get(ip)
+                or hostname or ip)
+
     def _export_device_label(self, ip: str, hostname: str) -> str:
-        name = config.get("export_devices", {}).get(ip) or hostname or ip
-        return f"{name}  ({ip})"
+        return f"{self._export_device_name(ip, hostname)}  ({ip})"
+
+    def _export_server_list_changed(self, clients: list):
+        """상태 보고 응답으로 받은 서버 클라이언트 목록 저장 → 장비 목록 다시 거름"""
+        if clients == config.get("export_device_list"):
+            return
+        config["export_device_list"] = clients
+        save_config(config)
+        if self._exp_found:
+            self._export_set_devices(self._exp_found)
 
     def _export_discover(self, force: bool, relay_host: str = ""):
         def _do():
             self._export_log("장비 검색 중…")
             try:
-                r = self._export_request("/discover", {"refresh": "1" if force else "0"},
+                listed = ",".join(self._export_server_names())   # 서버 목록이 있으면 그 IP 만 확인
+                r = self._export_request("/discover", {"refresh": "1" if force else "0", "ips": listed},
                                          timeout=(3, 90))
                 if not r.ok:
                     self._export_log(f"장비 검색 실패: {self._export_error(r)}")
@@ -2959,12 +2987,19 @@ class AuroraClientApp:
             devices = [{"ip": relay, "host": relay_host, "relay": True}]
             devices += [{"ip": d["ip"], "host": d["hostname"], "relay": False}
                         for d in found if d["ip"] != relay]
-            self._export_log(f"장비 {len(devices)}대 발견")
-            self.root.after(0, lambda: self._export_set_devices(devices))
+            self.root.after(0, lambda: self._export_set_devices(devices, log=True))
         threading.Thread(target=_do, daemon=True).start()
 
-    def _export_set_devices(self, devices: list):
+    def _export_set_devices(self, found: list, log: bool = False):
+        """found = 검색된 장비 전부. 서버 목록을 받았으면 그 목록에 있는 장비(+중계 PC)만 표시"""
         cur_ip = self._export_target()
+        self._exp_found = found
+        names = self._export_server_names()
+        devices = [d for d in found if d["relay"] or not names or d["ip"] in names]
+        if log:
+            hidden = len(found) - len(devices)
+            self._export_log(f"장비 {len(devices)}대" + (f" (서버 목록에 없는 {hidden}대 제외)" if hidden else "")
+                             + ("" if names else " — 서버 클라이언트 목록을 아직 못 받아 검색된 전체 표시"))
         self._exp_devices = devices
         for d in devices:
             d["label"] = self._export_device_label(d["ip"], d["host"]) + ("  [중계]" if d["relay"] else "")
@@ -2985,6 +3020,11 @@ class AuroraClientApp:
         ip = self._export_target()
         if not ip:
             messagebox.showinfo("안내", "장비를 먼저 선택하세요.")
+            return
+        if ip in self._export_server_names():
+            messagebox.showinfo("장비 이름", f"{ip} 는 서버에 등록된 이름 "
+                                f"'{self._export_server_names()[ip]}' 으로 표시됩니다.\n"
+                                "이름을 바꾸려면 Aurora 서버의 클라이언트 목록에서 바꾸세요.", parent=self.root)
             return
         names = config.setdefault("export_devices", {})
         name = simpledialog.askstring("장비 이름", f"{ip} 의 표시 이름 (비우면 호스트명)",
@@ -3691,16 +3731,22 @@ class AuroraClientApp:
                 self._cached_ips_time = now_t
             all_ips = self._cached_all_ips
             aurora_path = config.get("aurora_path", "")
+            server_lists = {}   # 서버 IP → 그 서버에 등록된 클라이언트 목록
 
             def _report(ip, r=running):
                 nonlocal ok_count
                 try:
-                    requests.post(
+                    resp = requests.post(
                         f"http://{ip}:{SERVER_PORT}/status",
                         json={"aurora_running": r, "all_ips": all_ips,
                               "aurora_path": aurora_path}, timeout=3)
                     with ok_lock:
                         ok_count += 1
+                    # v2.10.2 이상 서버는 등록된 클라이언트 목록(IP·이름)을 같이 줌 → 반입/반출 장비 목록
+                    clients = resp.json().get("clients") if resp.ok else None
+                    if isinstance(clients, list):
+                        with ok_lock:
+                            server_lists[ip] = clients
                 except Exception:
                     pass
 
@@ -3709,6 +3755,15 @@ class AuroraClientApp:
             for t in threads: t.start()
             # join에 timeout을 걸어 서버 무응답 시 루프가 영구 블로킹되지 않도록
             for t in threads: t.join(timeout=4)
+            if server_lists:
+                # 서버가 여러 대면 서버 IP 순서대로 합침 (같은 IP 는 앞 서버의 이름)
+                merged = {}
+                for sip in ips:
+                    for c in server_lists.get(sip, []):
+                        if isinstance(c, dict) and c.get("ip"):
+                            merged.setdefault(str(c["ip"]), str(c.get("name") or c["ip"]))
+                clients = [{"ip": k, "name": v} for k, v in merged.items()]
+                self.root.after(0, lambda c=clients: self._export_server_list_changed(c))
 
             total = len(ips)
             if ok_count == 0:
