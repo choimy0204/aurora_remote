@@ -32,7 +32,7 @@ from PIL import ImageTk
 import aurora_update
 import aurora_remote
 
-APP_VERSION = "2.11.1"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.12.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -715,6 +715,8 @@ class CommandHandler(BaseHTTPRequestHandler):
             return self._send_json(_remote().input(q, who))
         if route == "/remote/end":
             return self._send_json(_remote().end(q, who))
+        if route == "/remote/clip":
+            return self._send_json(_remote().clip(q, who))
         self._send_json({"error": "not found"}, 404)
 
     def _relay(self, parsed, q: dict):

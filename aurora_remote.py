@@ -111,6 +111,75 @@ try:   # Windows 10 1607 이상
 except AttributeError:
     _SetThreadDpiAwarenessContext = None
 
+_OpenClipboard       = _proto(_user32.OpenClipboard, wt.BOOL, wt.HWND)
+_CloseClipboard      = _proto(_user32.CloseClipboard, wt.BOOL)
+_EmptyClipboard      = _proto(_user32.EmptyClipboard, wt.BOOL)
+_GetClipboardData    = _proto(_user32.GetClipboardData, wt.HANDLE, wt.UINT)
+_SetClipboardData    = _proto(_user32.SetClipboardData, wt.HANDLE, wt.UINT, wt.HANDLE)
+_GetClipboardSeq     = _proto(_user32.GetClipboardSequenceNumber, wt.DWORD)
+_GlobalAlloc         = _proto(_kernel32.GlobalAlloc, wt.HGLOBAL, wt.UINT, ctypes.c_size_t)
+_GlobalLock          = _proto(_kernel32.GlobalLock, ctypes.c_void_p, wt.HGLOBAL)
+_GlobalUnlock        = _proto(_kernel32.GlobalUnlock, wt.BOOL, wt.HGLOBAL)
+_GlobalFree          = _proto(_kernel32.GlobalFree, wt.HGLOBAL, wt.HGLOBAL)
+_GlobalSize          = _proto(_kernel32.GlobalSize, ctypes.c_size_t, wt.HGLOBAL)
+_CF_UNICODETEXT, _GMEM_MOVEABLE = 13, 0x0002
+CLIP_MAX = 100_000             # 클립보드로 주고받는 글자 수 상한
+
+
+@contextmanager
+def _clipboard():
+    """클립보드 열기 — 다른 프로그램이 쓰는 중이면 잠깐씩 다시 시도 (최대 약 0.3초). 못 열면 OSError.
+    창 없이(NULL) 열어 소유 창이 없음 → 다른 프로그램이 클립보드를 비울 때 이 스레드에 메시지가 오지 않음"""
+    for _ in range(15):
+        if _OpenClipboard(None):
+            break
+        time.sleep(0.02)
+    else:
+        raise OSError("장비 클립보드를 다른 프로그램이 쓰는 중")
+    try:
+        yield
+    finally:
+        _CloseClipboard()
+
+
+def _clip_get():
+    """장비 클립보드의 글자 (글자가 아니면 None)"""
+    with _clipboard():
+        h = _GetClipboardData(_CF_UNICODETEXT)
+        if not h:
+            return None
+        p = _GlobalLock(h)
+        if not p:
+            return None
+        try:
+            n = _GlobalSize(h) // 2
+            return ctypes.wstring_at(p, min(n, CLIP_MAX + 1)).split("\0", 1)[0][:CLIP_MAX]
+        finally:
+            _GlobalUnlock(h)
+
+
+def _clip_set(text: str):
+    data = ctypes.create_unicode_buffer(text)                  # 끝의 \0 포함
+    size = ctypes.sizeof(data)
+    h = _GlobalAlloc(_GMEM_MOVEABLE, size)
+    if not h:
+        raise OSError("메모리 부족")
+    p = _GlobalLock(h)
+    if not p:
+        _GlobalFree(h)
+        raise OSError("메모리 잠금 실패")
+    ctypes.memmove(p, data, size)
+    _GlobalUnlock(h)
+    try:
+        with _clipboard():
+            _EmptyClipboard()
+            if not _SetClipboardData(_CF_UNICODETEXT, h):
+                raise OSError("장비 클립보드에 넣지 못했습니다")
+    except OSError:
+        _GlobalFree(h)                                         # 넘겨주지 못했으면 직접 반납
+        raise
+
+
 _SRCCOPY = 0x00CC0020          # CAPTUREBLT 는 넣지 않음 — 장비 화면의 마우스 커서가 깜빡임
 _INPUT_MOUSE, _INPUT_KEYBOARD = 0, 1
 _MOVE, _ABSOLUTE, _VIRTUALDESK, _WHEEL = 0x0001, 0x8000, 0x4000, 0x0800
@@ -209,7 +278,7 @@ def _grab(rect) -> bytes:
 
 STRIP_PIXELS = 256_000      # GDI 로 한 번에 찍는 최대 픽셀 수 (2560 폭이면 100줄)
 STRIP_GAP    = 0.017        # 띠 사이에 쉬는 시간 — 화면 합성이 한 프레임씩 숨 쉴 틈
-_slept = [0.0]              # 띠 사이에 쉰 시간 누적 — 캡처 비용(CPU)에서 빼기 위함
+_slept = [0.0]              # 띠 사이에 쉬거나 GPU 를 기다린 시간 누적 — 캡처 비용(CPU)에서 빼기 위함
 
 
 def _grab_strips(rect) -> list:
@@ -423,6 +492,7 @@ class _DesktopDup:
     """모니터(출력)마다 화면 복제를 열어 두고, 바뀐 모니터만 GPU → 메모리로 복사.
     모든 메서드는 호출하는 쪽(RemoteHost._cap_lock)에서 한 번에 하나씩만 부른다."""
     RETRY = 1.0          # 보안 화면 등으로 복제를 못 열었을 때 다시 시도하는 간격
+    ROUGH_MAX = 3.0      # 화면 전체가 계속 바뀌어도 이 시간마다 한 번은 선명하게 읽음
 
     def __init__(self):
         self._devs = []   # [(device, context)]
@@ -447,6 +517,8 @@ class _DesktopDup:
         _rel(o.get("stage"))
         _rel(o.get("dup"))
         o["stage"] = o["dup"] = None
+        if o.get("stale"):               # 선명한 화면을 읽을 GPU 사본이 없어짐 → 다시 열 때 처음부터 채움
+            o["img"], o["stale"] = None, 0.0
 
     def _build(self, sig):
         self.close()
@@ -507,7 +579,8 @@ class _DesktopDup:
                 self._outs.append({"out1": out1, "dev": dev, "ctx": ctx,
                                    "rect": (r.left, r.top, r.right - r.left, r.bottom - r.top),
                                    "rot": desc.Rotation, "dup": None, "stage": None,
-                                   "sysmem": False, "img": None, "full": True, "retry": 0.0})
+                                   "sysmem": False, "img": None, "full": True, "retry": 0.0,
+                                   "stale": 0.0, "rough": None})
             finally:
                 _rel(out)
 
@@ -533,8 +606,10 @@ class _DesktopDup:
         return True
 
     # ── 한 모니터 ──
-    def _grab_out(self, o: dict) -> list:
-        """이 모니터에서 바뀐 사각형 [(x0, y0, x1, y1)] (모니터 기준 좌표) — 그대로면 []"""
+    def _grab_out(self, o: dict, rough_ok: bool = False) -> list:
+        """이 모니터에서 바뀐 사각형 [(x0, y0, x1, y1)] (모니터 기준 좌표) — 그대로면 [].
+        rough_ok 이고 화면 대부분이 바뀌었으면 o["rough"] 에 거친 화면만 만들고 o["img"] 는 그대로 둠
+        (o["stale"]) → 화면이 잠잠해지면 GPU 에 남은 사본에서 선명하게 다시 읽음"""
         w, h = o["rect"][2], o["rect"][3]
         whole = [(0, 0, w, h)]
         seeded = []
@@ -554,7 +629,7 @@ class _DesktopDup:
         hr = _com(dup, 8, wt.UINT, ctypes.POINTER(_DXGI_OUTDUPL_FRAME_INFO), _PP)(
             dup, 0, ctypes.byref(info), ctypes.byref(res))         # AcquireNextFrame, 기다리지 않음
         if hr == _WAIT_TIMEOUT:
-            return seeded
+            return self._sharpen(o) or seeded
         if hr < 0:                                                 # 화면 전환 등 → 다음에 다시 엶
             self._close_dup(o)
             return seeded
@@ -562,15 +637,23 @@ class _DesktopDup:
             # 화면 갱신 없이 마우스만 움직임 (여는 직후 첫 프레임도 이렇게 옴 — 텍스처가 비어 있어 쓰지 않음)
             _rel(res)
             _com(dup, 14)(dup)                                     # ReleaseFrame
-            return seeded
+            return self._sharpen(o) or seeded
         rects = None                                               # None = 통째로
+        rough = False
         tex = None
         try:
             if not o["full"] and o["img"] is not None:
                 rects = self._dirty(dup, info, w, h)
                 if rects == []:
-                    return seeded
-            if o["sysmem"]:
+                    rects = "same"
+                elif rects is None:                                # 화면 대부분이 바뀜 → 거칠게 먼저
+                    rough = rough_ok and not o["sysmem"] and \
+                        (not o["stale"] or time.monotonic() - o["stale"] < self.ROUGH_MAX)
+                elif o["stale"]:                                   # 잠잠해짐 → 선명하게 통째로
+                    rects = None
+            if rects == "same":
+                pass
+            elif o["sysmem"]:
                 if o["tex_size"] != (w, h):
                     rects = None
                 mr = _DXGI_MAPPED_RECT()
@@ -582,43 +665,81 @@ class _DesktopDup:
                     _com(dup, 13)(dup)                             # UnMapDesktopSurface
                 o["full"] = False
                 return whole if rects is None else rects
-            tex = _qi(res, _IID_TEX2D)
-            if tex is None:
-                return seeded
-            if o["stage"] is None:
-                td = _D3D11_TEXTURE2D_DESC()
-                _com(tex, 10, ctypes.POINTER(_D3D11_TEXTURE2D_DESC), res=None)(tex, ctypes.byref(td))
-                td.MipLevels = td.ArraySize = td.SampleCount = 1
-                td.SampleQuality = td.BindFlags = td.MiscFlags = 0
-                td.Usage, td.CPUAccessFlags = 3, 0x20000            # STAGING, CPU 읽기
-                stage = _P()
-                if _com(o["dev"], 5, ctypes.POINTER(_D3D11_TEXTURE2D_DESC), _P, _PP)(
-                        o["dev"], ctypes.byref(td), None, ctypes.byref(stage)) < 0:
-                    raise _Unsupported("CreateTexture2D 실패")
-                o["stage"], o["tex_size"] = stage, (td.Width, td.Height)
-            if rects is None or o["tex_size"] != (w, h):
-                rects = None
-                _com(o["ctx"], 47, _P, _P, res=None)(o["ctx"], o["stage"], tex)      # CopyResource (GPU 에서)
             else:
-                copy = _com(o["ctx"], 46, _P, wt.UINT, wt.UINT, wt.UINT, wt.UINT, _P, wt.UINT,
-                            ctypes.POINTER(_D3D11_BOX), res=None)                     # CopySubresourceRegion
-                for x0, y0, x1, y1 in rects:
-                    box = _D3D11_BOX(x0, y0, 0, x1, y1, 1)
-                    copy(o["ctx"], o["stage"], 0, x0, y0, 0, tex, 0, ctypes.byref(box))
+                tex = _qi(res, _IID_TEX2D)
+                if tex is None:
+                    return seeded
+                if o["stage"] is None:
+                    td = _D3D11_TEXTURE2D_DESC()
+                    _com(tex, 10, ctypes.POINTER(_D3D11_TEXTURE2D_DESC), res=None)(tex, ctypes.byref(td))
+                    td.MipLevels = td.ArraySize = td.SampleCount = 1
+                    td.SampleQuality = td.BindFlags = td.MiscFlags = 0
+                    td.Usage, td.CPUAccessFlags = 3, 0x20000            # STAGING, CPU 읽기
+                    stage = _P()
+                    if _com(o["dev"], 5, ctypes.POINTER(_D3D11_TEXTURE2D_DESC), _P, _PP)(
+                            o["dev"], ctypes.byref(td), None, ctypes.byref(stage)) < 0:
+                        raise _Unsupported("CreateTexture2D 실패")
+                    o["stage"], o["tex_size"] = stage, (td.Width, td.Height)
+                if rects is None or o["tex_size"] != (w, h):
+                    rects = None
+                    rough = rough and o["tex_size"] == (w, h)
+                    _com(o["ctx"], 47, _P, _P, res=None)(o["ctx"], o["stage"], tex)  # CopyResource (GPU 에서)
+                else:
+                    copy = _com(o["ctx"], 46, _P, wt.UINT, wt.UINT, wt.UINT, wt.UINT, _P, wt.UINT,
+                                ctypes.POINTER(_D3D11_BOX), res=None)                 # CopySubresourceRegion
+                    for x0, y0, x1, y1 in rects:
+                        box = _D3D11_BOX(x0, y0, 0, x1, y1, 1)
+                        copy(o["ctx"], o["stage"], 0, x0, y0, 0, tex, 0, ctypes.byref(box))
         finally:
             _rel(tex)
             _rel(res)
             _com(dup, 14)(dup)                    # ReleaseFrame — 복사는 GPU 에 맡기고 바로 돌려줌
-        ms = _D3D11_MAPPED_SUBRESOURCE()
-        if _com(o["ctx"], 14, _P, wt.UINT, wt.UINT, wt.UINT, ctypes.POINTER(_D3D11_MAPPED_SUBRESOURCE))(
-                o["ctx"], o["stage"], 0, 1, 0, ctypes.byref(ms)) < 0:   # Map(READ)
+        if rects == "same":
+            return self._sharpen(o) or seeded
+        ok = self._map(o, lambda addr, pitch: self._read_rough(o, addr, pitch) if rough
+                       else self._read(o, addr, pitch, rects))
+        if not ok:
             return seeded
-        try:   # 매핑된 메모리에서 바로 변환 (중간 복사 없음)
-            self._read(o, ms.pData, ms.RowPitch, rects)
+        o["full"] = False
+        if rough:
+            o["stale"] = o["stale"] or time.monotonic()
+            return whole
+        if rects is None:
+            o["stale"] = 0.0
+        return whole if rects is None else rects
+
+    @staticmethod
+    def _map(o: dict, fn) -> bool:
+        """GPU 사본(stage)을 메모리에 매핑해 fn(주소, 줄 간격) — 매핑된 메모리에서 바로 변환 (중간 복사 없음)"""
+        ms = _D3D11_MAPPED_SUBRESOURCE()
+        t = time.perf_counter()
+        hr = _com(o["ctx"], 14, _P, wt.UINT, wt.UINT, wt.UINT, ctypes.POINTER(_D3D11_MAPPED_SUBRESOURCE))(
+            o["ctx"], o["stage"], 0, 1, 0, ctypes.byref(ms))            # Map(READ)
+        _slept[0] += time.perf_counter() - t     # GPU 복사를 기다린 시간 — CPU 는 거의 안 씀(실측 4%)
+        if hr < 0:
+            return False
+        try:
+            fn(ms.pData, ms.RowPitch)
         finally:
             _com(o["ctx"], 15, _P, wt.UINT, res=None)(o["ctx"], o["stage"], 0)    # Unmap
-        o["full"] = False
-        return whole if rects is None else rects
+        return True
+
+    def _sharpen(self, o: dict) -> list:
+        """거칠게만 읽어 둔 화면을 GPU 사본에서 선명하게 다시 읽음 (그 뒤 새 화면이 없을 때)"""
+        if not o["stale"] or o["stage"] is None:
+            return []
+        if not self._map(o, lambda addr, pitch: self._read(o, addr, pitch, None)):
+            return []
+        o["stale"] = 0.0
+        return [(0, 0, o["rect"][2], o["rect"][3])]
+
+    @staticmethod
+    def _read_rough(o: dict, addr: int, pitch: int):
+        """k 줄마다 한 줄만 읽고 가로로 k 배 줄임 → 폭 640 안팎의 거친 화면 (통째로 읽는 것의 1/3 이하 비용)"""
+        w, h = o["rect"][2], o["rect"][3]
+        k = max(2, min(4, w // 640))
+        raw = (ctypes.c_char * (pitch * h)).from_address(addr)
+        o["rough"] = Image.frombytes("RGB", (w, h // k), raw, "raw", "BGRX", pitch * k, 1).reduce((k, 1))
 
     @staticmethod
     def _dirty(dup, info, w: int, h: int):
@@ -678,13 +799,15 @@ class _DesktopDup:
         if any(o["rot"] not in (0, 1) for o in parts):
             raise _Unsupported("회전된 모니터")
         self.note = ""
-        changes = [(o, self._grab_out(o)) for o in parts]
-        whole = [(0, 0, w, h)]
+        single = len(parts) == 1 and parts[0]["rect"] == rect
         fresh = self._last_rect != rect
+        changes = [(o, self._grab_out(o, rough_ok=single and not fresh)) for o in parts]
+        whole = [(0, 0, w, h)]
         self._last_rect = rect
-        if len(parts) == 1 and parts[0]["rect"] == rect and parts[0]["img"] is not None:
+        if single and parts[0]["img"] is not None:
             self._comp = None                    # 모니터 하나 → 복사 없이 그대로
-            return parts[0]["img"], (whole if fresh else changes[0][1])
+            rough, parts[0]["rough"] = parts[0]["rough"], None
+            return parts[0]["img"], (whole if fresh else changes[0][1]), rough
         comp = self._comp
         if fresh or comp is None or comp.size != (w, h):
             comp = self._comp = Image.new("RGB", (w, h))
@@ -699,7 +822,7 @@ class _DesktopDup:
                 if a < c and b < e:
                     comp.paste(o["img"].crop((a - ox, b - oy, c - ox, e - oy)), (a, b))
                     dirty.append((a, b, c, e))
-        return comp, (whole if fresh else dirty)
+        return comp, (whole if fresh else dirty), None
 
 
 class _Screen:
@@ -726,7 +849,7 @@ class _Screen:
         self._gdi_only = False   # 다음 세션에서 DXGI 다시 시도
 
     def grab(self, rect: tuple, sig) -> tuple:
-        """(화면, 바뀐 사각형 목록) — _DesktopDup.grab 과 같음"""
+        """(화면, 바뀐 사각형 목록, 거친 화면 또는 None) — _DesktopDup.grab 과 같음"""
         if not self._gdi_only:
             try:
                 return self._dxgi.grab(rect, sig)
@@ -740,14 +863,14 @@ class _Screen:
         if prev is None or prev[0] != rect or len(prev[1]) != len(strips):
             img = _bgrx_image(b"".join(s[2] for s in strips), w, h)
             self._gdi_prev = (rect, [s[2] for s in strips], img)
-            return img, [(0, 0, w, h)]
+            return img, [(0, 0, w, h)], None
         dirty = []
         for i, (top, n, raw) in enumerate(strips):       # 바뀐 띠만 바꿔 끼움
             if raw != prev[1][i]:
                 prev[2].paste(_bgrx_image(raw, w, n), (0, top))
                 prev[1][i] = raw
                 dirty.append((0, top, w, top + n))
-        return prev[2], dirty
+        return prev[2], dirty, None
 
 
 def _jpeg(im: Image.Image, quality: int) -> bytes:
@@ -778,11 +901,12 @@ def _qint(q: dict, name: str, default: int, lo: int, hi: int) -> int:
 # 장비 쪽
 # ─────────────────────────────────────────
 class RemoteHost:
-    MIN_INTERVAL = 1 / 15   # 캡처 최소 간격 (초)
-    DUTY         = 10.0     # 캡처·압축에 걸린 시간의 이 배수만큼 쉼 → 한 코어의 1/11 이하
+    MIN_INTERVAL = 1 / 20   # 캡처 최소 간격 (초)
+    DUTY         = 4.0      # 캡처·압축에 걸린 시간의 이 배수만큼 쉼 → 한 코어의 1/5 이하 (Radmin·원격 데스크톱 수준)
     HISTORY      = 300      # 바뀐 영역 기록 개수 (보는 쪽이 이보다 뒤처지면 통째로 보냄)
     IDLE_INTERVAL = 0.3     # 화면이 그대로일 때 캡처 간격
     MAX_FRESH_GAP = 1.0     # 처음 여는 캡처(준비 비용 포함) 뒤 쉬는 시간 상한
+    ROUGH_Q      = 45       # 화면 전체가 바뀌는 동안 보내는 거친 화면의 화질 상한
     IDLE_RELEASE = 3.0      # 입력 소식이 이만큼 없으면 눌린 키·버튼을 뗌
     SESSION_END  = 15.0     # 보는 쪽 소식이 이만큼 없으면 세션 종료
     MAX_EVENTS   = 200      # 입력 요청 1개에 담을 수 있는 최대 이벤트
@@ -813,7 +937,8 @@ class RemoteHost:
             s = self._sessions.get(sid)
             if s is None:
                 s = self._sessions[sid] = {"who": who, "seen": time.monotonic(), "in_seen": 0.0,
-                                           "n": -1, "keys": set(), "btns": set(), "ctl": False}
+                                           "n": -1, "keys": set(), "btns": set(), "ctl": False,
+                                           "clip_mark": None}
                 self._log(f"🖥 원격 보기 시작: {who}")
                 if self._watchdog is None:
                     self._watchdog = threading.Thread(target=self._watch, daemon=True)
@@ -891,17 +1016,18 @@ class RemoteHost:
             return fr
         t0, s0 = time.perf_counter(), _slept[0]
         with low_priority(-2):
-            img, dirty = self._screen.grab(rect, tuple(mons))
+            img, dirty, rough = self._screen.grab(rect, tuple(mons))
         same = bool(fr) and fr["rect"] == rect and fr["img"] is img and not dirty
         fresh = not fr or fr["rect"] != rect or fr["img"] is not img
         if fresh:
             # 처음이거나 영역이 바뀜 → 기록을 새로 시작 (보는 쪽은 통째로 받음)
             self._seq += 1
-            fr = self._frame = {"rect": rect, "img": img, "seq": self._seq}
+            fr = self._frame = {"rect": rect, "img": img, "seq": self._seq, "rough": rough}
             self._hist, self._hist_base, self._streams, self._jpeg = [], self._seq, {}, {}
         elif dirty:
+            # rough 가 있으면 이 번호의 화면은 거친 화면뿐 (img 는 아직 옛 화면) — 다음 번호에서 통째로 선명하게
             self._seq += 1
-            fr["seq"] = self._seq
+            fr["seq"], fr["rough"] = self._seq, rough
             self._hist.append((self._seq, dirty))
             if len(self._hist) > self.HISTORY:
                 self._hist_base = self._hist.pop(0)[0]
@@ -912,7 +1038,7 @@ class RemoteHost:
             gap = max(self._screen.GDI_INTERVAL, cost * (2 if same else 1))
         else:
             # 화면이 그대로면 더 드물게 확인 (DXGI 는 안 바뀌었으면 거의 비용 없음).
-            # 띠 사이에 쉰 시간은 CPU 를 안 쓰므로 뺌. 처음 여는 준비 비용(한 번뿐)은 1초까지만 쉼
+            # 띠 사이에 쉬거나 GPU 복사를 기다린 시간은 CPU 를 안 쓰므로 뺌. 처음 여는 준비 비용(한 번뿐)은 1초까지만 쉼
             cost -= _slept[0] - s0
             if fresh:
                 cost = min(cost, self.MAX_FRESH_GAP / self.DUTY)
@@ -988,12 +1114,19 @@ class RemoteHost:
                     meta["next"] = self._until_next()
                     return _pack(meta)                    # 화면 그대로 → 압축·전송 생략
                 ss = _fit(fr["img"].size, box)
-                key = (fr["seq"], last, ss, qual)
+                rough = fr.get("rough")
+                small = rough is not None and q.get("rough") == "1"   # 보는 쪽이 거친 화면을 직접 키울 수 있음
+                key = (fr["seq"], -2 if rough is not None else last, None if small else ss, qual)
                 hit = self._jpeg.get(key)
                 if hit is None:
                     t0 = time.perf_counter()
                     with low_priority(-2):
-                        hit = self._encode(fr, ss, qual, last)
+                        if rough is not None:
+                            im = rough if small else rough.resize(ss, Image.BILINEAR)
+                            j = _jpeg(im, min(qual, self.ROUGH_Q))
+                            hit = [[0, 0, im.width, im.height, len(j)]], j, None
+                        else:
+                            hit = self._encode(fr, ss, qual, last)
                     if len(self._jpeg) >= 8:
                         self._jpeg = {}
                     self._jpeg[key] = hit
@@ -1003,6 +1136,8 @@ class RemoteHost:
                     self._next_cap += spent
                 meta["size"] = list(ss)
                 meta["parts"] = hit[0]
+                if rough is not None:
+                    meta["rough"] = 1                     # 잠깐 보여 줄 거친 화면 — 곧 선명한 화면이 옴
                 if hit[2] is not None:
                     meta["base"] = hit[2]                 # 보는 쪽이 가진 이 번호 화면 위에 붙일 조각
                 meta["next"] = self._until_next()
@@ -1032,6 +1167,23 @@ class RemoteHost:
         if not (x <= pt.x < x + w and y <= pt.y < y + h):
             return None
         return [round((pt.x - x) / max(1, w - 1), 4), round((pt.y - y) / max(1, h - 1), 4)]
+
+    def clip(self, q: dict, who: str) -> dict:
+        """장비에서 복사한 글자 — 복사 직전 기억한 번호에서 바뀌었을 때만 돌려줌 (아직이면 wait)"""
+        s = self._session(q, who)
+        mark = s["clip_mark"]
+        if mark is None:
+            return {"ok": True, "none": True}
+        if _GetClipboardSeq() == mark:
+            return {"ok": True, "wait": True}
+        s["clip_mark"] = None
+        try:
+            text = _clip_get()
+        except OSError as e:
+            return {"ok": False, "err": str(e)}
+        if text is None:
+            return {"ok": True, "none": True}               # 글자가 아닌 것(그림·파일)을 복사함
+        return {"ok": True, "text": text}
 
     # ── 입력 ─────────────────────────────
     def input(self, q: dict, who: str) -> dict:
@@ -1122,6 +1274,15 @@ class RemoteHost:
             self._release(s, inputs, keep_keys={int(k) for k in ev[1]}, keep_btns={int(b) for b in ev[2]})
         elif kind == "r":
             self._release(s, inputs, keep_keys=(), keep_btns=())
+        elif kind == "c":        # 붙여넣기 직전 — 보는 쪽 클립보드 글자를 장비 클립보드에
+            text = str(ev[1])[:CLIP_MAX]
+            try:
+                _clip_set(text)
+                self._log(f"📋 원격 클립보드 받음 ({len(text)}자): {s['who']}")
+            except OSError as e:
+                self._log(f"⚠ 원격 클립보드 받기 실패: {e}")
+        elif kind == "g":        # 복사 직전 — 지금 클립보드 번호를 기억 → 바뀌면 /remote/clip 이 돌려줌
+            s["clip_mark"] = _GetClipboardSeq()
 
     def _release(self, s, inputs, keep_keys, keep_btns):
         for b in sorted(s["btns"] - set(keep_btns)):
@@ -1143,11 +1304,17 @@ class RemoteHost:
 # 보는 쪽
 # ─────────────────────────────────────────
 class RemoteViewer:
-    QUALITY     = {"낮음": (45, 6), "보통": (60, 10), "높음": (75, 15)}   # (JPEG 화질, 최대 fps)
+    QUALITY     = {"낮음": (45, 8), "보통": (60, 15), "높음": (75, 20)}   # (JPEG 화질, 최대 fps)
     STALE       = 1.0    # 이보다 늦게 보내게 된 클릭·키 누름은 버림
     FRAME_STALE = 2.5    # 화면이 이만큼 갱신 안 되면 조작 잠금
     INPUT_HZ    = 30     # 입력 요청 최대 횟수 (초당)
     HEARTBEAT   = 1.0    # 누르고 있는 동안 이 간격으로 장비에 알림
+    CLIP_SEND   = 30000  # 붙여넣기 때 보낼 클립보드 글자 상한 (JSON 길이 — 요청 주소 길이 제한 안쪽)
+    ACTUAL_BOX  = (7680, 4320)   # 실제 크기 보기 — 장비가 줄이지 않고 보냄
+    COMBOS      = [("Alt+Tab (창 전환)", (0xA4, 0x09)), ("Win (시작 메뉴)", (0x5B,)),
+                   ("Win+D (바탕 화면)", (0x5B, 0x44)), ("Win+R (실행)", (0x5B, 0x52)),
+                   ("Alt+F4 (창 닫기)", (0xA4, 0x73)), ("Ctrl+Shift+Esc (작업 관리자)", (0xA2, 0xA0, 0x1B)),
+                   ("Print Screen", (0x2C,))]
     BG, FG, DIM = "#1D2327", "#D5DADD", "#8A949A"
 
     def __init__(self, root, title: str, request, px=lambda v: v, quality: str = "보통",
@@ -1188,13 +1355,18 @@ class RemoteViewer:
         self._input_err  = ""
         self._note       = ""            # 장비가 알려준 상황 (보안 화면 등) — 있으면 조작 잠금
         self._gdi        = False         # 장비가 호환 캡처(GDI)로 동작 중
+        self._lost_since = 0.0           # 연결이 끊긴 시각 (0 = 연결됨)
+        self._actual     = False         # 실제 크기(1:1) 보기
+        self._view       = (1280, 720)   # 캔버스 크기
+        self._notice     = ("", 0.0)     # 잠깐 보여 줄 안내 (글자, 사라질 시각)
+        self._clip_sent  = None          # 마지막으로 장비에 보낸(또는 장비에서 받은) 클립보드 글자
+        self._clip_busy  = False
 
         w = self.win = tk.Toplevel(root)
         w.title(title)
         w.configure(bg=self.BG)
         sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
         w.geometry(f"{min(px(1180), sw - 80)}x{min(px(760), sh - 120)}")
-        w.minsize(px(480), px(320))
         w.protocol("WM_DELETE_WINDOW", self.close)
 
         bar = tk.Frame(w, bg=self.BG)
@@ -1215,11 +1387,37 @@ class RemoteViewer:
                             width=5, font=font)
         q_cb.pack(side="left")
         q_cb.bind("<<ComboboxSelected>>", self._q_changed)
-        self._status = tk.Label(bar, text="연결 중…", bg=self.BG, fg=self.DIM, font=font, anchor="e")
-        self._status.pack(side="right", fill="x", expand=True)
+        self._actual_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar, text="실제 크기", variable=self._actual_var, command=self._actual_changed,
+                       bg=self.BG, fg=self.FG, selectcolor=self.BG, activebackground=self.BG,
+                       activeforeground=self.FG, font=font).pack(side="left", padx=(px(12), 0))
+        keys = tk.Menubutton(bar, text="키 보내기 ▾", bg=self.BG, fg=self.FG, activebackground="#2C3439",
+                             activeforeground=self.FG, relief="flat", font=font)
+        menu = tk.Menu(keys, tearoff=0, font=font)
+        for label, vks in self.COMBOS:
+            menu.add_command(label=label, command=lambda v=vks: self._combo(v))
+        keys["menu"] = menu
+        keys.pack(side="left", padx=(px(8), 0))
+        self._full_btn = tk.Button(bar, text="전체 화면", command=self._toggle_full, bg=self.BG, fg=self.FG,
+                                   activebackground="#2C3439", activeforeground=self.FG, relief="flat",
+                                   font=font)
+        self._full_btn.pack(side="left", padx=(px(4), 0))
+        # 버튼이 많아 창이 좁으면 글자가 잘림 → 앞부분(중요한 말)이 보이게 왼쪽 정렬
+        self._status = tk.Label(bar, text="연결 중…", bg=self.BG, fg=self.DIM, font=font, anchor="w")
+        self._status.pack(side="left", fill="x", expand=True, padx=(px(16), 0))
+        # 창을 좁혀도 위쪽 버튼이 잘리지 않게 (상태 글자 몫은 조금만 남김)
+        w.update_idletasks()
+        w.minsize(max(px(480), bar.winfo_reqwidth() - self._status.winfo_reqwidth() + px(140)), px(320))
 
-        c = self.canvas = tk.Canvas(w, bg="#101315", highlightthickness=0, takefocus=1)
-        c.pack(fill="both", expand=True)
+        area = tk.Frame(w, bg=self.BG)
+        area.pack(fill="both", expand=True)
+        area.rowconfigure(0, weight=1)
+        area.columnconfigure(0, weight=1)
+        c = self.canvas = tk.Canvas(area, bg="#101315", highlightthickness=0, takefocus=1)
+        c.grid(row=0, column=0, sticky="nsew")
+        self._vbar = ttk.Scrollbar(area, orient="vertical", command=c.yview)
+        self._hbar = ttk.Scrollbar(area, orient="horizontal", command=c.xview)
+        c.configure(yscrollcommand=self._vbar.set, xscrollcommand=self._hbar.set)
         self._img_item = c.create_image(0, 0, anchor="nw")
         self._cur_item = c.create_oval(0, 0, 0, 0, outline="#FF5A4F", width=2, state="hidden")
         self._msg_item = c.create_text(0, 0, text="연결 중…", fill=self.FG, font=font)
@@ -1299,11 +1497,13 @@ class RemoteViewer:
             t0 = time.monotonic()
             try:
                 r = self._req("/remote/frame", {"mon": self._mon, "w": self._want[0], "h": self._want[1],
-                                                "q": q, "last": last}, timeout=(3, 8))
+                                                "q": q, "last": last, "rough": 1}, timeout=(3, 8))
             except Exception:
-                self._error = "연결 끊김 — 다시 연결 중…"
+                self._lost_since = self._lost_since or time.monotonic()
+                self._error = f"연결 끊김 — 다시 연결 중… ({int(time.monotonic() - self._lost_since)}초)"
                 self._sleep(1.5)
                 continue
+            self._lost_since = 0.0
             if r.status_code != 200:
                 self._error = self._error_text(r)
                 self._sleep(3.0)
@@ -1372,6 +1572,8 @@ class RemoteViewer:
             pos += n
             if im.mode != "RGB":
                 im = im.convert("RGB")
+            if meta.get("rough") and base is None and len(size) == 2 and im.size != size:
+                im = im.resize(size, Image.BILINEAR)   # 장비가 작게 보낸 거친 화면 → 여기서 키움
             if base is None:                           # 통째로 — UI 에는 사본을 넘김 (이후 조각은 _base 에 붙음)
                 self._base = im
                 ops = [("full", im.copy())]
@@ -1430,6 +1632,15 @@ class RemoteViewer:
         x0, y0 = max(0, (cw - size[0]) // 2), max(0, (ch - size[1]) // 2)
         self.canvas.coords(self._img_item, x0, y0)
         self._box = (x0, y0, size[0], size[1])
+        # 화면이 캔버스보다 크면(실제 크기 보기) 스크롤 — 아니면 스크롤 없이 가운데
+        sw, sh = max(cw, x0 + size[0]), max(ch, y0 + size[1])
+        self.canvas.configure(scrollregion=(0, 0, sw, sh))
+        for bar, need, kw in ((self._hbar, self._actual and sw > cw, dict(row=1, column=0, sticky="ew")),
+                              (self._vbar, self._actual and sh > ch, dict(row=0, column=1, sticky="ns"))):
+            if need and not bar.winfo_ismapped():
+                bar.grid(**kw)
+            elif not need and bar.winfo_ismapped():
+                bar.grid_remove()
 
     def _tick(self):
         """0.3초마다 상태 표시 · 화면 멈춤 감지"""
@@ -1442,7 +1653,7 @@ class RemoteViewer:
         if not self._box and not msg:
             msg = "연결 중…"
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-        self.canvas.coords(self._msg_item, cw // 2, ch // 2)
+        self.canvas.coords(self._msg_item, self.canvas.canvasx(cw // 2), self.canvas.canvasy(ch // 2))
         self.canvas.itemconfigure(self._msg_item, text=msg, state="normal" if msg else "hidden")
         self.canvas.tag_raise(self._msg_item)
         if msg:
@@ -1452,13 +1663,44 @@ class RemoteViewer:
             fps = len([t for t in self._shown if now - t < 1.0])
             ctl = ("" if self._ctl.get() else "보기 전용 · ") + ("호환 캡처(느림) · " if self._gdi else "")
             warn = f" · ⚠ {self._input_err}" if self._input_err else ""
+            if self._notice[0] and now < self._notice[1]:
+                warn = f" · {self._notice[0]}"
             self._status.configure(text=f"{ctl}{fps} fps · {self._net}{warn}",
                                    fg="#FFB4A9" if warn else self.DIM)
         self.win.after(300, self._tick)
 
     def _resized(self, e):
-        self._want = (max(64, e.width), max(64, e.height))
+        self._view = (max(64, e.width), max(64, e.height))
+        self._want = self.ACTUAL_BOX if self._actual else self._view
         self._layout()
+
+    def _actual_changed(self):
+        self._actual = self._actual_var.get()
+        self._want = self.ACTUAL_BOX if self._actual else self._view
+        self._box = None
+        self.canvas.xview_moveto(0)
+        self.canvas.yview_moveto(0)
+        self.canvas.focus_set()
+
+    def _toggle_full(self):
+        full = not bool(self.win.attributes("-fullscreen"))
+        self.win.attributes("-fullscreen", full)
+        self._full_btn.configure(text="창 모드" if full else "전체 화면")
+        self.canvas.focus_set()
+
+    def _say(self, text: str, sec: float = 3.0):
+        self._notice = (text, time.monotonic() + sec)
+
+    def _combo(self, vks):
+        """특수 키 조합 — 차례로 누르고 거꾸로 뗌 (보는 쪽 PC 에서 가로채지는 키를 장비로)"""
+        self.canvas.focus_set()
+        if not self._can_control():
+            self._say("⚠ 조작이 꺼져 있거나 잠겨 있어 보내지 않았습니다")
+            return
+        for vk in vks:
+            self._push(["k", vk, 1])
+        for vk in reversed(vks):
+            self._push(["k", vk, 0])
 
     def _mon_changed(self, _e=None):
         names = list(self._mon_cb.cget("values"))
@@ -1485,8 +1727,8 @@ class RemoteViewer:
 
     def _norm(self, e) -> tuple:
         x0, y0, iw, ih = self._box
-        nx = min(max((e.x - x0) / max(1, iw - 1), 0.0), 1.0)
-        ny = min(max((e.y - y0) / max(1, ih - 1), 0.0), 1.0)
+        nx = min(max((self.canvas.canvasx(e.x) - x0) / max(1, iw - 1), 0.0), 1.0)
+        ny = min(max((self.canvas.canvasy(e.y) - y0) / max(1, ih - 1), 0.0), 1.0)
         return round(nx * 65535), round(ny * 65535)
 
     def _push(self, ev):
@@ -1530,6 +1772,10 @@ class RemoteViewer:
             self._push(["u", e.num, *self._norm(e)])
 
     def _on_wheel(self, e):
+        if not self._ctl.get() and self._actual and e.delta:     # 보기 전용 → 휠로 화면 이동
+            (self.canvas.xview_scroll if e.state & 0x1 else self.canvas.yview_scroll)(
+                -1 if e.delta > 0 else 1, "units")
+            return
         if self._can_control() and e.delta:
             self._push(["w", e.delta, *self._norm(e)])
 
@@ -1546,8 +1792,65 @@ class RemoteViewer:
     def _on_key_down(self, e):
         vk = self._vk(e)
         if vk and self._can_control():
+            ctrl = bool(e.state & 0x4) and not (e.state & 0x20000)     # Ctrl (Alt 함께 누른 것 제외)
+            if ctrl and vk == 0x56:
+                self._clip_push()                    # 붙여넣기 전에 내 클립보드 글자를 장비로
+            elif ctrl and vk in (0x43, 0x58):
+                self._push(["g"])                    # 복사 직전 클립보드 번호를 장비가 기억
+                self._clip_pull()
             self._push(["k", vk, 1])
-        return "break"                               # Tab 등이 보는 쪽 창에서 쓰이지 않게
+        return "break"
+
+    # ── 클립보드 (글자만) ────────────────
+    def _clip_push(self):
+        try:
+            text = self.win.clipboard_get()
+        except Exception:                            # 비었거나 글자가 아님
+            return
+        if not text or text == self._clip_sent:      # 그대로면 장비 클립보드(장비에서 복사한 것)를 씀
+            return
+        if len(json.dumps(text)) > self.CLIP_SEND:
+            self._say("⚠ 클립보드 글자가 너무 길어 보내지 않았습니다")
+            return
+        self._clip_sent = text
+        self._push(["c", text])
+
+    def _clip_pull(self):
+        if self._clip_busy:
+            return
+        self._clip_busy = True
+        threading.Thread(target=self._clip_wait, daemon=True).start()
+
+    def _clip_wait(self):
+        """장비 클립보드가 바뀔 때까지 잠깐 기다렸다가 글자를 받아 내 클립보드에"""
+        try:
+            for _ in range(10):                      # 최대 약 2.5초
+                self._sleep(0.25)
+                if not self.alive:
+                    return
+                try:
+                    r = self._req("/remote/clip", {}, timeout=(2, 4))
+                    body = r.json() if r.status_code == 200 else {}
+                except Exception:
+                    return
+                if not body.get("wait"):
+                    break
+            else:
+                return
+            text = body.get("text")
+            if isinstance(text, str) and text:
+                self.win.after(0, self._clip_got, text)
+        finally:
+            self._clip_busy = False
+
+    def _clip_got(self, text: str):
+        try:
+            self.win.clipboard_clear()
+            self.win.clipboard_append(text)
+        except Exception:
+            return
+        self._clip_sent = text                       # 다시 붙여넣을 때 장비로 되돌려 보내지 않음
+        self._say(f"📋 장비에서 복사함 ({len(text)}자)")                               # Tab 등이 보는 쪽 창에서 쓰이지 않게
 
     def _on_key_up(self, e):
         vk = self._vk(e)
