@@ -1371,7 +1371,7 @@ class RemoteViewer:
 
         bar = tk.Frame(w, bg=self.BG)
         bar.pack(fill="x", padx=px(10), pady=px(6))
-        self._ctl = tk.BooleanVar(value=True)
+        self._ctl = tk.BooleanVar(value=False)   # 기본은 보기 전용 — 실수로 장비를 누르지 않도록
         tk.Checkbutton(bar, text="조작", variable=self._ctl, command=self._ctl_changed,
                        bg=self.BG, fg=self.FG, selectcolor=self.BG, activebackground=self.BG,
                        activeforeground=self.FG, font=font).pack(side="left")

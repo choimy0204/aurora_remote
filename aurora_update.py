@@ -112,7 +112,10 @@ def apply(kind: str, new_exe: str, version: str) -> str | None:
     try:
         with open(bat, "w", encoding="utf-8") as f:
             f.write(script)
-        subprocess.Popen(["cmd", "/c", bat],
+        # 새 exe 가 이 프로세스의 임시 폴더(_MEIxxxx, 종료 시 삭제됨)를 물려받지 않게
+        # → 안 하면 재시작 때 'Failed to load Python DLL ... _MEIxxxx\python314.dll' 오류
+        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+        subprocess.Popen(["cmd", "/c", bat], env=env,
                          # 숨은 콘솔 1개를 ping 등 하위 명령도 같이 쓰도록 (창 깜빡임 없음)
                          creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
                          close_fds=True)
