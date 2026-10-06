@@ -32,7 +32,7 @@ from PIL import ImageTk
 import aurora_update
 import aurora_remote
 
-APP_VERSION = "2.13.1"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.13.2"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):

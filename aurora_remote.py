@@ -137,7 +137,9 @@ _SetWindowPos     = _proto(_user32.SetWindowPos, wt.BOOL, wt.HWND, wt.HWND, ctyp
 _GetWindowRect    = _proto(_user32.GetWindowRect, wt.BOOL, wt.HWND, ctypes.POINTER(wt.RECT))
 _MonitorFromWindow = _proto(_user32.MonitorFromWindow, wt.HMONITOR, wt.HWND, wt.DWORD)
 _ReleaseCapture   = _proto(_user32.ReleaseCapture, wt.BOOL)
-_SendMessageW     = _proto(_user32.SendMessageW, _LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+# SendMessage 금지 — Tk 콜백 안에서 옮기기 루프를 직접 열면 그 사이 Tk 가 다른 Python 콜백을 불러 프로그램이 죽음.
+# PostMessage 로 넘기면 Tk 이벤트 루프가 정상 경로로 처리함
+_PostMessageW     = _proto(_user32.PostMessageW, wt.BOOL, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 _GWL_STYLE, _GWL_WNDPROC = -16, -4
 _WS_CAPTION, _WS_THICKFRAME, _WS_MAXIMIZEBOX = 0x00C00000, 0x00040000, 0x00010000
 _WM_NCCALCSIZE, _WM_NCLBUTTONDOWN = 0x0083, 0x00A1
@@ -1598,7 +1600,8 @@ class RemoteViewer:
             return
         hit = _HTTOP if self._title_edge(e) else _HTCAPTION
         _ReleaseCapture()
-        _SendMessageW(self._hwnd, _WM_NCLBUTTONDOWN, hit, 0)   # Windows 가 옮기기·크기 조절을 처리 (화면 가장자리 붙이기 포함)
+        pos = ((e.y_root & 0xFFFF) << 16) | (e.x_root & 0xFFFF)
+        _PostMessageW(self._hwnd, _WM_NCLBUTTONDOWN, hit, pos)   # Windows 가 옮기기·크기 조절을 처리 (화면 가장자리 붙이기 포함)
 
     def _minimize(self):
         self.win.iconify()
