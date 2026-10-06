@@ -1318,7 +1318,7 @@ class RemoteViewer:
     BG, FG, DIM = "#1D2327", "#D5DADD", "#8A949A"
 
     def __init__(self, root, title: str, request, px=lambda v: v, quality: str = "보통",
-                 on_quality=None, on_closed=None, font=("맑은 고딕", 9)):
+                 on_quality=None, on_closed=None, font=("맑은 고딕", 9), side=None, side_width=0):
         import tkinter as tk
         from tkinter import ttk
         from PIL import ImageTk
@@ -1409,7 +1409,16 @@ class RemoteViewer:
         w.update_idletasks()
         w.minsize(max(px(480), bar.winfo_reqwidth() - self._status.winfo_reqwidth() + px(140)), px(320))
 
-        area = tk.Frame(w, bg=self.BG)
+        # 오른쪽 곁 패널 (반입/반출 등) — side(frame) 이 내용을 채움. 전체 화면에서는 숨김
+        self._side = None
+        if side:
+            self._side = tk.Frame(w, bg=self.BG, width=side_width)
+            self._side_pad = px(8)
+            self._side.pack(side="right", fill="y", padx=(0, px(8)), pady=(0, px(8)))
+            self._side.pack_propagate(False)
+            side(self._side)
+            w.geometry(f"{min(px(1180) + side_width, sw - 80)}x{min(px(760), sh - 120)}")
+        area = self._area = tk.Frame(w, bg=self.BG)
         area.pack(fill="both", expand=True)
         area.rowconfigure(0, weight=1)
         area.columnconfigure(0, weight=1)
@@ -1686,6 +1695,12 @@ class RemoteViewer:
         full = not bool(self.win.attributes("-fullscreen"))
         self.win.attributes("-fullscreen", full)
         self._full_btn.configure(text="창 모드" if full else "전체 화면")
+        if self._side is not None:
+            if full:
+                self._side.pack_forget()
+            else:
+                self._side.pack(side="right", fill="y", padx=(0, self._side_pad), pady=(0, self._side_pad),
+                                before=self._area)
         self.canvas.focus_set()
 
     def _say(self, text: str, sec: float = 3.0):

@@ -32,7 +32,7 @@ from PIL import ImageTk
 import aurora_update
 import aurora_remote
 
-APP_VERSION = "2.12.2"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.13.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -3080,7 +3080,9 @@ class AuroraClientApp:
         if ip in views and views[ip].alive:
             views[ip].focus()
             return
-        label = self._exp_devices[self._exp_dev_combo.current()]["label"]
+        dev = dict(self._exp_devices[self._exp_dev_combo.current()])
+        label = dev["label"]
+        pane = []
 
         def _quality(q):
             config["remote_quality"] = q
@@ -3090,8 +3092,10 @@ class AuroraClientApp:
             self.root, f"원격 — {label}",
             lambda route, params, timeout: self._export_request(route, params, target=ip, timeout=timeout),
             px=_px, quality=config.get("remote_quality", "보통"), on_quality=_quality,
-            on_closed=lambda v: views.pop(ip, None) if views.get(ip) is v else None,
-            font=self.FONT_INPUT)
+            on_closed=lambda v: (pane and pane[0]._exp_cancel.set(),
+                                 views.pop(ip, None) if views.get(ip) is v else None),
+            font=self.FONT_INPUT, side_width=_px(420),
+            side=lambda frame: pane.append(_TransferPane(self, frame, dev)))
         self._export_log(f"🖥 원격 창 열기: {label}")
 
     def _export_rename_device(self):
@@ -3340,7 +3344,7 @@ class AuroraClientApp:
 
     # 저장 폴더
     def _export_browse_save_dir(self):
-        path = filedialog.askdirectory(title="저장 폴더 선택")
+        path = filedialog.askdirectory(title="저장 폴더 선택", parent=self.root)
         if path:
             self._exp_save_var.set(os.path.normpath(path))
 
@@ -3354,11 +3358,11 @@ class AuroraClientApp:
         target = self._export_target()
         sel = [it for it in self._exp_grid.selection() if not it.get("root")]
         if not target or not sel:
-            messagebox.showinfo("안내", "장비와 반출할 파일/폴더를 선택하세요.")
+            messagebox.showinfo("안내", "장비와 반출할 파일/폴더를 선택하세요.", parent=self.root)
             return
         save_dir = self._exp_save_var.get().strip()
         if not save_dir:
-            messagebox.showinfo("안내", "저장 폴더를 입력하세요.")
+            messagebox.showinfo("안내", "저장 폴더를 입력하세요.", parent=self.root)
             return
         config["export_save_dir"] = save_dir
         save_config(config)
@@ -3510,10 +3514,10 @@ class AuroraClientApp:
         self._import_refresh_list()
 
     def _import_add_files(self):
-        self._import_add(filedialog.askopenfilenames(title="반입할 파일 선택") or [])
+        self._import_add(filedialog.askopenfilenames(title="반입할 파일 선택", parent=self.root) or [])
 
     def _import_add_dir(self):
-        path = filedialog.askdirectory(title="반입할 폴더 선택")
+        path = filedialog.askdirectory(title="반입할 폴더 선택", parent=self.root)
         if path:
             self._import_add([path])
 
@@ -3552,24 +3556,24 @@ class AuroraClientApp:
     def _import_start(self, dest: str | None = None):
         target = self._export_target()
         if not target:
-            messagebox.showinfo("안내", "장비를 먼저 선택하세요.")
+            messagebox.showinfo("안내", "장비를 먼저 선택하세요.", parent=self.root)
             return
         dest = dest or self._exp_path
         if not dest:
-            messagebox.showinfo("안내", "반입할 위치로 이동하세요.\n아래 파일 탐색에서 D 드라이브 또는 바탕화면 안의 폴더를 더블클릭하면 그 폴더가 반입 위치가 됩니다.")
+            messagebox.showinfo("안내", "반입할 위치로 이동하세요.\n아래 파일 탐색에서 D 드라이브 또는 바탕화면 안의 폴더를 더블클릭하면 그 폴더가 반입 위치가 됩니다.", parent=self.root)
             return
         if not self._imp_sources:
-            messagebox.showinfo("안내", "'파일 추가' 또는 '폴더 추가'로 보낼 항목을 넣으세요.")
+            messagebox.showinfo("안내", "'파일 추가' 또는 '폴더 추가'로 보낼 항목을 넣으세요.", parent=self.root)
             return
         jobs, dirs = self._import_jobs(dest)
         if not jobs and not dirs:
-            messagebox.showinfo("안내", "보낼 파일이 없습니다 (추가한 경로가 없어졌을 수 있습니다).")
+            messagebox.showinfo("안내", "보낼 파일이 없습니다 (추가한 경로가 없어졌을 수 있습니다).", parent=self.root)
             return
         total = sum(j[2] for j in jobs)
         name = self._exp_dev_combo.get().replace("  [중계]", "")
         if not messagebox.askyesno("반입 확인",
                 f"{name}\n{dest}\n\n위 위치로 파일 {len(jobs)}개 ({self._fmt_size(total)}) 를 보냅니다.\n"
-                "같은 이름의 파일이 있으면 덮어씁니다. 진행할까요?"):
+                "같은 이름의 파일이 있으면 덮어씁니다. 진행할까요?", parent=self.root):
             return
         self._export_log(f"경로: {self._export_route_text()}")
         self._exp_cancel.clear()
@@ -3943,6 +3947,178 @@ class AuroraClientApp:
         server_addrs = ", ".join(f"{ip}:{SERVER_PORT}" for ip in config.get("server_ips", []))
         self.add_log(f"서버 IP: {server_addrs or '없음'}")
         self.add_log(f"명령 수신 포트: {LISTEN_PORT}")
+
+
+class _FixedDevice:
+    """원격 창 패널용 — 반입/반출 탭 메서드가 쓰는 장비 콤보박스 자리 (장비 1대 고정)"""
+    def __init__(self, label: str):
+        self._label = label
+
+    def get(self) -> str:
+        return self._label
+
+    def current(self) -> int:
+        return 0
+
+
+class _TransferPane:
+    """원격 창 오른쪽 반입/반출 — 반입/반출 탭의 메서드를 그대로 빌려 씀.
+    장비는 원격 창의 장비로 고정, 경로·모드·진행 상태는 창마다 따로. 나머지(색·글꼴·요청·LOG)는 앱 것을 씀"""
+
+    # 반입/반출 탭에서 빌려 오는 메서드 (self 가 이 패널이 됨)
+    BORROWED = (
+        "_export_nav", "_export_open_item", "_export_menu", "_export_key",
+        "_export_on_drop", "_export_copy_path", "_export_fs_call", "_export_rename",
+        "_export_delete", "_export_new_folder", "_export_up", "_export_browse_save_dir",
+        "_export_open_save_dir", "_export_start", "_export_cancel", "_export_worker",
+        "_export_done", "_transfer_run", "_transfer_start",
+        "_export_route_nodes", "_export_route_text",
+        "_import_update_dest", "_import_refresh_list", "_import_add", "_import_add_files",
+        "_import_add_dir", "_import_remove", "_import_jobs", "_import_start", "_import_worker",
+    )
+
+    def __init__(self, app, parent, dev: dict):
+        self._app           = app
+        self.root           = parent.winfo_toplevel()   # 대화상자·메뉴·after 는 원격 창 기준
+        self._dev           = dev
+        self._exp_devices   = [dev]
+        self._exp_dev_combo = _FixedDevice(dev["label"])
+        self._exp_path      = ""
+        self._exp_roots     = []
+        self._exp_cancel    = threading.Event()
+        self._exp_busy      = False
+        self._exp_mode      = "export"
+        self._imp_sources   = []
+        self._build(parent)
+        self._export_done()               # 버튼 상태 초기화
+        self._set_transfer_mode("export")
+        self._export_nav("")
+
+    def __getattr__(self, name):
+        return getattr(self._app, name)
+
+    def _export_target(self) -> str:
+        return self._dev["ip"]
+
+    def _export_log(self, msg: str):
+        """앱의 반입/반출 LOG 에 장비 이름을 붙여 남기고, 패널 아래에도 마지막 줄을 보여 줌"""
+        self._app._export_log(f"[원격 창 · {self._dev['label']}] {msg}")
+
+        def _show():
+            try:
+                self._pane_msg.config(text=msg, fg=self.RED if msg.startswith("❌") else self.TEXT_DIM)
+                if not self._pane_msg.winfo_manager():   # 처음 메시지가 생길 때만 자리를 차지
+                    self._pane_msg.pack(fill="x", padx=_px(12), pady=(0, _px(10)))
+            except tk.TclError:
+                pass   # 창 닫힘
+        try:
+            self.root.after(0, _show)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _build(self, parent):
+        P = _px
+        # ── 모드 전환 ──
+        mode = tk.Frame(parent, bg=self.BG)
+        mode.pack(fill="x", pady=(0, P(6)))
+        self._exp_mode_btns = {
+            "export": self._button(mode, "⬇ 반출", "secondary", lambda: self._set_transfer_mode("export"), small=True),
+            "import": self._button(mode, "⬆ 반입", "secondary", lambda: self._set_transfer_mode("import"), small=True),
+        }
+        self._exp_mode_btns["export"].pack(side="left")
+        self._exp_mode_btns["import"].pack(side="left", padx=(P(6), 0))
+        self._exp_mode_lbl = tk.Label(mode, text="", font=self.FONT_SMALL, fg=self.TEXT_DIM, bg=self.BG,
+                                      anchor="w")
+        self._exp_mode_lbl.pack(side="left", fill="x", expand=True, padx=(P(8), 0))
+
+        # ── 실행 카드 (아래) — 먼저 아래에 붙여야 파일 목록이 남는 공간을 채움 ──
+        act = self._card(parent)
+        act.pack(side="bottom", fill="x")
+
+        row = self._exp_save_row = tk.Frame(act, bg=self.PANEL)
+        self._field_label(row, "저장 폴더", width=8).pack(side="left", padx=(0, P(6)))
+        self._exp_save_var = tk.StringVar(value=config.get("export_save_dir"))
+        self._button(row, "열기", "secondary", self._export_open_save_dir, small=True).pack(side="right")
+        self._button(row, "…", "secondary", self._export_browse_save_dir, small=True).pack(
+            side="right", padx=(0, P(4)))
+        self._entry(row, self._exp_save_var, 10).pack(side="left", fill="x", expand=True, padx=(0, P(6)))
+
+        imp = self._imp_frame = tk.Frame(act, bg=self.PANEL)
+        lb_wrap = tk.Frame(imp, bg=self.PANEL, highlightthickness=1, highlightbackground=self.INPUT_BORDER)
+        lb_wrap.pack(fill="x", pady=(0, P(6)))
+        self._imp_list = tk.Listbox(lb_wrap, height=3, font=self.FONT_INPUT, relief="flat", bd=0,
+                                    selectmode="extended", fg=self.TEXT, bg=self.PANEL,
+                                    selectbackground=self.SELECT_BG, selectforeground=self.TEXT,
+                                    highlightthickness=0, activestyle="none")
+        lsb = ttk.Scrollbar(lb_wrap, orient="vertical", command=self._imp_list.yview)
+        self._imp_list.configure(yscrollcommand=lsb.set)
+        lsb.pack(side="right", fill="y")
+        self._imp_list.pack(side="left", fill="both", expand=True, padx=P(4), pady=P(2))
+        ib = tk.Frame(imp, bg=self.PANEL)
+        ib.pack(fill="x", pady=(0, P(6)))
+        self._button(ib, "파일 추가", "secondary", self._import_add_files, small=True).pack(side="left")
+        self._button(ib, "폴더 추가", "secondary", self._import_add_dir, small=True).pack(side="left", padx=(P(6), 0))
+        self._button(ib, "빼기", "secondary", self._import_remove, small=True).pack(side="left", padx=(P(6), 0))
+        self._imp_dest_lbl = tk.Label(imp, text="", anchor="w", justify="left", font=self.FONT_SMALL,
+                                      fg=self.TEXT_DIM, bg=self.PANEL, wraplength=P(380))
+        self._imp_dest_lbl.pack(fill="x")
+
+        row2 = self._exp_act_row = tk.Frame(act, bg=self.PANEL)
+        row2.pack(fill="x", padx=P(12), pady=(0, P(12)))
+        self._exp_go_btn = self._button(row2, "⬇ 반출", "primary", self._transfer_start)
+        self._exp_go_btn.pack(side="right")
+        self._exp_cancel_btn = self._button(row2, "취소", "danger", self._export_cancel)
+        self._exp_cancel_btn.pack(side="right", padx=(0, P(6)))
+        self._exp_progress = ttk.Progressbar(row2, orient="horizontal", maximum=1, value=0,
+                                             style="Countdown.Horizontal.TProgressbar")
+        self._exp_progress.pack(side="top", fill="x", padx=(0, P(8)), pady=(P(4), P(4)))
+        self._exp_prog_lbl = tk.Label(row2, text="대기", anchor="w", font=self.FONT_MONO_SMALL,
+                                      fg=self.TEXT_DIM, bg=self.PANEL)
+        self._exp_prog_lbl.pack(side="top", fill="x")
+        # 마지막 LOG 한 줄 (실행 카드 맨 아래, 메시지가 생기면 표시)
+        self._pane_msg = tk.Label(act, text="", anchor="w", font=self.FONT_SMALL, fg=self.TEXT_DIM,
+                                  bg=self.PANEL, wraplength=P(380), justify="left")
+
+        # ── 파일 탐색 ──
+        browse = self._card(parent)
+        browse.pack(fill="both", expand=True, pady=(0, P(6)))
+        nav = tk.Frame(browse, bg=self.PANEL)
+        nav.pack(fill="x", padx=P(8), pady=(P(8), P(6)))
+        self._button(nav, "↑", "secondary", self._export_up, small=True).pack(side="left", padx=(0, P(6)))
+        self._button(nav, "⟳", "secondary", lambda: self._export_nav(self._exp_path), small=True).pack(side="right")
+        self._exp_path_lbl = tk.Label(nav, text="", anchor="w", font=self.FONT_INPUT,
+                                      fg=self.TEXT_DIM, bg=self.PANEL)
+        self._exp_path_lbl.pack(side="left", fill="x", expand=True)
+        grid_wrap = tk.Frame(browse, bg=self.PANEL, highlightthickness=1,
+                             highlightbackground=self.BORDER, highlightcolor=self.BORDER)
+        grid_wrap.pack(fill="both", expand=True, padx=P(8), pady=(0, P(8)))
+        self._exp_grid = _FileGrid(grid_wrap, self, on_open=self._export_open_item,
+                                   on_menu=self._export_menu, on_key=self._export_key,
+                                   zoom=config.get("export_grid_zoom", 1.0),
+                                   on_zoom=self._export_grid_zoomed)
+        self._exp_grid.pack(fill="both", expand=True)
+        self._exp_grid.set_items([], "불러오는 중…")
+        # 탐색기에서 끌어다 놓으면 반입 (폴더 타일 위 → 그 폴더, 빈 곳 → 현재 폴더)
+        _enable_file_drop(self._exp_grid.cv, self._export_on_drop)
+        _enable_file_drop(self._imp_list, lambda paths, x, y: self._import_add(paths))
+
+    def _set_transfer_mode(self, mode: str):
+        """탭의 모드 전환을 쓰되, 좁은 패널에 맞게 안내 글자·여백만 바꿈"""
+        AuroraClientApp._set_transfer_mode(self, mode)
+        self._exp_mode_lbl.config(text="내 PC → 장비 현재 폴더" if mode == "import"
+                                  else "장비 → 내 PC 저장 폴더")
+        for f in (self._imp_frame, self._exp_save_row):
+            if f.winfo_manager():
+                f.pack_configure(padx=_px(12), pady=(_px(12), _px(8)))
+
+    def _export_fill(self, path: str, items: list, select_name: str | None = None):
+        AuroraClientApp._export_fill(self, path, items, select_name)
+        if not path:
+            self._exp_path_lbl.config(text="D 드라이브 · 바탕화면")
+
+
+for _name in _TransferPane.BORROWED:
+    setattr(_TransferPane, _name, AuroraClientApp.__dict__[_name])
 
 
 # ─────────────────────────────────────────
