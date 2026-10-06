@@ -123,6 +123,27 @@ _GlobalUnlock        = _proto(_kernel32.GlobalUnlock, wt.BOOL, wt.HGLOBAL)
 _GlobalFree          = _proto(_kernel32.GlobalFree, wt.HGLOBAL, wt.HGLOBAL)
 _GlobalSize          = _proto(_kernel32.GlobalSize, ctypes.c_size_t, wt.HGLOBAL)
 _CF_UNICODETEXT, _GMEM_MOVEABLE = 13, 0x0002
+
+# 원격 창 — Windows 제목 표시줄 대신 직접 그린 제목 줄 (크기 조절 테두리·작업 표시줄·최소화는 그대로)
+_LRESULT          = ctypes.c_ssize_t
+_WNDPROC          = ctypes.WINFUNCTYPE(_LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+_GetParent        = _proto(_user32.GetParent, wt.HWND, wt.HWND)
+_GetWindowLongPtr = _proto(_user32.GetWindowLongPtrW, ctypes.c_ssize_t, wt.HWND, ctypes.c_int)
+_SetWindowLongPtr = _proto(_user32.SetWindowLongPtrW, ctypes.c_ssize_t, wt.HWND, ctypes.c_int, ctypes.c_ssize_t)
+_CallWindowProc   = _proto(_user32.CallWindowProcW, _LRESULT, ctypes.c_ssize_t, wt.HWND, wt.UINT, wt.WPARAM,
+                           wt.LPARAM)
+_SetWindowPos     = _proto(_user32.SetWindowPos, wt.BOOL, wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                           ctypes.c_int, ctypes.c_int, wt.UINT)
+_GetWindowRect    = _proto(_user32.GetWindowRect, wt.BOOL, wt.HWND, ctypes.POINTER(wt.RECT))
+_MonitorFromWindow = _proto(_user32.MonitorFromWindow, wt.HMONITOR, wt.HWND, wt.DWORD)
+_ReleaseCapture   = _proto(_user32.ReleaseCapture, wt.BOOL)
+_SendMessageW     = _proto(_user32.SendMessageW, _LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+_GWL_STYLE, _GWL_WNDPROC = -16, -4
+_WS_CAPTION, _WS_THICKFRAME, _WS_MAXIMIZEBOX = 0x00C00000, 0x00040000, 0x00010000
+_WM_NCCALCSIZE, _WM_NCLBUTTONDOWN = 0x0083, 0x00A1
+_HTCAPTION, _HTTOP = 2, 12
+_SWP_FRAMECHANGED_ONLY = 0x0001 | 0x0002 | 0x0004 | 0x0020 | 0x0010   # NOSIZE·NOMOVE·NOZORDER·FRAMECHANGED·NOACTIVATE
+_SWP_PLACE = 0x0004 | 0x0020                                          # NOZORDER·FRAMECHANGED
 CLIP_MAX = 100_000             # 클립보드로 주고받는 글자 수 상한
 
 
@@ -1368,6 +1389,12 @@ class RemoteViewer:
         sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
         w.geometry(f"{min(px(1180), sw - 80)}x{min(px(760), sh - 120)}")
         w.protocol("WM_DELETE_WINDOW", self.close)
+        self._px       = px
+        self._hwnd     = None        # Windows 바깥 창 (제목 표시줄을 없앤 뒤)
+        self._wndproc  = None        # (새 창 처리 함수, 원래 함수)
+        self._full     = False
+        self._restore  = None        # 전체 화면 전 창 위치 (x, y, w, h)
+        self._build_title(title, font)
 
         bar = tk.Frame(w, bg=self.BG)
         bar.pack(fill="x", padx=px(10), pady=px(6))
@@ -1398,10 +1425,6 @@ class RemoteViewer:
             menu.add_command(label=label, command=lambda v=vks: self._combo(v))
         keys["menu"] = menu
         keys.pack(side="left", padx=(px(8), 0))
-        self._full_btn = tk.Button(bar, text="전체 화면", command=self._toggle_full, bg=self.BG, fg=self.FG,
-                                   activebackground="#2C3439", activeforeground=self.FG, relief="flat",
-                                   font=font)
-        self._full_btn.pack(side="left", padx=(px(4), 0))
         # 버튼이 많아 창이 좁으면 글자가 잘림 → 앞부분(중요한 말)이 보이게 왼쪽 정렬
         self._status = tk.Label(bar, text="연결 중…", bg=self.BG, fg=self.DIM, font=font, anchor="w")
         self._status.pack(side="left", fill="x", expand=True, padx=(px(16), 0))
@@ -1441,9 +1464,144 @@ class RemoteViewer:
         w.bind("<FocusOut>", self._on_focus_out)
         self._disable_ime()
 
+        self._frameless()
+
         threading.Thread(target=self._frame_loop, daemon=True).start()
         threading.Thread(target=self._input_loop, daemon=True).start()
         self._tick()
+
+    # ── 제목 줄 (Windows 제목 표시줄 대신) ──
+    TITLE_BG, HOVER_BG, CLOSE_BG = "#15191C", "#2C3439", "#C42B1C"
+
+    def _build_title(self, title: str, font):
+        """─ 최소화 · ⛶ 전체 화면 · ✕ 닫기. 최대화 대신 전체 화면만 — 최대화를 전체 화면으로 착각하지 않도록"""
+        tk, px = self._tk, self._px
+        try:
+            from tkinter import font as tkfont
+            icons = "Segoe MDL2 Assets" in tkfont.families(self.win)
+        except Exception:
+            icons = False
+        ifont = ("Segoe MDL2 Assets", 8) if icons else font
+        # (아이콘 글꼴 글자, 대체 글자)
+        self._glyph = {k: (g if icons else t) for k, g, t in (
+            ("min", "\uE921", "─"), ("full", "\uE740", "□"), ("back", "\uE73F", "❐"), ("close", "\uE8BB", "✕"))}
+
+        tb = self._title_bar = tk.Frame(self.win, bg=self.TITLE_BG, height=px(32))
+        tb.pack(fill="x")
+        tb.pack_propagate(False)
+        if icons:
+            tk.Label(tb, text="\uE7F4", font=("Segoe MDL2 Assets", 10), fg="#4FA3FF",
+                     bg=self.TITLE_BG).pack(side="left", padx=(px(12), px(8)))
+        name = title.split("—", 1)[-1].strip()
+        lbl = tk.Label(tb, text=f"원격  ·  {name}", font=font, fg=self.FG, bg=self.TITLE_BG, anchor="w")
+        lbl.pack(side="left", fill="x", expand=True, padx=(0 if icons else px(12), 0))
+
+        def btn(key, cmd, hover, tip):
+            b = tk.Label(tb, text=self._glyph[key], font=ifont, fg=self.FG, bg=self.TITLE_BG, width=6,
+                         cursor="hand2")
+            b.bind("<Enter>", lambda e: b.configure(bg=hover, fg="white"))
+            b.bind("<Leave>", lambda e: b.configure(bg=self.TITLE_BG, fg=self.FG))
+            b.bind("<ButtonRelease-1>", lambda e: 0 <= e.x < b.winfo_width() and 0 <= e.y < b.winfo_height()
+                   and cmd())
+            b.pack(side="right", fill="y")
+            self._tip(b, tip)
+            return b
+
+        btn("close", self.close, self.CLOSE_BG, lambda: "닫기")
+        self._full_btn = btn("full", self._toggle_full, self.HOVER_BG,
+                             lambda: "창 모드로" if self._full else "전체 화면")
+        btn("min", self._minimize, self.HOVER_BG, lambda: "최소화")
+        # 끌어서 옮기기 · 두 번 클릭 = 전체 화면 (빈 곳과 제목 글자)
+        for wdg in (tb, lbl) + tuple(c for c in tb.winfo_children() if c is not lbl and not c.cget("cursor")):
+            wdg.bind("<ButtonPress-1>", self._title_press)
+            wdg.bind("<Double-Button-1>", lambda e: self._toggle_full())
+            wdg.bind("<Motion>", self._title_motion)
+
+    def _tip(self, widget, text):
+        """잠깐 올려 두면 뜨는 작은 설명"""
+        tk = self._tk
+        state = {"job": None, "win": None}
+
+        def show():
+            state["job"] = None
+            t = state["win"] = tk.Toplevel(widget)
+            t.overrideredirect(True)
+            t.attributes("-topmost", True)
+            tk.Label(t, text=text(), bg="#2B3135", fg=self.FG, padx=self._px(8), pady=self._px(3),
+                     font=("맑은 고딕", 9)).pack()
+            t.update_idletasks()
+            x = widget.winfo_rootx() + widget.winfo_width() - t.winfo_reqwidth()
+            t.geometry(f"+{max(x, widget.winfo_rootx() - t.winfo_reqwidth())}+"
+                       f"{widget.winfo_rooty() + widget.winfo_height() + self._px(4)}")
+
+        def hide(_e=None):
+            if state["job"]:
+                widget.after_cancel(state["job"])
+                state["job"] = None
+            if state["win"]:
+                state["win"].destroy()
+                state["win"] = None
+
+        widget.bind("<Enter>", lambda e: (hide(), state.update(job=widget.after(500, show))), add="+")
+        widget.bind("<Leave>", hide, add="+")
+        widget.bind("<ButtonPress>", hide, add="+")
+
+    def _frameless(self):
+        """Windows 제목 표시줄을 없앰 — 크기 조절 테두리(왼·오른·아래)·작업 표시줄·최소화는 남기고,
+        최대화는 막음 (끌어서 화면 위에 붙여도 최대화되지 않음). 위쪽 테두리는 제목 줄 맨 위에서 대신 처리"""
+        try:
+            self.win.update_idletasks()
+            hwnd = _GetParent(self.win.winfo_id())
+            if not hwnd:
+                return
+            self._hwnd = hwnd
+
+            def proc(h, msg, wp, lp):
+                if msg == _WM_NCCALCSIZE and wp:
+                    # 기본 계산(테두리 제외)을 쓰되 위쪽만 창 끝까지 → 위쪽 흰 띠 없음
+                    rc = ctypes.cast(lp, ctypes.POINTER(wt.RECT))
+                    top = rc[0].top
+                    _CallWindowProc(old, h, msg, wp, lp)
+                    rc[0].top = top
+                    return 0
+                return _CallWindowProc(old, h, msg, wp, lp)
+
+            cb = _WNDPROC(proc)
+            old = _SetWindowLongPtr(hwnd, _GWL_WNDPROC, ctypes.cast(cb, ctypes.c_void_p).value)
+            self._wndproc = (cb, old)
+            style = _GetWindowLongPtr(hwnd, _GWL_STYLE)
+            _SetWindowLongPtr(hwnd, _GWL_STYLE, style & ~_WS_CAPTION & ~_WS_MAXIMIZEBOX)
+            _SetWindowPos(hwnd, None, 0, 0, 0, 0, _SWP_FRAMECHANGED_ONLY)
+        except Exception:
+            self._hwnd = None   # 실패하면 Windows 제목 표시줄을 그대로 씀
+
+    def _unhook(self):
+        if self._hwnd and self._wndproc:
+            try:
+                _SetWindowLongPtr(self._hwnd, _GWL_WNDPROC, self._wndproc[1])
+            except Exception:
+                pass
+        self._wndproc = None
+
+    def _title_edge(self, e) -> bool:
+        """제목 줄 맨 위 몇 픽셀 = 창 위쪽 테두리 (크기 조절)"""
+        return not self._full and e.y_root - self.win.winfo_rooty() < self._px(5)
+
+    def _title_motion(self, e):
+        try:
+            e.widget.configure(cursor="size_ns" if self._title_edge(e) else "")
+        except Exception:
+            pass
+
+    def _title_press(self, e):
+        if self._full or not self._hwnd:
+            return
+        hit = _HTTOP if self._title_edge(e) else _HTCAPTION
+        _ReleaseCapture()
+        _SendMessageW(self._hwnd, _WM_NCLBUTTONDOWN, hit, 0)   # Windows 가 옮기기·크기 조절을 처리 (화면 가장자리 붙이기 포함)
+
+    def _minimize(self):
+        self.win.iconify()
 
     # ── 공통 ─────────────────────────────
     def _req(self, route: str, params: dict, timeout):
@@ -1473,6 +1631,7 @@ class RemoteViewer:
             self._keys.clear()
             self._btns.clear()
             self._cv.notify_all()
+        self._unhook()
         try:
             self.win.destroy()
         except Exception:
@@ -1692,9 +1851,27 @@ class RemoteViewer:
         self.canvas.focus_set()
 
     def _toggle_full(self):
-        full = not bool(self.win.attributes("-fullscreen"))
-        self.win.attributes("-fullscreen", full)
-        self._full_btn.configure(text="창 모드" if full else "전체 화면")
+        """전체 화면 ↔ 창 모드. 제목 줄·도구 막대는 남기고(창 모드 버튼), 오른쪽 패널만 숨김"""
+        full = self._full = not self._full
+        if self._hwnd:
+            style = _GetWindowLongPtr(self._hwnd, _GWL_STYLE)
+            if full:
+                r = wt.RECT()
+                _GetWindowRect(self._hwnd, ctypes.byref(r))
+                self._restore = (r.left, r.top, r.right - r.left, r.bottom - r.top)
+                mi = _MONITORINFO()
+                mi.cbSize = ctypes.sizeof(mi)
+                _GetMonitorInfoW(_MonitorFromWindow(self._hwnd, 2), ctypes.byref(mi))   # 창이 있는 모니터
+                m = mi.rcMonitor
+                _SetWindowLongPtr(self._hwnd, _GWL_STYLE, style & ~_WS_THICKFRAME)
+                _SetWindowPos(self._hwnd, None, m.left, m.top, m.right - m.left, m.bottom - m.top, _SWP_PLACE)
+            else:
+                _SetWindowLongPtr(self._hwnd, _GWL_STYLE, style | _WS_THICKFRAME)
+                if self._restore:
+                    _SetWindowPos(self._hwnd, None, *self._restore, _SWP_PLACE)
+        else:
+            self.win.attributes("-fullscreen", full)
+        self._full_btn.configure(text=self._glyph["back" if full else "full"])
         if self._side is not None:
             if full:
                 self._side.pack_forget()
