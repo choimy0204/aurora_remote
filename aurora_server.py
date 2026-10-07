@@ -23,7 +23,7 @@ import sys
 import ctypes
 import aurora_update
 
-APP_VERSION = "2.13.3"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.13.4"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 번들 리소스(이미지) ──────────────
 def _resource_path(rel):
@@ -202,8 +202,9 @@ def add_log(message: str):
         if len(shared_state["log"]) > 200:
             shared_state["log"] = shared_state["log"][-200:]
 
-def push_command(ip: str, command: str, retries: int = 1, retry_delay: float = 0):
-    """retries: 총 시도 횟수 (기본 1 = 재시도 없음), retry_delay: 재시도 전 대기(초)"""
+def push_command(ip: str, command: str, retries: int = 1, retry_delay: float = 0) -> bool:
+    """retries: 총 시도 횟수 (기본 1 = 재시도 없음), retry_delay: 재시도 전 대기(초)
+    반환: 클라이언트가 받아들였는지"""
     last_exc = None
     for attempt in range(retries):
         if attempt > 0 and retry_delay:
@@ -220,12 +221,13 @@ def push_command(ip: str, command: str, retries: int = 1, retry_delay: float = 0
                     with state_lock:
                         if ip in shared_state["clients"]:
                             shared_state["clients"][ip]["aurora_path"] = new_path
-                return
+                return True
             add_log(f"[{ip}] ✗ {command[:40].upper()} (HTTP {resp.status_code})")
-            return
+            return False
         except Exception as e:
             last_exc = e
     add_log(f"[{ip}] ✗ 전달 실패 ({retries}회 시도): {last_exc}")
+    return False
 
 def send_to_online(command: str, ip_filter: list = None):
     """ip_filter가 None이면 전체 공정, 리스트면 해당 IP만"""
@@ -283,23 +285,36 @@ def ping_all_clients():
 # ─────────────────────────────────────────
 # 파일 배포 (UNC 공유 복사)
 # ─────────────────────────────────────────
-def _connect_share(ip: str, user: str, pw: str) -> bool:
-    import subprocess
-    unc = f"\\\\{ip}\\D"
-    subprocess.run(["net", "use", unc, "/delete", "/yes"], capture_output=True)
-    result = subprocess.run(
-        ["net", "use", unc, f"/user:{user}", pw, "/persistent:no"],
-        capture_output=True, text=True, encoding="cp949", errors="replace"
-    )
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "").strip()
-        add_log(f"[{ip}] net use 오류: {err}")
-    return result.returncode == 0
+DEPLOY_WORKERS = 4   # 배포 뷰 동시 복사 대수 — 더 늘리면 서버 쪽 네트워크가 병목
 
-def _disconnect_share(ip: str):
-    import subprocess
-    unc = f"\\\\{ip}\\D"
-    subprocess.run(["net", "use", unc, "/delete", "/yes"], capture_output=True)
+class _NETRESOURCE(ctypes.Structure):
+    _fields_ = [("dwScope", ctypes.c_uint32), ("dwType", ctypes.c_uint32),
+                ("dwDisplayType", ctypes.c_uint32), ("dwUsage", ctypes.c_uint32),
+                ("lpLocalName", ctypes.c_wchar_p), ("lpRemoteName", ctypes.c_wchar_p),
+                ("lpComment", ctypes.c_wchar_p), ("lpProvider", ctypes.c_wchar_p)]
+
+_mpr = ctypes.WinDLL("mpr")
+_mpr.WNetAddConnection2W.argtypes = [ctypes.POINTER(_NETRESOURCE), ctypes.c_wchar_p,
+                                     ctypes.c_wchar_p, ctypes.c_uint32]
+_mpr.WNetCancelConnection2W.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_int]
+_RESOURCETYPE_DISK, _CONNECT_TEMPORARY = 1, 4
+
+class _DeployCancelled(Exception):
+    pass
+
+def _unc_root(ip: str, drive: str = "D") -> str:
+    return f"\\\\{ip}\\{drive.rstrip(':').upper()}"
+
+def _connect_share(unc: str, user: str, pw: str) -> str | None:
+    """공유 폴더 연결. 성공 None, 실패 시 오류 메시지
+    net use 대신 WNetAddConnection2 — 비밀번호가 명령줄(작업 관리자에서 보임)에 남지 않음"""
+    _mpr.WNetCancelConnection2W(unc, 0, True)
+    nr = _NETRESOURCE(dwType=_RESOURCETYPE_DISK, lpRemoteName=unc)
+    rc = _mpr.WNetAddConnection2W(ctypes.byref(nr), pw, user, _CONNECT_TEMPORARY)
+    return None if rc == 0 else f"{ctypes.FormatError(rc).strip()} (코드 {rc})"
+
+def _disconnect_share(unc: str):
+    _mpr.WNetCancelConnection2W(unc, 0, True)
 
 def _copy_file_cancellable(src_file: str, dst_file: str,
                            cancel_event=None, chunk_size: int = 1024 * 1024) -> bool:
@@ -327,52 +342,85 @@ def _copy_file_cancellable(src_file: str, dst_file: str,
             pass
         raise
 
+def _running_from(ip: str, folder: str) -> bool:
+    """클라이언트가 보고한 Aurora 경로가 folder 안이고 Aurora 가 실행 중인지"""
+    with state_lock:
+        info = dict(shared_state["clients"].get(ip, {}))
+    path = (info.get("aurora_path") or "").strip()
+    if not (info.get("online") and info.get("aurora_running") and path):
+        return False
+    path   = os.path.normcase(os.path.normpath(path))
+    folder = os.path.normcase(os.path.normpath(folder))
+    return path == folder or path.startswith(folder + os.sep)
+
 def _deploy_to_client(ip: str, src: str, folder_name: str, user: str, pw: str,
                       progress_fn=None, file_progress_fn=None, cancel_event=None) -> bool:
-    """복사 완료 여부 반환"""
-    unc_root = f"\\\\{ip}\\D"
+    """버전 폴더 통째로 복사. 복사 완료 여부 반환
+    <대상>.__deploying 임시 폴더에 전부 복사한 뒤 이름을 바꿔 교체 —
+    중단·실패해도 기존 폴더는 그대로이고, 덜 채워진 폴더도 남지 않음"""
+    unc_root = _unc_root(ip)
     dst = f"{unc_root}\\{folder_name}"
+    tmp = dst + ".__deploying"
     connected = False
     try:
         add_log(f"[{ip}] 복사 대상: {dst}")
         if progress_fn:
             progress_fn(f"[{ip}] 연결 중...")
         if not os.path.exists(unc_root):
-            connected = _connect_share(ip, user, pw)
-            if not connected:
-                add_log(f"[{ip}] ✗ 공유 연결 실패")
+            err = _connect_share(unc_root, user, pw)
+            if err:
+                add_log(f"[{ip}] ✗ 공유 연결 실패: {err}")
                 return False
+            connected = True
         if cancel_event and cancel_event.is_set():
             return False
         if progress_fn:
             progress_fn(f"[{ip}] 복사 중...")
-        if os.path.exists(dst):
-            shutil.rmtree(dst)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.exists(tmp):          # 지난번에 끊긴 배포의 임시 폴더
+            shutil.rmtree(tmp)
+        os.makedirs(tmp)
 
         # 파일 목록 수집 후 한 파일씩 복사 (1MB 청크 — 취소 즉시 반응)
         all_files = []
         for dirpath, dirnames, filenames in os.walk(src):
-            for fname in filenames:
-                all_files.append((dirpath, fname))
-        total = len(all_files)
-        for i, (dirpath, fname) in enumerate(all_files):
-            if cancel_event and cancel_event.is_set():
-                add_log(f"[{ip}] ✗ 배포 취소됨")
-                return False
             rel = os.path.relpath(dirpath, src)
-            dst_dir = os.path.join(dst, rel) if rel != "." else dst
-            os.makedirs(dst_dir, exist_ok=True)
-            ok = _copy_file_cancellable(
-                os.path.join(dirpath, fname),
-                os.path.join(dst_dir, fname),
-                cancel_event
-            )
+            for d in dirnames:           # 빈 하위 폴더도 그대로
+                os.makedirs(os.path.join(tmp, rel, d), exist_ok=True)
+            for fname in filenames:
+                all_files.append((dirpath, rel, fname))
+        total = len(all_files)
+        for i, (dirpath, rel, fname) in enumerate(all_files):
+            if cancel_event and cancel_event.is_set():
+                add_log(f"[{ip}] ✗ 배포 취소됨 — 기존 폴더는 그대로")
+                return False
+            dst_dir = os.path.join(tmp, rel) if rel != "." else tmp
+            ok = _copy_file_cancellable(os.path.join(dirpath, fname),
+                                        os.path.join(dst_dir, fname), cancel_event)
             if not ok:
-                add_log(f"[{ip}] ✗ 배포 취소됨 ({fname})")
+                add_log(f"[{ip}] ✗ 배포 취소됨 ({fname}) — 기존 폴더는 그대로")
                 return False
             if file_progress_fn:
                 file_progress_fn(ip, i + 1, total)
+
+        # 교체 — 기존 폴더를 옆으로 치우고 임시 폴더를 제 이름으로
+        if os.path.exists(dst):
+            old = f"{dst}.__old_{datetime.now():%Y%m%d_%H%M%S}"
+            try:
+                os.rename(dst, old)
+            except OSError as e:
+                add_log(f"[{ip}] ✗ 기존 폴더를 바꿀 수 없음 (그 폴더의 프로그램이 실행 중이거나 "
+                        f"파일이 열려 있음) — 기존 폴더는 그대로: {e}")
+                return False
+            try:
+                os.rename(tmp, dst)
+            except OSError:
+                os.rename(old, dst)
+                raise
+            shutil.rmtree(old, ignore_errors=True)
+            if os.path.exists(old):
+                add_log(f"[{ip}] ⚠ 이전 폴더 일부를 지우지 못함: {old}")
+        else:
+            os.rename(tmp, dst)
 
         add_log(f"[{ip}] ✓ 복사 완료 → {dst} ({total}개 파일)")
         return True
@@ -380,140 +428,168 @@ def _deploy_to_client(ip: str, src: str, folder_name: str, user: str, pw: str,
         add_log(f"[{ip}] ✗ 복사 실패: {e}")
         return False
     finally:
+        if os.path.exists(tmp):
+            shutil.rmtree(tmp, ignore_errors=True)
         if connected:
-            _disconnect_share(ip)
+            _disconnect_share(unc_root)
 
-def deploy_selected(targets: list, deploy_src: str, user: str, pw: str,
+def deploy_selected(targets: list, deploy_src: str, creds: dict,
                     dst_folder: str = "", progress_fn=None, done_fn=None,
-                    file_progress_fn=None, cancel_event=None, inner_path: str = "") -> int:
+                    file_progress_fn=None, cancel_event=None, inner_path: str = "") -> tuple[int, int]:
     """
     targets: [(ip, src_folder_name, version_name), ...]
-    순차 배포. 반환값: 실패 클라이언트 수
+    creds:   {ip: (user, pw)}
+    DEPLOY_WORKERS 대씩 동시에 배포. 복사가 끝난 PC 는 바로 Aurora 경로 변경까지 확인.
+    done_fn(ip, ok): PC 한 대 끝날 때마다 (작업 스레드에서 호출)
+    반환: (성공 수, 실패 수) — 중단으로 시작하지 못한 PC 는 어느 쪽에도 안 셈
     """
     if not targets:
         add_log("⚠ 배포 대상이 없습니다")
-        return 0
+        return 0, 0
 
-    results = {}
-    folder_map = {}
-
-    for ip, src_folder, version in targets:
+    def _one(ip, src_folder, version):
         if cancel_event and cancel_event.is_set():
-            add_log("◆ 배포 중단됨")
-            break
+            return None
         src = os.path.join(deploy_src, src_folder, inner_path) if inner_path else os.path.join(deploy_src, src_folder)
         exe_folder = f"Aurora_EXE_{version}"
         folder_name = f"{dst_folder}\\{exe_folder}" if dst_folder else exe_folder
-        if not os.path.isdir(src):
-            add_log(f"[{ip}] ⚠ 소스 폴더 없음: {src}")
-            results[ip] = False
-            if done_fn:
-                done_fn(False)
-            continue
-        add_log(f"[{ip}] → {folder_name} 배포 시작")
-        folder_map[ip] = folder_name
-        ok = _deploy_to_client(ip, src, folder_name, user, pw,
-                               progress_fn, file_progress_fn, cancel_event)
-        results[ip] = ok
+        new_path = f"D:\\{folder_name}"
+        ok = False
+        try:
+            if not os.path.isdir(src):
+                add_log(f"[{ip}] ⚠ 소스 폴더 없음: {src}")
+            elif _running_from(ip, new_path):
+                add_log(f"[{ip}] ✗ 지금 실행 중인 Aurora 가 이 폴더({new_path})에 있음 — "
+                        f"Aurora 를 끈 뒤 다시 배포하세요")
+            else:
+                add_log(f"[{ip}] → {folder_name} 배포 시작")
+                user, pw = creds.get(ip, ("user", "1"))
+                ok = _deploy_to_client(ip, src, folder_name, user, pw,
+                                       progress_fn, file_progress_fn, cancel_event)
+                if ok and not push_command(ip, f"setpath:{new_path}", retries=3, retry_delay=1.5):
+                    add_log(f"[{ip}] ⚠ 복사는 끝났지만 Aurora 경로 변경 실패 — "
+                            f"서버 뷰 [전체 경로 적용] 으로 다시 보내세요")
+                    ok = False
+        except Exception as e:
+            add_log(f"[{ip}] ✗ 배포 오류: {e}")
+            ok = False
         if done_fn:
-            done_fn(ok)
+            done_fn(ip, ok)
+        return ok
 
-    fail_count = sum(1 for ok in results.values() if not ok)
-    if not (cancel_event and cancel_event.is_set()):
-        add_log("◆ 배포 작업 완료")
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(DEPLOY_WORKERS, len(targets))) as ex:
+        results = list(ex.map(lambda t: _one(*t), targets))
 
-    # Aurora 경로 업데이트 (성공한 클라이언트만) — 파일 전송 직후라 네트워크 안정화 대기 후 재시도
-    for ip, ok in results.items():
-        if ok:
-            new_path = f"D:\\{folder_map[ip]}"
-            threading.Thread(target=push_command,
-                             args=(ip, f"setpath:{new_path}"),
-                             kwargs={"retries": 3, "retry_delay": 1.5},
-                             daemon=True).start()
-    if any(results.values()):
-        add_log("→ Aurora 경로 업데이트 명령 전송 중 (최대 3회 재시도)")
-
-    return fail_count
+    ok_count   = sum(1 for r in results if r is True)
+    fail_count = sum(1 for r in results if r is False)
+    add_log("◆ 배포 중단됨" if cancel_event and cancel_event.is_set() else "◆ 배포 작업 완료")
+    return ok_count, fail_count
 
 
 def _single_deploy_all(src_folder: str, files: list, targets: dict, log_fn,
-                       done_fn=None) -> int:
+                       done_fn=None, cancel_event=None) -> tuple[int, int]:
     """
-    단일 파일 배포. 반환값: 실패한 클라이언트 수
+    선택한 파일만 클라이언트의 같은 경로로 복사 (PC 끼리 동시에).
+    한 PC 안에서는 '전부 바뀌거나 전부 원래대로' — 파일 하나라도 실패·중단되면
+    그 PC 에서 이번에 바꾼 파일을 모두 되돌림 (새 파일·옛 파일이 섞이지 않게).
+    기존 파일은 같은 폴더의 _backup\\<시각>\\ 로 옮김 — 프로그램이 폴더의 *.dll 등을 읽어도 백업본은 안 읽히게.
     targets: {ip: (user, pw)}
-    done_fn(ip, success): PC 한 대 완료될 때마다 호출 (병렬 스레드에서 호출됨)
+    done_fn(ip, success): PC 한 대 끝날 때마다 — 성공·실패·중단 모두 반드시 호출 (작업 스레드에서)
+    반환: (성공 수, 실패 수)
     """
-    import subprocess
-
     normalized = os.path.normpath(src_folder)
-    failed = []
+    drive, rel = os.path.splitdrive(normalized)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results = {}
 
-    def _derive_dst_folder(src: str, ip: str) -> str:
-        drive, rel = os.path.splitdrive(src)
-        letter = drive.rstrip(":").upper()
-        return f"\\\\{ip}\\{letter}" + rel
+    def _rollback(ip, replaced):
+        for dst_file, backup in reversed(replaced):
+            try:
+                if os.path.exists(dst_file):
+                    os.remove(dst_file)
+                if backup:
+                    os.rename(backup, dst_file)
+            except OSError as e:
+                log_fn(f"[{ip}] ✗✗ 되돌리기 실패: {os.path.basename(dst_file)} — {e}"
+                       + (f" (원본: {backup})" if backup else ""))
+        if replaced:
+            log_fn(f"[{ip}] ↺ 바꾼 파일 {len(replaced)}개를 원래대로 되돌림")
 
-    def _deploy_single_to_client(ip: str, user: str, pw: str):
-        dst_folder = _derive_dst_folder(normalized, ip)
-        unc_root   = f"\\\\{ip}\\{os.path.splitdrive(normalized)[0].rstrip(':').upper()}"
+    def _one(ip: str, user: str, pw: str):
+        unc_root   = _unc_root(ip, drive)
+        dst_folder = unc_root + rel
+        backup_dir = os.path.join(dst_folder, "_backup", ts)
         connected  = False
         success    = False
+        replaced   = []      # (대상 파일, 백업 경로 또는 None) — 되돌리기용
+        pending    = None    # 복사 중인 임시 파일
         try:
+            if cancel_event and cancel_event.is_set():
+                raise _DeployCancelled
             log_fn(f"[{ip}] 복사 대상: {dst_folder}")
-
             if not os.path.exists(unc_root):
-                subprocess.run(["net", "use", unc_root, "/delete", "/yes"],
-                               capture_output=True)
-                result = subprocess.run(
-                    ["net", "use", unc_root, f"/user:{user}", pw, "/persistent:no"],
-                    capture_output=True, text=True, encoding="cp949", errors="replace"
-                )
-                if result.returncode != 0:
-                    err = (result.stderr or result.stdout or "").strip()
+                err = _connect_share(unc_root, user, pw)
+                if err:
                     log_fn(f"[{ip}] ✗ 공유 연결 실패: {err}")
-                    failed.append(ip)
                     return
                 connected = True
-
             os.makedirs(dst_folder, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             for fname in files:
-                src_file = os.path.join(normalized, fname)
+                if cancel_event and cancel_event.is_set():
+                    raise _DeployCancelled
                 dst_file = os.path.join(dst_folder, fname)
-
+                # 새 파일을 먼저 임시 이름으로 다 받은 뒤 교체 — 복사 도중 끊겨도 기존 파일은 멀쩡
+                pending = dst_file + ".__deploying"
+                if not _copy_file_cancellable(os.path.join(normalized, fname), pending, cancel_event):
+                    raise _DeployCancelled
+                backup = None
                 if os.path.exists(dst_file):
-                    name, ext = os.path.splitext(fname)
-                    backup_name = f"{name}_{ts}{ext}"
-                    backup_path = os.path.join(dst_folder, backup_name)
-                    os.rename(dst_file, backup_path)
-                    log_fn(f"[{ip}] 백업: {fname} → {backup_name}")
-
-                shutil.copy2(src_file, dst_file)
-                log_fn(f"[{ip}] ✓ 복사: {fname}")
+                    os.makedirs(backup_dir, exist_ok=True)
+                    backup = os.path.join(backup_dir, fname)
+                    os.rename(dst_file, backup)
+                replaced.append((dst_file, backup))
+                os.rename(pending, dst_file)
+                pending = None
+                log_fn(f"[{ip}] ✓ 복사: {fname}" + (f"  (기존 → _backup\\{ts})" if backup else ""))
 
             log_fn(f"[{ip}] ◆ 완료 → {dst_folder}")
             success = True
+        except _DeployCancelled:
+            log_fn(f"[{ip}] ■ 중단")
         except Exception as e:
             log_fn(f"[{ip}] ✗ 오류: {e}")
-            failed.append(ip)
         finally:
+            if pending and os.path.exists(pending):
+                try:
+                    os.remove(pending)
+                except OSError:
+                    pass
+            if not success:
+                _rollback(ip, replaced)
+                try:
+                    os.rmdir(backup_dir)                       # 비었으면 정리
+                    os.rmdir(os.path.dirname(backup_dir))
+                except OSError:
+                    pass
             if connected:
-                subprocess.run(["net", "use", unc_root, "/delete", "/yes"],
-                               capture_output=True)
-        if done_fn:
-            done_fn(ip, success)
+                _disconnect_share(unc_root)
+            results[ip] = success
+            if done_fn:
+                done_fn(ip, success)
 
     threads = [
-        threading.Thread(target=_deploy_single_to_client, args=(ip, user, pw), daemon=True)
+        threading.Thread(target=_one, args=(ip, user, pw), daemon=True)
         for ip, (user, pw) in targets.items()
     ]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    log_fn("◆ 단일 배포 전체 완료")
-    return len(failed)
+    ok = sum(1 for v in results.values() if v)
+    log_fn("◆ 단일 배포 " + ("중단됨" if cancel_event and cancel_event.is_set() else "전체 완료"))
+    return ok, len(results) - ok
 
 
 def run_http_server():
@@ -754,8 +830,8 @@ class AuroraServerApp:
         "마지막 응답": "마지막 상태 보고를 받은 뒤 경과한 시간입니다. 5초 미만 녹색, 10초 미만 노랑, 그 이상은 회색입니다.",
         "핑": "서버에서 클라이언트로 보낸 핑 응답 시간입니다. 10ms 미만 녹색, 50ms 미만 노랑, 그 이상·시간초과 빨강입니다. "
              "갱신은 핑 모드(Manual/Auto)를 따릅니다.",
-        "ID": "단일 배포 시 이 PC 의 공유 폴더(\\\\IP\\드라이브)에 접속할 Windows 계정 ID 입니다. 입력 즉시 설정 파일에 저장됩니다.",
-        "PW": "단일 배포 시 이 PC 공유 폴더에 접속할 계정의 비밀번호입니다. 입력 즉시 설정 파일에 저장됩니다.",
+        "ID": "배포·단일 배포 시 이 PC 의 공유 폴더(\\\\IP\\드라이브)에 접속할 Windows 계정 ID 입니다. 입력 즉시 설정 파일에 저장됩니다.",
+        "PW": "배포·단일 배포 시 이 PC 공유 폴더에 접속할 계정의 비밀번호입니다. 입력 즉시 설정 파일에 저장됩니다.",
         "경로": "클라이언트가 보고한 Aurora 실행 경로입니다. 배포 완료 후 setpath 로 갱신되며, 아직 없으면 —로 표시됩니다.",
         "선택": "체크한 클라이언트만 배포 대상이 됩니다.",
         "소스 폴더 선택": "이 클라이언트에 복사할 소스 폴더입니다. 목록은 배포 소스 폴더의 하위 폴더이며, "
@@ -806,6 +882,8 @@ class AuroraServerApp:
         self.single_client_vars       = {}   # {ip: BooleanVar}
         self.single_client_users      = {}   # {ip: StringVar} — 서버 뷰에서 관리
         self.single_client_pws        = {}   # {ip: StringVar} — 서버 뷰에서 관리
+        self._deploy_busy             = False   # 배포·단일 배포 중 — 둘 다 같은 공유 연결을 쓰므로 한 번에 하나만
+        self._single_applied_src      = ""      # 단일 배포 [적용] 때의 폴더 — 파일 목록은 이 폴더 기준
         self.single_client_status_lbls = {}  # {ip: Label} — 배포 상태 표시
 
         self._build_ui()
@@ -1179,8 +1257,12 @@ class AuroraServerApp:
                  font=self.FONT_SMALL, padx=_px(8), pady=_px(2), fg=self.TEXT_DIM, bg=self.PANEL)
         self.single_status_lbl.pack(side="left")
         self._tip_key(self.single_status_lbl, "단일 배포 상태 메시지")
+        self.single_stop_btn = self._btn(ctrl_row, "■ 중단", self.BTN_STOP, self.BTN_STOP_H,
+                                         self._single_deploy_stop, padx=20, pady=9)
+        self.single_stop_btn.pack(side="right")
+        self.single_stop_btn.config(state="disabled")
         self._btn(ctrl_row, "▲ 배포하기", self.BTN_DEPLOY, self.BTN_DEPLOY_H,
-                  self._single_deploy_cmd, padx=20, pady=9).pack(side="right")
+                  self._single_deploy_cmd, padx=20, pady=9).pack(side="right", padx=(0, _px(8)))
 
         # ── 진행 상황 프로그레스바 ────────
         prog_panel = tk.Frame(ctrl_body, bg=self.PANEL)
@@ -1831,6 +1913,7 @@ class AuroraServerApp:
         for w in self.single_file_frame.winfo_children():
             w.destroy()
         self.single_file_vars = {}
+        self._single_applied_src = os.path.normpath(src)
 
         if not files:
             tk.Label(self.single_file_frame, text="파일이 없습니다",
@@ -1880,37 +1963,72 @@ class AuroraServerApp:
             v.set(False)
 
     def _single_log(self, msg: str):
-        ts = datetime.now().strftime("%H:%M:%S")
-        line = f"[{ts}] {msg}"
+        """작업 스레드에서 불려도 됨 — 화면 쓰기는 항상 Tk 스레드로 넘김 (다른 스레드에서 위젯을 만지면 프로그램이 죽을 수 있음)"""
         add_log(msg)
-        self.single_log_text.config(state="normal")
-        self.single_log_text.insert("end", line + "\n")
-        self.single_log_text.see("end")
-        self.single_log_text.config(state="disabled")
+        line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        def _ui():
+            self.single_log_text.config(state="normal")
+            self.single_log_text.insert("end", line + "\n")
+            self.single_log_text.see("end")
+            self.single_log_text.config(state="disabled")
+        if threading.current_thread() is threading.main_thread():
+            _ui()
+        else:
+            self.root.after(0, _ui)
+
+    def _deploy_creds(self, ip: str) -> tuple:
+        """서버 뷰 표의 PC별 ID/PW (없으면 설정 파일 기본값) — 배포·단일 배포 공용"""
+        if ip in self.single_client_users:
+            return self.single_client_users[ip].get(), self.single_client_pws[ip].get()
+        return config.get("deploy_user", "user"), config.get("deploy_pw", "1")
+
+    def _begin_deploy(self) -> bool:
+        if self._deploy_busy:
+            messagebox.showwarning("알림", "다른 배포가 진행 중입니다. 끝난 뒤 다시 시도하세요.", parent=self.root)
+            return False
+        self._deploy_busy = True
+        return True
+
+    def _single_deploy_stop(self):
+        if hasattr(self, "_single_cancel"):
+            self._single_cancel.set()
+        self.single_stop_btn.config(state="disabled")
 
     def _single_deploy_cmd(self):
         src = self.single_src_var.get().strip()
         if not src or not os.path.isdir(src):
             messagebox.showerror("오류", "소스 폴더를 먼저 선택하고 [적용]하세요.", parent=self.root)
             return
+        if os.path.normpath(src) != self._single_applied_src:
+            messagebox.showerror("오류", "소스 폴더가 [적용] 이후 바뀌었습니다.\n[적용]을 다시 눌러 파일 목록을 새로 불러오세요.",
+                                 parent=self.root)
+            return
 
         checked_files = [f for f, v in self.single_file_vars.items() if v.get()]
         if not checked_files:
             messagebox.showwarning("알림", "배포할 파일을 선택하세요.", parent=self.root)
             return
+        missing = [f for f in checked_files if not os.path.isfile(os.path.join(src, f))]
+        if missing:
+            messagebox.showerror("오류", "소스 폴더에서 사라진 파일이 있습니다. [적용]을 다시 누르세요.\n\n"
+                                 + "\n".join(missing[:10]), parent=self.root)
+            return
 
         # {ip: (user, pw)}
-        checked_targets = {
-            ip: (self.single_client_users[ip].get(), self.single_client_pws[ip].get())
-            for ip, v in self.single_client_vars.items() if v.get()
-        }
+        checked_targets = {ip: self._deploy_creds(ip)
+                           for ip, v in self.single_client_vars.items() if v.get()}
         if not checked_targets:
             messagebox.showwarning("알림", "배포 대상 클라이언트를 선택하세요.", parent=self.root)
+            return
+        if not self._begin_deploy():
             return
 
         total      = len(checked_targets)
         cur_ips    = set(config.get("current_process_ips", []))
         cur_total  = len([ip for ip in checked_targets if ip in cur_ips])
+        self._single_cancel = threading.Event()
+        cancel = self._single_cancel
+        self.single_stop_btn.config(state="normal")
 
         self._set_badge(self.single_status_lbl,
                         f"배포 중... ({total}대 / {len(checked_files)}개 파일)", self.YELLOW)
@@ -1931,36 +2049,43 @@ class AuroraServerApp:
             else:
                 self._set_badge(self.single_client_status_lbls[ip], "배포 예정", self.TEXT_DIM)
 
-        completed_all = [0]
-        completed_cur = [0]
+        completed = {"all": 0, "cur": 0}   # Tk 스레드에서만 고침
 
         def done_fn(ip, success):
-            completed_all[0] += 1
-            if ip in cur_ips:
-                completed_cur[0] += 1
-            status_text = "배포 완료" if success else "✗ 실패"
-            status_fg   = self.GREEN if success else self.RED
-            ca = completed_all[0]
-            cc = completed_cur[0]
+            if success:
+                status_text, status_fg = "배포 완료", self.GREEN
+            elif cancel.is_set():
+                status_text, status_fg = "■ 중단 (원래대로)", self.TEXT_DIM
+            else:
+                status_text, status_fg = "✗ 실패 (원래대로)", self.RED
             def _ui():
+                completed["all"] += 1
+                if ip in cur_ips:
+                    completed["cur"] += 1
                 if ip in self.single_client_status_lbls:
                     self._set_badge(self.single_client_status_lbls[ip], status_text, status_fg)
-                self.prog_all["value"] = ca
-                self.prog_all_lbl.config(text=f"{ca} / {total}")
-                self.prog_cur["value"] = cc
-                self.prog_cur_lbl.config(text=f"{cc} / {cur_total}")
+                self.prog_all["value"] = completed["all"]
+                self.prog_all_lbl.config(text=f"{completed['all']} / {total}")
+                self.prog_cur["value"] = completed["cur"]
+                self.prog_cur_lbl.config(text=f"{completed['cur']} / {cur_total}")
             self.root.after(0, _ui)
 
         def run():
-            fail_count = _single_deploy_all(src, checked_files, checked_targets,
-                                            self._single_log, done_fn)
-            ok = total - fail_count
-            if fail_count == 0:
-                self.root.after(0, lambda: self._set_badge(
-                    self.single_status_lbl, f"✓ 배포 완료 ({total}대)", self.GREEN))
-            else:
-                self.root.after(0, lambda: self._set_badge(
-                    self.single_status_lbl, f"⚠ 완료 {ok}대 / 실패 {fail_count}대", self.YELLOW))
+            ok, fail = 0, total
+            try:
+                ok, fail = _single_deploy_all(src, checked_files, checked_targets,
+                                              self._single_log, done_fn, cancel)
+            finally:
+                def _finish():
+                    self._deploy_busy = False
+                    self.single_stop_btn.config(state="disabled")
+                    if cancel.is_set():
+                        self._set_badge(self.single_status_lbl, f"■ 중단됨 (완료 {ok}대)", self.RED)
+                    elif fail == 0:
+                        self._set_badge(self.single_status_lbl, f"✓ 배포 완료 ({total}대)", self.GREEN)
+                    else:
+                        self._set_badge(self.single_status_lbl, f"⚠ 완료 {ok}대 / 실패 {fail}대", self.YELLOW)
+                self.root.after(0, _finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2072,9 +2197,10 @@ class AuroraServerApp:
         if not targets:
             messagebox.showwarning("알림", "배포할 클라이언트를 선택하세요.", parent=self.root)
             return
+        if not self._begin_deploy():
+            return
 
-        user       = config.get("deploy_user", "user")
-        pw         = config.get("deploy_pw",   "1")
+        creds      = {ip: self._deploy_creds(ip) for ip, _, _ in targets}
         dst_folder = self.deploy_dst_folder_var.get().strip()
 
         summary = ", ".join(f"{ip}→{folder}" for ip, folder, _ in targets)
@@ -2083,6 +2209,7 @@ class AuroraServerApp:
         save_config(config)
         total = len(targets)
         self._deploy_cancel = threading.Event()
+        cancel = self._deploy_cancel
         self._set_badge(self.deploy_status_lbl, f"배포 중... ({total}대)", self.YELLOW)
         self.deploy_progress_overall.configure(maximum=total, value=0)
         self.deploy_overall_lbl.config(text=f"0 / {total}")
@@ -2091,10 +2218,11 @@ class AuroraServerApp:
         for ip_t, _, _ in targets:
             if ip_t in self.deploy_row_progress:
                 self.deploy_row_progress[ip_t].configure(maximum=100, value=0)
-                self.deploy_row_prog_lbl[ip_t].config(text="")
-        add_log(f"▲ 배포 시작 — 버전: {version}  추가경로: {dst_folder or '없음'}  대상: {summary}")
+                self.deploy_row_prog_lbl[ip_t].config(text="대기")
+        add_log(f"▲ 배포 시작 — 버전: {version}  추가경로: {dst_folder or '없음'}  "
+                f"동시 {min(DEPLOY_WORKERS, total)}대  대상: {summary}")
 
-        done_count = [0]
+        done_count = [0]   # Tk 스레드에서만 고침
 
         def _progress(msg):
             self.root.after(0, lambda m=msg: self._set_badge(
@@ -2107,33 +2235,33 @@ class AuroraServerApp:
                     self.deploy_row_prog_lbl[_ip].config(text=f"{c}/{t}")
             self.root.after(0, _update)
 
-        def _on_client_done(ok):
-            done_count[0] += 1
-            n = done_count[0]
-            def _update(v=n):
-                self.deploy_progress_overall.configure(value=v)
-                self.deploy_overall_lbl.config(text=f"{v} / {total}")
+        def _on_client_done(ip_t, ok):
+            def _update():
+                done_count[0] += 1
+                self.deploy_progress_overall.configure(value=done_count[0])
+                self.deploy_overall_lbl.config(text=f"{done_count[0]} / {total}")
+                if ip_t in self.deploy_row_prog_lbl:
+                    self.deploy_row_prog_lbl[ip_t].config(text="완료" if ok else "실패")
             self.root.after(0, _update)
 
         def run():
-            fail_count = deploy_selected(targets, src, user, pw, dst_folder,
-                                         _progress, _on_client_done,
-                                         _file_progress, self._deploy_cancel,
-                                         config.get("deploy_inner_path", ""))
-            ok_count = total - fail_count
-            cancelled = self._deploy_cancel.is_set()
-            def _finish(f=fail_count, o=ok_count, c=cancelled):
-                self.deploy_stop_btn.config(state="disabled")
-                if c:
-                    self._set_badge(self.deploy_status_lbl, f"■ 중단됨 (완료 {o}대)", self.RED)
-                elif f == 0:
-                    self._set_badge(self.deploy_status_lbl, f"✓ 배포 완료 ({total}대)", self.GREEN)
-                    self.deploy_progress_overall.configure(value=total)
-                    self.deploy_overall_lbl.config(text=f"{total} / {total}")
-                else:
-                    self._set_badge(
-                        self.deploy_status_lbl, f"⚠ 완료 {ok_count}대 / 실패 {f}대", self.YELLOW)
-            self.root.after(0, _finish)
+            ok_count, fail_count = 0, total
+            try:
+                ok_count, fail_count = deploy_selected(
+                    targets, src, creds, dst_folder, _progress, _on_client_done,
+                    _file_progress, cancel, config.get("deploy_inner_path", ""))
+            finally:
+                def _finish(f=fail_count, o=ok_count, c=cancel.is_set()):
+                    self._deploy_busy = False
+                    self.deploy_stop_btn.config(state="disabled")
+                    if c:
+                        self._set_badge(self.deploy_status_lbl, f"■ 중단됨 (완료 {o}대)", self.RED)
+                    elif f == 0:
+                        self._set_badge(self.deploy_status_lbl, f"✓ 배포 완료 ({total}대)", self.GREEN)
+                    else:
+                        self._set_badge(
+                            self.deploy_status_lbl, f"⚠ 완료 {o}대 / 실패 {f}대 — LOG 확인", self.YELLOW)
+                self.root.after(0, _finish)
 
         threading.Thread(target=run, daemon=True).start()
 
