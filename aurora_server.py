@@ -23,7 +23,7 @@ import sys
 import ctypes
 import aurora_update
 
-APP_VERSION = "2.13.4"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.14.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 번들 리소스(이미지) ──────────────
 def _resource_path(rel):
@@ -782,6 +782,9 @@ class AuroraServerApp:
         # 헤더 / 사이드바
         "SERVER": "이 프로그램이 서버(관리 PC) 역할로 실행 중임을 나타내는 표시입니다.",
         "버전": "현재 실행 중인 서버 버전입니다. D:\\RemoteConfig\\Update 폴더에 새 버전(AuroraServer.exe + version.json)을 넣어두면 켜질 때 자동으로 업데이트 후 재시작합니다. '최신 버전 확인' 을 누르면 바로 확인해 새 버전이면 업데이트 후 재시작합니다.",
+        "클라이언트 업데이트": "온라인 클라이언트 전체에 업데이트 신호를 보냅니다. 각 PC 의 D:\\RemoteConfig\\Update 에 새 버전이 있으면 "
+                             "교체 후 창 없이 트레이로 다시 켜지고, 없으면 아무것도 하지 않습니다. Aurora 는 끄지 않습니다. "
+                             "Update 폴더에는 AuroraDeploy.exe 로 미리 파일을 넣어 두세요. (v2.14.0 이상 클라이언트만 신호를 알아들음)",
         "온라인 카운트": "온라인 클라이언트 수 / 등록된 전체 클라이언트 수입니다. "
                         "클라이언트는 3초마다 상태를 보고하며, 10초 이상 보고가 없으면 오프라인으로 바뀝니다. "
                         "화면은 2초마다 갱신됩니다.",
@@ -927,6 +930,9 @@ class AuroraServerApp:
         self._update_btn = self._sec_btn(hdr, "최신 버전 확인", lambda: self._check_update(manual=True))
         self._update_btn.pack(side="right", padx=(0, _px(16)))
         self._tip_key(self._update_btn, "버전")
+        client_upd_btn = self._sec_btn(hdr, "클라이언트 업데이트", self._cmd_update_clients)
+        client_upd_btn.pack(side="right", padx=(0, _px(8)))
+        self._tip_key(client_upd_btn, "클라이언트 업데이트")
 
         tk.Frame(self.root, bg=self.BORDER, height=max(1, _px(1))).pack(fill="x")
 
@@ -2466,6 +2472,22 @@ class AuroraServerApp:
             return
         add_log(f"■ [현재 공정] 종료 명령 발행 ({len(ips)}대)")
         threading.Thread(target=send_to_online, args=("stop", ips), daemon=True).start()
+
+    def _cmd_update_clients(self):
+        with state_lock:
+            n = sum(1 for v in shared_state["clients"].values() if v["online"])
+        if not n:
+            messagebox.showwarning("알림", "온라인 클라이언트가 없습니다.", parent=self.root)
+            return
+        if not messagebox.askyesno(
+                "클라이언트 업데이트",
+                f"온라인 클라이언트 {n}대에 업데이트 신호를 보냅니다.\n\n"
+                "각 PC 의 D:\\RemoteConfig\\Update 에 새 버전이 있으면 교체 후 "
+                "창 없이 트레이로 다시 켜집니다. (Aurora 는 끄지 않음)\n"
+                "새 버전이 없는 PC 는 아무것도 하지 않습니다.\n\n보낼까요?", parent=self.root):
+            return
+        add_log(f"⬆ [클라이언트 업데이트] 신호 발행 ({n}대)")
+        threading.Thread(target=send_to_online, args=("update",), daemon=True).start()
 
     # ── 주기 갱신 ────────────────────────
     def _refresh_loop(self):

@@ -80,8 +80,8 @@ def mark_tried(kind: str, version: str):
         pass
 
 
-def apply(kind: str, new_exe: str, version: str) -> str | None:
-    """새 exe 로 교체 후 재시작하는 스크립트를 띄운다.
+def apply(kind: str, new_exe: str, version: str, args: list | None = None) -> str | None:
+    """새 exe 로 교체 후 재시작하는 스크립트를 띄운다. args: 재시작할 때 넘길 인자 (예: ["--tray"])
     성공하면 None (호출 측은 즉시 프로그램을 종료해야 함), 실패하면 오류 메시지."""
     if not getattr(sys, "frozen", False):
         return "개발 환경(.py 실행)에서는 자동 업데이트를 할 수 없습니다 (EXE 에서만 동작)"
@@ -96,6 +96,7 @@ def apply(kind: str, new_exe: str, version: str) -> str | None:
 
     # 현재 프로세스(onefile 부트로더 포함)가 끝나 exe 잠금이 풀릴 때까지 move 를 재시도한 뒤 재시작
     bat = os.path.join(tempfile.gettempdir(), f"aurora_{kind}_update.bat")
+    extra = "".join(f' "{a}"' for a in (args or []))
     script = (
         "@echo off\r\n"
         "chcp 65001 >nul\r\n"
@@ -106,7 +107,7 @@ def apply(kind: str, new_exe: str, version: str) -> str | None:
         "set /a N+=1\r\n"
         "if %N% lss 60 goto :retry\r\n"
         ":run\r\n"
-        f'start "" "{target}"\r\n'
+        f'start "" "{target}"{extra}\r\n'
         'del "%~f0"\r\n'
     )
     try:

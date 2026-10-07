@@ -32,7 +32,7 @@ from PIL import ImageTk
 import aurora_update
 import aurora_remote
 
-APP_VERSION = "2.13.4"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.14.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -945,6 +945,10 @@ def handle_command(cmd: str):
     elif cmd == "ping":
         threading.Thread(target=ping_all_servers, daemon=True).start()
 
+    elif cmd == "update":
+        # Update 폴더에 새 버전이 있으면 교체 후 창 없이 트레이로 재시작 (Aurora 는 건드리지 않음)
+        app_instance.root.after(0, lambda: app_instance._check_update(manual=False, remote=True))
+
 # ─────────────────────────────────────────
 # 부팅 시 자동 실행 (클라이언트 자신)
 # ─────────────────────────────────────────
@@ -1701,7 +1705,7 @@ class AuroraClientApp:
         "서버 포트": "서버로 상태를 보고할 때 쓰는 서버 쪽 포트입니다(기본 9000). 1024~65535 범위이며 '적용' 후 프로그램을 다시 시작해야 반영됩니다.",
         "수신 포트": "서버 명령(start/stop/setpath/ping/setpingmode)과 반출 요청을 받는 이 PC의 포트입니다(기본 9001). 1024~65535 범위이며 '적용' 후 프로그램을 다시 시작해야 반영됩니다.",
         "자동 시작": "PC에 로그인할 때 이 클라이언트를 자동 실행하도록 현재 사용자(HKCU)의 Run 레지스트리에 등록하거나 해제합니다. 기본값은 ON 이며, 직접 OFF 로 바꾼 경우에만 꺼진 상태가 유지됩니다.",
-        "버전": "현재 실행 중인 클라이언트 버전입니다. D:\\RemoteConfig\\Update 폴더에 새 버전(AuroraClient.exe + version.json)을 넣어두면 켜질 때 자동으로 업데이트 후 재시작합니다. '최신 버전 확인' 을 누르면 바로 확인해 새 버전이면 업데이트 후 재시작합니다.",
+        "버전": "현재 실행 중인 클라이언트 버전입니다. D:\\RemoteConfig\\Update 폴더에 새 버전(AuroraClient.exe + version.json)을 넣어두면 켜질 때 자동으로 업데이트 후 재시작합니다. '최신 버전 확인' 을 누르면 바로 확인해 새 버전이면 업데이트 후 재시작합니다. 서버의 [클라이언트 업데이트] 신호를 받으면 같은 확인을 하고, 창 없이 트레이로 재시작합니다.",
         "수동 제어": "서버 명령과 별개로 이 PC에서 Aurora 를 직접 실행·종료하는 긴급용 영역입니다. 실행은 이미 켜져 있으면 하지 않고, 종료는 실행 경로의 exe 와 이름이 같은 프로세스를 모두 강제 종료합니다.",
         "LOG": "명령 수신, 서버 추가·삭제, 포트·경로 변경 등 클라이언트 동작 기록입니다. 최근 40줄만 표시합니다.",
         "실행 프로그램": "서버 명령이나 수동 제어로 실행·종료할 Aurora 프로그램을 지정하는 영역입니다.",
@@ -3862,9 +3866,10 @@ class AuroraClientApp:
             time.sleep(STATUS_INTERVAL)
 
     # ── 자동 업데이트 (RemoteConfig\Update) ──
-    def _check_update(self, manual: bool):
+    def _check_update(self, manual: bool, remote: bool = False):
         """manual=False: 시작 시 자동 확인 (같은 버전 자동 시도는 1회만)
-        manual=True : 버튼 — 결과를 팝업으로 알림"""
+        manual=True : 버튼 — 결과를 팝업으로 알림
+        remote=True : 서버의 업데이트 신호 — 팝업 없이 적용, 창 없이 트레이로 재시작"""
         def _do():
             res = aurora_update.check("client", APP_VERSION)
             self.root.after(0, lambda: self._update_lbl.config(
@@ -3872,12 +3877,15 @@ class AuroraClientApp:
             if res["status"] != "newer":
                 if manual:
                     self.root.after(0, lambda: messagebox.showinfo("업데이트", res["msg"], parent=self.root))
+                elif remote:
+                    self.add_log(f"⬆ 업데이트 신호 수신 — {res['msg']}")
                 return
-            if not manual and aurora_update.auto_already_tried("client", res["version"]):
+            if not manual and not remote and aurora_update.auto_already_tried("client", res["version"]):
                 self.add_log(f"⚠ v{res['version']} 자동 업데이트를 이미 시도했지만 버전이 그대로입니다 — Update 폴더의 exe 확인 필요")
                 return
             self.add_log(f"⬆ {res['msg']} — 업데이트 후 재시작합니다")
-            err = aurora_update.apply("client", res["exe"], res["version"])
+            err = aurora_update.apply("client", res["exe"], res["version"],
+                                      ["--tray"] if remote else None)
             if err:
                 self.add_log(f"업데이트 실패: {err}")
                 if manual:
@@ -4138,6 +4146,9 @@ def load_tray_icon(ico_name):
 def main():
     _acquire_lock(19701)
     root = tk.Tk()
+    start_in_tray = "--tray" in sys.argv[1:]   # 서버 업데이트 신호로 재시작된 경우 — 창 없이 트레이로
+    if start_in_tray:
+        root.withdraw()
 
     # 창 아이콘 설정 (타이틀바 + 작업표시줄)
     _ico_search = [
@@ -4153,6 +4164,8 @@ def main():
     AuroraClientApp.setup_styles()
 
     app = AuroraClientApp(root)
+    if start_in_tray:
+        app.add_log(f"업데이트 완료 (v{APP_VERSION}) — 트레이에서 실행 중")
 
     tray_icon_img = load_tray_icon("aurora_client.ico")
     tray = None
