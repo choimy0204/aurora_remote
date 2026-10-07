@@ -32,7 +32,7 @@ from PIL import ImageTk
 import aurora_update
 import aurora_remote
 
-APP_VERSION = "2.13.2"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.13.3"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -191,8 +191,9 @@ def _main_exe_path() -> str:
     return own if os.path.isfile(own) else os.path.join(path, "Aurora.exe")
 
 def _main_exe_name() -> str:
-    """실행/감시 대상 exe 이름"""
-    return os.path.basename(_main_exe_path()).lower()
+    """켜짐/중지 감지·종료 대상 exe 이름 — 경로 설정과 무관하게 항상 Aurora.exe
+    (실행 경로는 실행할 때만 씀. 경로가 틀려도 Aurora.exe 가 떠 있으면 실행중)"""
+    return "aurora.exe"
 
 def is_main_running() -> bool:
     """실행 대상 프로그램이 현재 켜져 있는지 확인 (PID 캐싱)"""
