@@ -1,6 +1,6 @@
 #!/bin/sh
 # 커밋할 때 소스(.py/.spec/.ico/assets/build.bat)가 바뀌었으면 dist 를 새로 빌드해 같이 커밋한다.
-#   dist/latest/        최신 버전 (D:\RemoteConfig\Update 에 넣으면 자동 업데이트)
+#   dist/latest/        최신 버전 (D:\RemoteVersion 에 넣으면 자동 업데이트)
 #   dist/old/v<버전>/   APP_VERSION 이 바뀔 때 이전 latest 를 보관
 # 빌드 없이 커밋하려면:  AURORA_SKIP_BUILD=1 git commit ...
 # 최초 1회 설정:         git config core.hooksPath .githooks

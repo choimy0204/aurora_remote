@@ -6,10 +6,11 @@ deploy.bat 본체 — 각 PC 의 D 드라이브 공유(\\\\IP\\D)에 Aurora 를 
   나머지 PC : Client 만 설치
 
 각 PC 에 만드는 것
-  D:\\AuroraRemote\\            AuroraClient.exe (+ 서버 PC 는 AuroraServer.exe), 매뉴얼
+  D:\\RemoteConfig\\Update\\    실행 폴더 — AuroraClient.exe (+ 서버 PC 는 AuroraServer.exe), version.json, 매뉴얼
+                                → 실행 중인 exe 는 이름을 *.old 로 비켜 두고 새 exe 를 넣음 (다음 실행부터 새 버전)
   D:\\RemoteConfig\\            client_config.json (+ 서버 PC 는 server_config.json)
                                 → 이미 있으면 그 PC 설정을 지키기 위해 덮어쓰지 않음 (--overwrite-config 로 강제)
-  D:\\RemoteConfig\\Update\\    새 exe + version.json → 이미 실행 중인 프로그램이 스스로 업데이트
+  D:\\RemoteVersion\\           새 exe + version.json → 켜져 있는 프로그램이 업데이트 신호·재시작 때 여기서 가져감
 
 사용:
   deploy.bat                         전체 PC (확인 후 진행)
@@ -74,6 +75,42 @@ def copy(src: str, dst: str) -> str:
         return "잠김"   # 대상 PC 에서 실행 중인 exe
 
 
+def replace_running(src: str, dst: str) -> str:
+    """실행 중이라 덮어쓸 수 없는 exe — 이름 바꾸기는 되므로 *.old 로 비켜 두고 새 파일을 넣는다.
+    지금 떠 있는 프로그램은 그대로 돌고, 다음 실행(업데이트 신호·재부팅)부터 새 버전. '교체' / '잠김' 반환"""
+    for n in range(10):
+        old = dst + (".old" if n == 0 else f".old{n}")
+        try:
+            if os.path.exists(old):
+                os.remove(old)   # 예전에 비켜 둔 파일 — 아직 실행 중이면 지워지지 않으므로 다음 이름
+            os.rename(dst, old)
+            break
+        except OSError:
+            continue
+    else:
+        return "잠김"
+    try:
+        shutil.copy2(src, dst)
+        return "교체"
+    except OSError:
+        os.rename(old, dst)   # 복사 실패 → 원래대로
+        return "잠김"
+
+
+def remove_old(folder: str):
+    """지난 배포에서 비켜 둔 *.old* exe 정리 (아직 실행 중이면 남겨 둠)"""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for n in names:
+        if ".exe.old" in n.lower():
+            try:
+                os.remove(os.path.join(folder, n))
+            except OSError:
+                pass
+
+
 def share_root(ip: str) -> str:
     return f"\\\\{ip}\\D"
 
@@ -95,7 +132,7 @@ def deploy_one(ip: str, name: str, is_server: bool, src: str, cfg: dict, args) -
     tag = f"[{name} {ip}]"
     exes = [CLIENT_EXE, SERVER_EXE] if is_server else [CLIENT_EXE]
     if args.dry:
-        log(f"{tag} {role} → D:\\AuroraRemote, D:\\RemoteConfig (계획만)")
+        log(f"{tag} {role} → D:\\RemoteConfig\\Update, D:\\RemoteVersion (계획만)")
         return ip, name, role, "계획", ""
 
     ok, mounted = connect(ip, cfg.get("deploy_user", ""), cfg.get("deploy_pw", ""))
@@ -104,20 +141,26 @@ def deploy_one(ip: str, name: str, is_server: bool, src: str, cfg: dict, args) -
         return ip, name, role, "실패", "D 공유 접속 불가"
     try:
         d = share_root(ip)
-        app_dir, conf_dir = d + r"\AuroraRemote", d + r"\RemoteConfig"
-        upd_dir = conf_dir + r"\Update"
+        conf_dir = d + r"\RemoteConfig"
+        app_dir = conf_dir + r"\Update"      # 실행 폴더
+        upd_dir = d + r"\RemoteVersion"      # 자동 업데이트 원본
         for p in (app_dir, conf_dir, upd_dir):
             os.makedirs(p, exist_ok=True)
 
         notes = []
-        # 1) 실행 파일 → D:\AuroraRemote
+        # 1) 실행 파일 → D:\RemoteConfig\Update (실행 폴더)
+        remove_old(app_dir)
         for exe in exes:
-            r = copy(os.path.join(src, exe), os.path.join(app_dir, exe))
-            if r == "잠김":
-                notes.append(f"{exe} 실행 중 → Update 폴더로 자동 업데이트")
-        man = os.path.join(src, MANUAL)
-        if os.path.isfile(man):
-            copy(man, os.path.join(app_dir, MANUAL))
+            s, t = os.path.join(src, exe), os.path.join(app_dir, exe)
+            if copy(s, t) == "잠김":
+                if replace_running(s, t) == "교체":
+                    notes.append(f"{exe} 실행 중 → 교체해 둠 ([클라이언트 업데이트] 신호·재시작 때 새 버전)")
+                else:
+                    notes.append(f"{exe} 실행 중 → 교체 못 함, RemoteVersion 으로 자동 업데이트")
+        # 이전 버전(v2.14.0)은 실행 폴더의 version.json 을 보고 업데이트하므로 여기에도 둔다
+        for f in ("version.json", MANUAL):
+            if os.path.isfile(os.path.join(src, f)):
+                copy(os.path.join(src, f), os.path.join(app_dir, f))
 
         # 2) 설정 → D:\RemoteConfig (기존 설정은 보존)
         confs = ["client_config.json"] + (["server_config.json"] if is_server else [])
@@ -141,7 +184,7 @@ def deploy_one(ip: str, name: str, is_server: bool, src: str, cfg: dict, args) -
                 shutil.copy2(os.path.join(CONFIG_DIR, c), dst)
             notes.append(f"{c} 설치")
 
-        # 3) 자동 업데이트용 → D:\RemoteConfig\Update (update_state.json 은 PC 별 기록이라 복사하지 않음)
+        # 3) 자동 업데이트 원본 → D:\RemoteVersion (update_state.json 은 PC 별 기록이라 복사하지 않음)
         for f in exes + ["version.json"]:
             copy(os.path.join(src, f), os.path.join(upd_dir, f))
 

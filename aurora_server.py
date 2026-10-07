@@ -23,7 +23,7 @@ import sys
 import ctypes
 import aurora_update
 
-APP_VERSION = "2.14.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.15.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 번들 리소스(이미지) ──────────────
 def _resource_path(rel):
@@ -781,8 +781,8 @@ class AuroraServerApp:
     LABEL_HINTS = {
         # 헤더 / 사이드바
         "SERVER": "이 프로그램이 서버(관리 PC) 역할로 실행 중임을 나타내는 표시입니다.",
-        "버전": "현재 실행 중인 서버 버전입니다. D:\\RemoteConfig\\Update 폴더에 새 버전(AuroraServer.exe + version.json)을 넣어두면 켜질 때 자동으로 업데이트 후 재시작합니다. '최신 버전 확인' 을 누르면 바로 확인해 새 버전이면 업데이트 후 재시작합니다.",
-        "클라이언트 업데이트": "온라인 클라이언트 전체에 업데이트 신호를 보냅니다. 각 PC 의 D:\\RemoteConfig\\Update 에 새 버전이 있으면 "
+        "버전": "현재 실행 중인 서버 버전입니다. D:\\RemoteVersion 폴더에 새 버전(AuroraServer.exe + version.json)을 넣어두면 켜질 때 자동으로 업데이트 후 재시작합니다. '최신 버전 확인' 을 누르면 바로 확인해 새 버전이면 업데이트 후 재시작합니다.",
+        "클라이언트 업데이트": "온라인 클라이언트 전체에 업데이트 신호를 보냅니다. 각 PC 의 D:\\RemoteVersion 에 새 버전이 있으면 "
                              "교체 후 창 없이 트레이로 다시 켜지고, 없으면 아무것도 하지 않습니다. Aurora 는 끄지 않습니다. "
                              "Update 폴더에는 AuroraDeploy.exe 로 미리 파일을 넣어 두세요. (v2.14.0 이상 클라이언트만 신호를 알아들음)",
         "온라인 카운트": "온라인 클라이언트 수 / 등록된 전체 클라이언트 수입니다. "
@@ -2482,7 +2482,7 @@ class AuroraServerApp:
         if not messagebox.askyesno(
                 "클라이언트 업데이트",
                 f"온라인 클라이언트 {n}대에 업데이트 신호를 보냅니다.\n\n"
-                "각 PC 의 D:\\RemoteConfig\\Update 에 새 버전이 있으면 교체 후 "
+                "각 PC 의 D:\\RemoteVersion 에 새 버전이 있으면 교체 후 "
                 "창 없이 트레이로 다시 켜집니다. (Aurora 는 끄지 않음)\n"
                 "새 버전이 없는 PC 는 아무것도 하지 않습니다.\n\n보낼까요?", parent=self.root):
             return
@@ -2583,7 +2583,7 @@ class AuroraServerApp:
 
     def _start_services(self):
         self._log_seq_shown = 0
-        # 자동 시작이 켜져 있으면 등록 경로를 지금 exe 로 갱신 (D:\AuroraRemote 로 옮겨도 예전 exe 가 켜지지 않게)
+        # 자동 시작이 켜져 있으면 등록 경로를 지금 exe 로 갱신 (실행 폴더를 옮겨도 예전 exe 가 켜지지 않게)
         if getattr(sys, "frozen", False) and autostart_enabled():
             try:
                 set_autostart(True)

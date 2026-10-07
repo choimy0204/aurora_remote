@@ -32,7 +32,7 @@ from PIL import ImageTk
 import aurora_update
 import aurora_remote
 
-APP_VERSION = "2.14.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
+APP_VERSION = "2.15.0"   # 올리면 build.bat 이 dist/latest/version.json 에 기록 → 자동 업데이트 기준
 
 # ── 고해상도(DPI) 대응 ────────────────────
 def _resource_path(rel):
@@ -1705,7 +1705,7 @@ class AuroraClientApp:
         "서버 포트": "서버로 상태를 보고할 때 쓰는 서버 쪽 포트입니다(기본 9000). 1024~65535 범위이며 '적용' 후 프로그램을 다시 시작해야 반영됩니다.",
         "수신 포트": "서버 명령(start/stop/setpath/ping/setpingmode)과 반출 요청을 받는 이 PC의 포트입니다(기본 9001). 1024~65535 범위이며 '적용' 후 프로그램을 다시 시작해야 반영됩니다.",
         "자동 시작": "PC에 로그인할 때 이 클라이언트를 자동 실행하도록 현재 사용자(HKCU)의 Run 레지스트리에 등록하거나 해제합니다. 기본값은 ON 이며, 직접 OFF 로 바꾼 경우에만 꺼진 상태가 유지됩니다.",
-        "버전": "현재 실행 중인 클라이언트 버전입니다. D:\\RemoteConfig\\Update 폴더에 새 버전(AuroraClient.exe + version.json)을 넣어두면 켜질 때 자동으로 업데이트 후 재시작합니다. '최신 버전 확인' 을 누르면 바로 확인해 새 버전이면 업데이트 후 재시작합니다. 서버의 [클라이언트 업데이트] 신호를 받으면 같은 확인을 하고, 창 없이 트레이로 재시작합니다.",
+        "버전": "현재 실행 중인 클라이언트 버전입니다. D:\\RemoteVersion 폴더에 새 버전(AuroraClient.exe + version.json)을 넣어두면 켜질 때 자동으로 업데이트 후 재시작합니다. '최신 버전 확인' 을 누르면 바로 확인해 새 버전이면 업데이트 후 재시작합니다. 서버의 [클라이언트 업데이트] 신호를 받으면 같은 확인을 하고, 창 없이 트레이로 재시작합니다.",
         "수동 제어": "서버 명령과 별개로 이 PC에서 Aurora 를 직접 실행·종료하는 긴급용 영역입니다. 실행은 이미 켜져 있으면 하지 않고, 종료는 실행 경로의 exe 와 이름이 같은 프로세스를 모두 강제 종료합니다.",
         "LOG": "명령 수신, 서버 추가·삭제, 포트·경로 변경 등 클라이언트 동작 기록입니다. 최근 40줄만 표시합니다.",
         "실행 프로그램": "서버 명령이나 수동 제어로 실행·종료할 Aurora 프로그램을 지정하는 영역입니다.",
@@ -3865,7 +3865,7 @@ class AuroraClientApp:
 
             time.sleep(STATUS_INTERVAL)
 
-    # ── 자동 업데이트 (RemoteConfig\Update) ──
+    # ── 자동 업데이트 (D:\RemoteVersion) ──
     def _check_update(self, manual: bool, remote: bool = False):
         """manual=False: 시작 시 자동 확인 (같은 버전 자동 시도는 1회만)
         manual=True : 버튼 — 결과를 팝업으로 알림

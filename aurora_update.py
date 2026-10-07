@@ -1,7 +1,7 @@
 """
 Aurora 자동 업데이트 (서버·클라이언트 공용)
 =====================================
-D:\\RemoteConfig\\Update 폴더에 빌드 결과물(dist\\latest 내용)을 넣어두면
+D:\\RemoteVersion 폴더에 빌드 결과물(dist\\latest 내용)을 넣어두면
 - 프로그램이 켜질 때 자동으로 새 버전을 감지해 교체 후 재시작
 - [최신 버전 확인] 버튼으로 수동 확인 → 새 버전이면 교체 후 재시작
 
@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import tempfile
 
-UPDATE_DIR   = r"D:\RemoteConfig\Update"
+UPDATE_DIR   = r"D:\RemoteVersion"   # 새 버전 원본 (실행 폴더와 따로)
 _STATE_FILE  = r"D:\RemoteConfig\update_state.json"
 _EXE_NAMES   = {"client": "AuroraClient.exe", "server": "AuroraServer.exe"}
 

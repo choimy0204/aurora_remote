@@ -1,5 +1,5 @@
 @echo off
-rem Aurora remote deploy - copies AuroraRemote + RemoteConfig to each PC via \\IP\D
+rem Aurora remote deploy - copies to RemoteConfig\Update + RemoteVersion on each PC via \\IP\D
 rem   server PCs (client_config.json server_ips) : AuroraServer + AuroraClient
 rem   other PCs  (server_config.json client_ips) : AuroraClient
 rem usage: deploy.bat [IP ...] [--dry] [--overwrite-config] [-y]
