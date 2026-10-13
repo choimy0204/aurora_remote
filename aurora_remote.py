@@ -141,6 +141,25 @@ _ReleaseCapture   = _proto(_user32.ReleaseCapture, wt.BOOL)
 # PostMessage 로 넘기면 Tk 이벤트 루프가 정상 경로로 처리함
 _PostMessageW     = _proto(_user32.PostMessageW, wt.BOOL, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 _GWL_STYLE, _GWL_WNDPROC = -16, -4
+
+
+# 원격 창에 포커스가 있는 동안 키보드를 통째로 장비로 — Win·Alt+Tab 처럼 Windows 가 먼저 가져가는 키까지 (저수준 키보드 훅)
+class _KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("vkCode", wt.DWORD), ("scanCode", wt.DWORD), ("flags", wt.DWORD),
+                ("time", wt.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+_HOOKPROC            = ctypes.WINFUNCTYPE(_LRESULT, ctypes.c_int, wt.WPARAM, ctypes.POINTER(_KBDLLHOOKSTRUCT))
+_SetWindowsHookExW   = _proto(_user32.SetWindowsHookExW, ctypes.c_void_p, ctypes.c_int, _HOOKPROC, wt.HINSTANCE,
+                              wt.DWORD)
+_UnhookWindowsHookEx = _proto(_user32.UnhookWindowsHookEx, wt.BOOL, ctypes.c_void_p)
+_CallNextHookEx      = _proto(_user32.CallNextHookEx, _LRESULT, ctypes.c_void_p, ctypes.c_int, wt.WPARAM,
+                              ctypes.POINTER(_KBDLLHOOKSTRUCT))
+_GetMessageW         = _proto(_user32.GetMessageW, ctypes.c_int, ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT)
+_SetTimer            = _proto(_user32.SetTimer, ctypes.c_size_t, wt.HWND, ctypes.c_size_t, wt.UINT, ctypes.c_void_p)
+_GetForegroundWindow = _proto(_user32.GetForegroundWindow, wt.HWND)
+_GetModuleHandleW    = _proto(_kernel32.GetModuleHandleW, wt.HMODULE, wt.LPCWSTR)
+_WH_KEYBOARD_LL, _WM_KEYDOWN, _WM_SYSKEYDOWN = 13, 0x0100, 0x0104
 _WS_CAPTION, _WS_THICKFRAME, _WS_MAXIMIZEBOX = 0x00C00000, 0x00040000, 0x00010000
 _WM_NCCALCSIZE, _WM_NCLBUTTONDOWN = 0x0083, 0x00A1
 _HTCAPTION, _HTTOP = 2, 12
@@ -150,10 +169,10 @@ CLIP_MAX = 100_000             # 클립보드로 주고받는 글자 수 상한
 
 
 @contextmanager
-def _clipboard():
+def _clipboard(tries: int = 15):
     """클립보드 열기 — 다른 프로그램이 쓰는 중이면 잠깐씩 다시 시도 (최대 약 0.3초). 못 열면 OSError.
     창 없이(NULL) 열어 소유 창이 없음 → 다른 프로그램이 클립보드를 비울 때 이 스레드에 메시지가 오지 않음"""
-    for _ in range(15):
+    for _ in range(tries):
         if _OpenClipboard(None):
             break
         time.sleep(0.02)
@@ -165,9 +184,9 @@ def _clipboard():
         _CloseClipboard()
 
 
-def _clip_get():
+def _clip_get(tries: int = 15):
     """장비 클립보드의 글자 (글자가 아니면 None)"""
-    with _clipboard():
+    with _clipboard(tries):
         h = _GetClipboardData(_CF_UNICODETEXT)
         if not h:
             return None
@@ -1396,6 +1415,10 @@ class RemoteViewer:
         self._wndproc  = None        # (새 창 처리 함수, 원래 함수)
         self._full     = False
         self._restore  = None        # 전체 화면 전 창 위치 (x, y, w, h)
+        # 키보드 훅 스레드가 읽는 값 (그 스레드에서는 Tk 를 건드릴 수 없음)
+        self._top      = None        # 이 창이 앞에 있는지 비교할 Windows 창
+        self._ctl_on   = False       # 조작 체크
+        self._kfocus   = False       # 화면(캔버스)에 키보드 포커스가 있음
         self._build_title(title, font)
 
         bar = tk.Frame(w, bg=self.BG)
@@ -1462,12 +1485,19 @@ class RemoteViewer:
         c.bind("<MouseWheel>", self._on_wheel)
         c.bind("<KeyPress>", self._on_key_down)
         c.bind("<KeyRelease>", self._on_key_up)
+        c.bind("<FocusIn>", lambda e: setattr(self, "_kfocus", True))
+        c.bind("<FocusOut>", lambda e: setattr(self, "_kfocus", False))
         c.bind("<Enter>", lambda e: self._ctl.get() and c.focus_set())
         w.bind("<FocusOut>", self._on_focus_out)
         self._disable_ime()
 
         self._frameless()
+        try:
+            self._top = self._hwnd or _GetParent(w.winfo_id())
+        except Exception:
+            pass
 
+        threading.Thread(target=self._key_hook_loop, daemon=True).start()
         threading.Thread(target=self._frame_loop, daemon=True).start()
         threading.Thread(target=self._input_loop, daemon=True).start()
         self._tick()
@@ -1912,12 +1942,13 @@ class RemoteViewer:
         self.canvas.focus_set()
 
     def _ctl_changed(self):
-        if not self._ctl.get():
+        self._ctl_on = bool(self._ctl.get())
+        if not self._ctl_on:
             self._release_all()
 
     # ── 입력 (UI 스레드) ─────────────────
     def _can_control(self) -> bool:
-        return (self._ctl.get() and self._box is not None and not self._error and not self._note
+        return (self._ctl_on and self._box is not None and not self._error and not self._note
                 and time.monotonic() - self._frame_time < self.FRAME_STALE)
 
     def _norm(self, e) -> tuple:
@@ -1987,19 +2018,63 @@ class RemoteViewer:
     def _on_key_down(self, e):
         vk = self._vk(e)
         if vk and self._can_control():
-            ctrl = bool(e.state & 0x4) and not (e.state & 0x20000)     # Ctrl (Alt 함께 누른 것 제외)
-            if ctrl and vk == 0x56:
-                self._clip_push()                    # 붙여넣기 전에 내 클립보드 글자를 장비로
-            elif ctrl and vk in (0x43, 0x58):
-                self._push(["g"])                    # 복사 직전 클립보드 번호를 장비가 기억
-                self._clip_pull()
-            self._push(["k", vk, 1])
+            self._key_down(vk, bool(e.state & 0x4) and not (e.state & 0x20000))
         return "break"
 
-    # ── 클립보드 (글자만) ────────────────
-    def _clip_push(self):
+    def _key_down(self, vk: int, ctrl: bool, hooked: bool = False):
+        """ctrl = Ctrl 만 눌린 상태 (Alt 함께 누른 것 제외). hooked = 키보드 훅 스레드에서 부름"""
+        if ctrl and vk == 0x56:
+            self._clip_push(hooked)                  # 붙여넣기 전에 내 클립보드 글자를 장비로
+        elif ctrl and vk in (0x43, 0x58):
+            self._push(["g"])                        # 복사 직전 클립보드 번호를 장비가 기억
+            self._clip_pull()
+        self._push(["k", vk, 1])
+
+    # ── 키보드 훅 (Win·Alt+Tab 등 Windows 가 먼저 가져가는 키까지 장비로) ──
+    def _key_hook_loop(self):
+        """창마다 훅 하나. Tk 와 다른 스레드 — Tk 가 바빠도 내 PC 키보드가 밀리지 않음.
+        설치에 실패하면 예전처럼 Tk 가 받는 키만 장비로 감"""
+        def proc(code, wp, kb):
+            try:
+                if code == 0 and self._hook_key(wp in (_WM_KEYDOWN, _WM_SYSKEYDOWN), kb[0].vkCode):
+                    return 1                         # 내 PC 에는 넘기지 않음
+            except Exception:
+                pass
+            return _CallNextHookEx(None, code, wp, kb)
+
+        cb = _HOOKPROC(proc)
+        hook = _SetWindowsHookExW(_WH_KEYBOARD_LL, cb, _GetModuleHandleW(None), 0)
+        if not hook:
+            return
         try:
-            text = self.win.clipboard_get()
+            _SetTimer(None, 0, 300, None)            # 창이 닫혔는지 볼 수 있게 주기적으로 깨움
+            msg = wt.MSG()
+            while self.alive and _GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                pass
+        finally:
+            _UnhookWindowsHookEx(hook)
+
+    def _hook_key(self, down: bool, vk: int) -> bool:
+        """True = 장비로 보냈으니 내 PC 에는 넘기지 않음. 훅 스레드 — Tk 를 건드리지 않고 바로 돌아와야 함"""
+        if not self.alive or not 1 <= vk <= 254:
+            return False
+        if not down:                                 # 장비에 눌러 둔 키만 뗌 (창 밖에서 누른 키의 뗌은 내 PC 로)
+            with self._cv:
+                held = vk in self._keys
+            if held:
+                self._push(["k", vk, 0])
+            return held
+        if not (self._kfocus and self._top and _GetForegroundWindow() == self._top and self._can_control()):
+            return False
+        with self._cv:
+            ctrl = bool(self._keys & {0xA2, 0xA3}) and not self._keys & {0xA4, 0xA5}
+        self._key_down(vk, ctrl, hooked=True)
+        return True
+
+    # ── 클립보드 (글자만) ────────────────
+    def _clip_push(self, hooked: bool = False):
+        try:
+            text = _clip_get(2) if hooked else self.win.clipboard_get()
         except Exception:                            # 비었거나 글자가 아님
             return
         if not text or text == self._clip_sent:      # 그대로면 장비 클립보드(장비에서 복사한 것)를 씀
