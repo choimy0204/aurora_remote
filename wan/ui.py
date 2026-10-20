@@ -76,10 +76,10 @@ def validate_url(url) -> tuple:
     if not u:
         return "", "안내 서버 주소를 입력하세요"
     if not u.lower().startswith(("ws://", "wss://")):
-        return u, "주소는 ws:// 또는 wss:// 로 시작해야 합니다 (예: ws://203.0.113.5:8765)"
+        return u, "주소는 ws:// 또는 wss:// 로 시작해야 합니다 (예: ws://203.0.113.5:9100)"
     host = u.split("://", 1)[1]
     if not host or any(c.isspace() for c in u):
-        return u, "주소 형식이 올바르지 않습니다 (예: ws://203.0.113.5:8765)"
+        return u, "주소 형식이 올바르지 않습니다 (예: ws://203.0.113.5:9100)"
     return u, ""
 
 
@@ -196,6 +196,8 @@ class WanTabController:
 
     def apply_server(self, url, key) -> bool:
         """주소·키를 저장하고 안내 서버에 다시 연결 (작업 스레드).  입력이 잘못되면 False"""
+        if not (url or "").strip() and self.relay_available():
+            return self._apply_key_only(key)
         url, err = validate_url(url)
         if err:
             self._ui("show_error", "안내 서버", err)
@@ -207,6 +209,24 @@ class WanTabController:
         self._spawn(self._restart_client)
         if self.cfg.get("relay_host"):                  # 공용 키가 바뀌었을 수 있으니 이 PC 의 안내 서버도 다시 시작
             self._spawn(self._restart_relay)
+        return True
+
+    def _apply_key_only(self, key) -> bool:
+        """중계 PC: 주소 없이 공용 키만 저장 — 접속할 안내 서버가 없으니 연결은 끊고, 운영 중인 안내 서버는 새 키로 다시 시작"""
+        self.cfg.update(relay_url="", relay_key=(key or "").strip())
+        self._note("공용 키를 저장했습니다 (안내 서버 주소 없음 — 이 PC 는 안내 서버 운영용)")
+
+        def work():
+            try:
+                self.client.stop()
+            except Exception as e:
+                self._note(f"연결 끊기 실패: {type(e).__name__}: {e}")
+            self.refresh_server()
+        self._spawn(work)
+        if self.cfg.get("relay_host"):
+            self._spawn(self._restart_relay)
+        else:
+            self.refresh_relay()
         return True
 
     def _restart_client(self):
@@ -643,8 +663,8 @@ class WanTab(NullUI):
                 ent.configure(show=show)
             ent.pack(side="left", fill="x", expand=True, ipady=px(1))
             ent.bind("<Return>", lambda e: self._apply_server())
-            app._tip(ent, "ws://주소:포트 (예: ws://203.0.113.5:8765)" if not show
-                     else "안내 서버에 키를 걸었을 때만 입력합니다")
+            app._tip(ent, "ws://주소:포트 (예: ws://203.0.113.5:9100)" if not show
+                     else "안내 서버에 키를 걸었을 때만 입력합니다 (이 PC 가 중계 PC 면 여기에 키를 정하고 주소는 비워 둠)")
         row = tk.Frame(box, bg=app.PANEL)
         row.pack(fill="x", pady=(px(4), 0))
         self.server_btn = app._button(row, "적용 후 연결", "primary", self._apply_server)

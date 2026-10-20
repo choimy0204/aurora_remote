@@ -262,3 +262,21 @@ def test_firewall_command_and_non_windows():
 def test_lan_addresses_are_plain_ipv4_and_exclude_loopback():
     for ip in netutil.lan_addresses():
         assert ip.count(".") == 3 and not ip.startswith(("127.", "169.254."))
+
+
+def test_relay_pc_can_save_key_without_address():
+    """중계 PC 는 주소 없이 공용 키만 저장할 수 있어야 한다 (예전에는 '주소를 입력하세요' 오류가 났음)"""
+    ctl, ctx, ui = make_ctl(relay_host=True)
+    assert ctl.apply_server("", " newkey ") is True
+    assert ctx["cfg"].get("relay_key") == "newkey" and ctx["cfg"].get("relay_url") == ""
+    ctx["client"].stop.assert_called_once()
+    ctx["client"].start.assert_not_called()
+    ctx["restart_relay"].assert_called_once()                           # 운영 중이면 새 키로 다시 시작
+    assert not [c for c in ui.calls if c[0] == "show_error"]
+
+
+def test_empty_address_is_still_an_error_when_not_a_relay_pc():
+    ctl, ctx, ui = make_ctl()
+    ctx["relay_available"] = False
+    assert ctl.apply_server("", "k") is False
+    assert [c for c in ui.calls if c[0] == "show_error"]
