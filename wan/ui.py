@@ -988,7 +988,7 @@ class WanTab(NullUI):
 
         def show_field():
             if role_var.get() == "field":
-                field.pack(fill="x", pady=(px(6), 0))
+                field.pack(fill="x", pady=(px(6), 0), before=btns)       # 확인/취소 버튼보다 위에 둔다
             else:
                 field.pack_forget()
 
@@ -1001,6 +1001,7 @@ class WanTab(NullUI):
         app._button(btns, "확인", "primary", ok).pack(side="left")
         app._button(btns, "취소", "secondary", win.destroy).pack(side="left", padx=(px(8), 0))
         self._import_win = SimpleNamespaceDialog(win, code_var, role_var, name_var, access_var, ok)
+        self._import_win.field, self._import_win.btns, self._import_win.show_field = field, btns, show_field
 
     def _relay_toggled(self):
         self._relay_layout()

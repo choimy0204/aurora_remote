@@ -165,3 +165,21 @@ def test_auto_button_and_paste_dialog_with_real_widgets(app, monkeypatch):
     tab.controller.refresh_relay()
     app.root.update()
     assert not tab.admin_btn.winfo_ismapped()
+
+
+def test_paste_dialog_field_inputs_appear_above_the_buttons(app):
+    """현장 PC 를 고르면 나오는 이름·접속 코드 칸이 확인/취소 버튼 위에 있어야 한다 (예전에는 버튼 아래로 밀렸음)"""
+    tab = app._wan_tab
+    app._select_tab(4)
+    tab._import_dialog()
+    d = tab._import_win
+    d.role.set("field")
+    d.show_field()
+    d.win.update()
+    assert d.field.winfo_ismapped()
+    assert d.field.winfo_y() < d.btns.winfo_y(), (d.field.winfo_y(), d.btns.winfo_y())
+    d.role.set("user")
+    d.show_field()
+    d.win.update()
+    assert not d.field.winfo_ismapped()
+    d.win.destroy()
