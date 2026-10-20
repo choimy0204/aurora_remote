@@ -120,6 +120,7 @@ Linux 에서 Windows 전용 부분을 `tests/winshim.py` 로 흡수해 **실제 
 `tools/wine_lab/setup.sh` 가 Wine 위에 Windows 용 Python 3.12 + tkinter + 프로젝트 의존성(Windows 휠)을 만든다. 전체 테스트를 가짜 없이 실제 Windows API 구현으로 실행한 결과 **288개 통과, 실패 0** (건너뜀 6: NAT 실험실 5개는 Linux 전용, SIGTERM 시험 1개는 POSIX 전용). 여기에 Windows 전용 시험이 추가로 있다:
 - 실제 앱 구성, 진짜 `RemoteViewer`, 끝에서 끝까지(앱→뷰어→CommandHandler→안내 서버→현장→aiortc)
 - **진짜 `RemoteHost`**: Wine 에는 DXGI 화면 복제가 없어 **GDI 호환 캡처 경로**가 쓰였고(이 경로가 `meta["gdi"]`로 올바르게 표시됨), 실제 창의 색이 캡처되고 바뀐 화면은 기준 번호를 가진 조각으로 오며, 마우스 포인터가 요청한 좌표에 놓이고, `SendInput` 으로 보낸 키가 입력칸에 도착한다. 보는 쪽에서 누른 키가 WAN 직접 연결을 거쳐 현장 입력칸에 "abc" 로 들어가는 것까지 확인.
+**실제 빌드된 `AuroraClient.exe` (Wine 에서 `AuroraClient.spec` 으로 PyInstaller 빌드, 약 47 MB, 경고 없음)**: 현장 모드 설정(`D:\RemoteConfig\wan_config.json`)만 두고 실행하면 `--wan-agent` 자식이 떠서 중계 서버에 등록되고(ID·버전 표시), 사용자 쪽 `WanClient` 가 접속 코드로 **직접 연결**을 맺어 `/info`, `/fs/roots`, `/remote/frame`(exe 안의 실제 RemoteHost, JPEG 수신)이 응답했다. `/command` 는 403 으로 막히고, 틀린 접속 코드는 거부되며(`WanDenied`), 종료 후 exe 프로세스가 남지 않았다. (검증 스크립트가 exe 출력을 파일로 돌리면 Wine 의 Windows 프로그램이 시작되지 않는다 — 파이프로 받아야 한다. 제품 문제가 아니라 시험 도구 문제였다.) 참고: Wine 에서 기존 LAN 코드의 `psutil.process_iter` 가 한 번 `OSError 87` 을 내는 것이 보이는데, 상태 보고 스레드 안에서만 나는 Wine 한정 증상이며 이번 변경과 무관하다.
 시험 도구의 Wine 관련 주의(Tcl 의 chdir 직후 Tk 생성 실패, 닫힌 뷰어의 PhotoImage 해제 순서, UTF-8 로케일, 자식 프로세스 시작이 느려 생기는 시험 경쟁 조건)는 `tests/winshim.py` 와 해당 시험에 반영했다.
 **Wine 은 Windows 가 아니다.** DXGI 캡처(Windows 8+ 의 화면 복제)와 보안 데스크톱(잠금 화면·UAC)·실제 DPI 배율·실제 키보드 훅은 대상이 아니다.
 
