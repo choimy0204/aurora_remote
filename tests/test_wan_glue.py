@@ -11,8 +11,8 @@ import pytest
 
 @pytest.fixture
 def mod(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    import winshim
+    winshim.sandbox(monkeypatch, tmp_path)
     import winshim
     return winshim.load_client()
 

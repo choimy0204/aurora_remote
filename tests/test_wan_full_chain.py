@@ -14,16 +14,12 @@ from PIL import ImageChops, ImageStat  # noqa: E402
 from wan_helpers import AgentRunner, RelayRunner, eventually  # noqa: E402
 
 
-@pytest.fixture
-def chain(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
+def make_chain(tmp_path, monkeypatch, real_host=False):
+    import winshim
+    winshim.sandbox(monkeypatch, tmp_path)
     monkeypatch.setenv("AURORA_WAN_DIR", str(tmp_path / "wan"))
     import winshim
-    try:
-        root = tkinter.Tk()
-    except tkinter.TclError:
-        pytest.skip("화면(DISPLAY)이 없음 — xvfb-run 으로 실행")
+    root = winshim.make_root()
     mod = winshim.load_client(real_remote=True)
     ar = __import__("sys").modules["aurora_remote"]
     monkeypatch.setattr(ar, "_GetMessageW", lambda *a: 0)
@@ -49,7 +45,8 @@ def chain(tmp_path, monkeypatch):
 
         def clip(self, q, who):
             return {"ok": True}
-    monkeypatch.setattr(mod, "_remote", lambda: FakeRemote())
+    if not real_host:                       # real_host=True 면 Windows 의 진짜 RemoteHost 를 그대로 씀
+        monkeypatch.setattr(mod, "_remote", lambda: FakeRemote())
     real_roots = mod.export_roots
     monkeypatch.setattr(mod, "export_roots", lambda: roots_seen.append(1) or real_roots())
     (tmp_path / "Desktop").mkdir()
@@ -76,6 +73,11 @@ def chain(tmp_path, monkeypatch):
     env = dict(root=root, app=app, mod=mod, sim=sim, events=events, roots_seen=roots_seen, client=client,
                field=field, agent=client.agents[0], desktop=tmp_path / "Desktop")
     yield env
+    teardown(env, relay, server, root, app, client, field)
+
+
+def teardown(env, relay, server, root, app, client, field):
+    import winshim
     for fn in (client.stop, field.stop, relay.close, server.shutdown):
         try:
             fn()
@@ -83,9 +85,14 @@ def chain(tmp_path, monkeypatch):
             pass
     try:
         app._wan_shutdown()
-        root.destroy()
     except Exception:
         pass
+    winshim.destroy_root(root)
+
+
+@pytest.fixture
+def chain(tmp_path, monkeypatch):
+    yield from make_chain(tmp_path, monkeypatch)
 
 
 def run(root, seconds):

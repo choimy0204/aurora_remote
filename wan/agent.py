@@ -207,14 +207,18 @@ class WanAgent:
             return                                        # 막힌 망 흉내 — 사용자는 시간 초과 후 중계로 넘어감
         if not direct_available():
             return await self._reply(ws, t="deny", sid=sid, reason="no_direct")
+        t0 = time.monotonic()
+        self.log(f"직접 연결 요청 수신 ({sid})")
         pc = make_peer_connection(self.cfg.get("stun"))
         got = asyncio.get_running_loop().create_future()
         pc.on("datachannel", lambda ch: got.set_result(ch) if not got.done() else None)
         try:
             await pc.setRemoteDescription(session_description(m["offer"]))
             await pc.setLocalDescription(await pc.createAnswer())
-            await self._reply(ws, t="answer", sid=sid, answer={"sdp": pc.localDescription.sdp,
-                                                                "type": pc.localDescription.type})
+            sdp = pc.localDescription.sdp
+            await self._reply(ws, t="answer", sid=sid, answer={"sdp": sdp, "type": pc.localDescription.type})
+            self.log(f"직접 연결 응답 전송 ({sid}, 후보 {sdp.count('a=candidate')}개, "
+                     f"{time.monotonic() - t0:.1f}초 — 후보 수집 포함)")
             ch = await asyncio.wait_for(got, 30)
             await wait_open(ch, 30)
         except Exception as e:

@@ -17,8 +17,8 @@ LAN_KEY = "lan-export-key"
 @pytest.fixture
 def real(tmp_path, monkeypatch):
     # aurora_client 를 불러올 때 D:\RemoteConfig 폴더를 만들려 하므로 임시 폴더에서 실행
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    import winshim
+    winshim.sandbox(monkeypatch, tmp_path)
     desktop = tmp_path / "Desktop"
     desktop.mkdir()
     (desktop / "a.txt").write_text("안녕하세요", encoding="utf-8")

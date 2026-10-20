@@ -16,10 +16,7 @@ from PIL import ImageChops, ImageStat  # noqa: E402
 @pytest.fixture
 def env(monkeypatch):
     import winshim
-    try:
-        root = tkinter.Tk()
-    except tkinter.TclError:
-        pytest.skip("화면(DISPLAY)이 없음 — xvfb-run 으로 실행")
+    root = winshim.make_root()
     ar = winshim.load_remote()
     monkeypatch.setattr(ar, "_GetMessageW", lambda *a: 0)       # Windows 키보드 훅 스레드는 바로 끝나게
     from sim_host import SimHost, SimSession
@@ -51,12 +48,11 @@ def env(monkeypatch):
     for v in state["viewers"]:
         try:
             v.close()
+            v._photo = None
         except Exception:
             pass
-    try:
-        root.destroy()
-    except Exception:
-        pass
+    state["viewers"].clear()
+    winshim.destroy_root(root)
 
 
 def error_vs_host(viewer, host):

@@ -13,14 +13,11 @@ tkinter = pytest.importorskip("tkinter")
 
 @pytest.fixture
 def app(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    import winshim
+    winshim.sandbox(monkeypatch, tmp_path)
     monkeypatch.setenv("AURORA_WAN_DIR", str(tmp_path / "wan"))
     import winshim
-    try:
-        root = tkinter.Tk()
-    except tkinter.TclError:
-        pytest.skip("화면(DISPLAY)이 없음 — xvfb-run 으로 실행")
+    root = winshim.make_root()
     mod = winshim.load_client(real_remote=True)
     monkeypatch.setattr(mod.AuroraClientApp, "_start_threads", lambda self: None)   # 네트워크 스레드는 띄우지 않음
     mod._init_scale(root)
@@ -31,9 +28,9 @@ def app(tmp_path, monkeypatch):
     yield application
     try:
         application._wan_shutdown()
-        root.destroy()
     except Exception:
         pass
+    winshim.destroy_root(root)
 
 
 def test_real_app_builds_with_five_tabs_and_wan_tab(app):
@@ -89,7 +86,7 @@ def test_real_tab_screenshot(app, tmp_path):
     app.root.update()
     try:
         from PIL import ImageGrab
-        img = ImageGrab.grab(xdisplay=os.environ.get("DISPLAY"))
+        img = ImageGrab.grab() if os.name == "nt" else ImageGrab.grab(xdisplay=os.environ.get("DISPLAY"))
         out = os.environ.get("WAN_SHOT", str(tmp_path / "wan_tab.png"))
         img.save(out)
         assert os.path.getsize(out) > 1000

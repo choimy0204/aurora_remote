@@ -298,18 +298,24 @@ class WanClient:
         try:
             ch = pc.createDataChannel("aurora")
             await pc.setLocalDescription(await pc.createOffer())
+            sdp = pc.localDescription.sdp
+            self.log(f"직접 연결 요청 전송 (후보 {sdp.count('a=candidate')}개, 후보 수집 {time.monotonic() - t0:.1f}초)")
             await self._send({"t": "connect", "id": s.agent_id, "sid": sid, "code": s.code,
-                              "offer": {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}})
+                              "offer": {"sdp": sdp, "type": pc.localDescription.type}})
             reply = await asyncio.wait_for(fut, timeout)
+            self.log(f"현장 응답 수신 ({reply.get('t')}, {time.monotonic() - t0:.1f}초)")
             if reply["t"] == "deny":
                 if reply.get("reason") == "no_direct":
                     raise P.WanError("현장 PC 가 직접 연결을 지원하지 않습니다")
                 raise self._denied(reply)
             await pc.setRemoteDescription(session_description(reply["answer"]))
             await wait_open(ch, max(0.5, timeout - (time.monotonic() - t0)))
-        except asyncio.TimeoutError:
+        except P.WanTimeout:                  # 응답은 받았지만 연결 검사(ICE)가 시간 안에 끝나지 않음 — NAT·방화벽이 막은 경우
             await pc.close()
-            raise P.WanTimeout("직접 연결 응답이 없습니다") from None
+            raise
+        except asyncio.TimeoutError:          # 현장이 연결 요청에 답하지 않음
+            await pc.close()
+            raise P.WanTimeout("현장이 직접 연결 요청에 응답하지 않습니다") from None
         except BaseException:
             await pc.close()
             raise

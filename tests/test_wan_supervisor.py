@@ -193,6 +193,7 @@ def test_stop_kills_child_and_no_more_spawns(tmp_path, sup_factory):
     sup.start()
     assert wait_until(lambda: sup.state["pid"] is not None)
     pid = sup.state["pid"]
+    assert wait_until(lambda: len(read_starts(starts)) == 1, timeout=15)     # 자식이 실제로 시작 기록을 남길 때까지 (Windows 는 느림)
     sup.stop()
     assert gone(pid)
     assert sup.state["state"] == "stopped" and sup.state["pid"] is None
