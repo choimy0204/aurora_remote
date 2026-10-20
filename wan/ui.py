@@ -21,12 +21,13 @@ ctx (aurora_client 가 넘겨 줌)
 
 import math
 import os
+import socket
 import threading
 import time
 from collections import deque
 from datetime import datetime
 
-from . import connect_code
+from . import connect_code, discover
 from .config import QUALITY, RELAY_EXIT_PORT_BUSY, format_id
 from .netutil import is_admin, lan_addresses, open_firewall
 from .protocol import WanDenied, WanError
@@ -127,6 +128,8 @@ class NullUI:
     def set_server_fields(self, url, key): pass                # 안내 서버 칸의 주소 · 공용 키 글자
     def set_admin(self, is_admin): pass                        # 관리자 권한 여부 (아니면 '관리자로 다시 시작' 버튼 표시)
     def ask_yes_no(self, title, message, on_answer): pass      # 예/아니오 물어보고 on_answer(bool) 을 부름 (화면 스레드)
+    def ask_code(self, agent_id, label, prefill, on_answer): pass   # 접속 코드를 물어 on_answer(코드 또는 None) 을 부름
+    def set_found_code(self, code): pass                       # 같은 망에서 찾은 접속 정보를 붙여넣기 창에 채움
     def set_relay_status(self, text, level):
         if hasattr(self, "relay_lbl"):
             self.relay_lbl.configure(text=f"● {text}", fg=self._color(level))
@@ -140,6 +143,16 @@ class NullUI:
     def set_relay_code(self, code):
         if hasattr(self, "relay_code_var"):
             self.relay_code_var.set(code)
+
+    def set_found_code(self, code):
+        d = getattr(self, "_import_win", None)
+        try:
+            if d is not None and d.win.winfo_exists():
+                if not d.code.get():
+                    d.code.set(code)
+                d.hint.configure(text="같은 망에서 중계 PC 를 찾았습니다")
+        except self.tk.TclError:
+            pass
 
     def set_server_fields(self, url, key):
         self.url_var.set(url)
@@ -408,6 +421,17 @@ class WanTabController:
         self._spawn(work)
         return True
 
+    def find_on_lan(self):
+        """같은 망의 중계 PC 를 찾아 붙여넣기 창에 채운다 (작업 스레드)"""
+        def work():
+            code = discover.find_relay()
+            if code:
+                self._note("같은 망에서 중계 PC 를 찾았습니다")
+                self._ui("set_found_code", code)
+            else:
+                self._note("같은 망에서 중계 PC 를 찾지 못했습니다 — 접속 정보를 붙여넣으세요")
+        self._spawn(work)
+
     def import_connection(self, text, as_field=False, name="", code="") -> bool:
         """다른 PC: 중계 PC 의 접속 정보를 붙여넣어 주소·공용 키를 채우고 바로 연결 (현장이면 이름·접속 코드도 함께)"""
         try:
@@ -415,11 +439,10 @@ class WanTabController:
         except ValueError as e:
             self._ui("show_error", "접속 정보", str(e))
             return False
-        if as_field:
-            code, err = validate_code(code)
-            if err:
-                self._ui("show_error", "접속 정보", f"현장 PC 로 쓰려면 접속 코드가 필요합니다.\n{err}")
-                return False
+        code = (code or "").strip()
+        if as_field and len(code) > CODE_MAX:
+            self._ui("show_error", "접속 정보", f"접속 코드는 {CODE_MAX}자 이하여야 합니다")
+            return False
         self._ui("set_busy", "server", True)
 
         def work():
@@ -429,7 +452,8 @@ class WanTabController:
                 self._ui("set_server_fields", url, key)
                 self._note(f"접속 정보 적용: {url}")
                 if as_field:
-                    self.cfg.update(access_code=code, **({"name": name.strip()[:NAME_MAX]} if name.strip() else {}))
+                    name_ = name.strip() or (self.cfg.get("name") or "").strip() or socket.gethostname()
+                    self.cfg.update(name=name_[:NAME_MAX], **({"access_code": code} if code else {}))   # 코드를 비우면 공용 키로 접속
                     self.field_toggled(True)
                 self._restart_client()
             except Exception as e:
@@ -460,9 +484,13 @@ class WanTabController:
         """→ (ID 글자, 이름 글자, 접속 코드 상태 글자)"""
         agent_id = self.cfg.ensure_id()
         name = self.cfg.get("name") or ""
-        code_set = bool(self.cfg.get("access_code"))
-        return (format_id(agent_id), name.strip() or "(이름 없음)",
-                "접속 코드 설정됨" if code_set else "접속 코드 미설정 — 미설정이면 모두 거부")
+        if self.cfg.get("access_code"):
+            code_text = "접속 코드 설정됨"
+        elif self.cfg.get("relay_key"):
+            code_text = "접속 코드 없음 — 공용 키로 접속"
+        else:
+            code_text = "접속 코드 · 공용 키 없음 — 모두 거부"
+        return (format_id(agent_id), name.strip() or "(이름 없음)", code_text)
 
     def field_status(self) -> tuple:
         """에이전트 프로세스 상태 → (글자, ok / warn / off)"""
@@ -553,43 +581,90 @@ class WanTabController:
             self.refresh_agents()
 
     def remembered_code(self, agent_id: str) -> str:
-        return self._codes.get(agent_id, "")
+        return self._codes.get(agent_id) or (self.cfg.get("saved_codes") or {}).get(agent_id, "")
 
-    def connect(self, agent_id: str, code) -> bool:
-        """원격 연결 (작업 스레드).  성공하면 ctx["open_remote"](session, agent) 를 화면 스레드에서 부름"""
+    def default_code(self, agent_id: str) -> str:
+        """더블클릭 때 쓸 코드: 한 번 입력해 둔 코드 → 없으면 공용 키 (코드를 따로 정하지 않은 현장은 공용 키로 열린다)"""
+        return self.remembered_code(agent_id) or (self.cfg.get("relay_key") or "").strip()
+
+    def quick_connect(self, agent_id: str) -> bool:
+        """더블클릭 / '원격 연결': 코드를 묻지 않고 바로 연결. 코드가 안 맞을 때만 한 번 물어본다"""
         agent = self.agent(agent_id)
         if agent is None:
             self._ui("show_error", "원격 연결", "목록에서 현장 PC 를 먼저 선택하세요")
             return False
-        code, err = validate_code(code)
-        if err:
-            self._ui("show_error", "원격 연결", err)
+        code = self.default_code(agent_id)
+        if not code:
+            self._ask_code(agent_id, agent, "")
+            return True
+        return self.connect(agent_id, code, ask_on_deny=True, validate=False)
+
+    def _label(self, agent_id, agent):
+        return (agent.get("name") or "").strip() or format_id(agent_id)
+
+    def _ask_code(self, agent_id, agent, why):
+        self._ui("ask_code", agent_id, self._label(agent_id, agent), why,
+                 lambda code: code is not None and self.connect(agent_id, code))
+
+    def _save_code(self, agent_id, code):
+        """공용 키가 아닌, 따로 입력한 코드만 기억 (다음부터 더블클릭만으로 연결)"""
+        if code == (self.cfg.get("relay_key") or "").strip():
+            return
+        saved = dict(self.cfg.get("saved_codes") or {})
+        saved[agent_id] = code
+        self.cfg.update(saved_codes=saved)
+
+    def _forget_code(self, agent_id):
+        saved = dict(self.cfg.get("saved_codes") or {})
+        if saved.pop(agent_id, None) is not None:
+            self.cfg.update(saved_codes=saved)
+
+    def connect(self, agent_id: str, code, ask_on_deny=False, validate=True) -> bool:
+        """원격 연결 (작업 스레드).  성공하면 ctx["open_remote"](session, agent) 를 화면 스레드에서 부름.
+        ask_on_deny: 코드가 맞지 않으면 오류 대신 접속 코드를 물어봄"""
+        agent = self.agent(agent_id)
+        if agent is None:
+            self._ui("show_error", "원격 연결", "목록에서 현장 PC 를 먼저 선택하세요")
             return False
+        if validate:
+            code, err = validate_code(code)
+            if err:
+                self._ui("show_error", "원격 연결", err)
+                return False
         if agent_id in self._connecting:
             self.log("이미 연결하는 중입니다")
             return False
         self._connecting.add(agent_id)
         self._codes[agent_id] = code
-        name = (agent.get("name") or "").strip() or format_id(agent_id)
+        name = self._label(agent_id, agent)
         self._ui("set_busy", "connect", True)
         self.log(f"{name} 에 연결하는 중…")
 
         def work():
+            retry = False
             try:
                 session = self.client.open_session(agent_id, code, name)
             except WanDenied as e:
                 self._codes.pop(agent_id, None)      # 틀린 코드는 다음에 미리 채우지 않음
-                self._fail(name, e)
+                self._forget_code(agent_id)
+                if ask_on_deny and "맞지 않" in str(e):
+                    retry = True
+                    self._note(f"{name}: 접속 코드가 필요합니다")
+                else:
+                    self._fail(name, e)
             except WanError as e:
                 self._fail(name, e)
             except Exception as e:
                 self._fail(name, f"{type(e).__name__}: {e}")
             else:
+                self._save_code(agent_id, code)
                 self._note(f"{name} 연결됨 ({getattr(session, 'mode', '')})")
                 self.schedule(lambda: self.ctx["open_remote"](session, agent))
             finally:
                 self._connecting.discard(agent_id)
                 self._ui("set_busy", "connect", bool(self._connecting))
+            if retry:
+                self._ask_code(agent_id, agent, "이 현장 PC 는 따로 접속 코드를 정해 두었습니다")
         self._spawn(work)
         return True
 
@@ -953,16 +1028,15 @@ class WanTab(NullUI):
             pass
 
     def _import_dialog(self):
-        """다른 PC: 접속 정보를 붙여넣고 역할(출장지/현장)을 고르면 주소·키·(현장이면 이름·접속 코드)까지 한 번에 적용"""
+        """다른 PC: 같은 망이면 중계 PC 를 자동으로 찾아 채우고(아니면 복사한 접속 정보를 붙여넣기), 역할만 고르면 끝"""
         app, tk, px = self.app, self.tk, self.px
         win = tk.Toplevel(self.root)
-        win.title("접속 정보 붙여넣기")
+        win.title("중계 PC 연결")
         win.configure(bg=app.PANEL)
         win.transient(self.root)
         pad = tk.Frame(win, bg=app.PANEL)
         pad.pack(fill="both", expand=True, padx=px(16), pady=px(12))
-        tk.Label(pad, text="중계 PC 에서 복사한 접속 정보를 붙여넣으세요", font=app.FONT_BOLD, fg=app.TEXT, bg=app.PANEL,
-                 anchor="w").pack(fill="x")
+        tk.Label(pad, text="중계 PC 의 접속 정보", font=app.FONT_BOLD, fg=app.TEXT, bg=app.PANEL, anchor="w").pack(fill="x")
         code_var = tk.StringVar()
         try:
             clip = self.root.clipboard_get()
@@ -970,21 +1044,22 @@ class WanTab(NullUI):
                 code_var.set(clip.strip())
         except Exception:
             pass
-        app._entry(pad, code_var, 46).pack(fill="x", pady=(px(6), px(8)), ipady=px(2))
-        role_var = tk.StringVar(value="user")
+        app._entry(pad, code_var, 46).pack(fill="x", pady=(px(6), px(2)), ipady=px(2))
+        hint = tk.Label(pad, text="", font=app.FONT_SMALL, fg=app.TEXT_DIM, bg=app.PANEL, anchor="w")
+        hint.pack(fill="x", pady=(0, px(6)))
+        role_var = tk.StringVar(value="field" if self.ctx["cfg"].get("enabled") else "user")
         for text, val in (("출장지 PC — 현장 PC 에 원격으로 접속하는 쪽", "user"), ("현장 PC — 원격 접속을 받는 쪽", "field")):
             tk.Radiobutton(pad, text=text, variable=role_var, value=val, bg=app.PANEL, fg=app.TEXT, font=app.FONT,
                            activebackground=app.PANEL, selectcolor=app.PANEL, anchor="w",
                            command=lambda: show_field()).pack(fill="x")
         field = tk.Frame(pad, bg=app.PANEL)
-        name_var, access_var = tk.StringVar(), tk.StringVar()
-        for label, var in (("이름", name_var), ("접속 코드", access_var)):
-            r = tk.Frame(field, bg=app.PANEL)
-            r.pack(fill="x", pady=(px(4), 0))
-            app._field_label(r, label, width=8).pack(side="left")
-            app._entry(r, var, 22).pack(side="left", fill="x", expand=True, ipady=px(1))
-        tk.Label(field, text="접속 코드는 이 현장 PC 에 접속할 때 쓰는 비밀번호입니다", font=app.FONT_SMALL, fg=app.TEXT_DIM,
-                 bg=app.PANEL, anchor="w").pack(fill="x", pady=(px(2), 0))
+        name_var = tk.StringVar(value=self.ctx["cfg"].get("name") or "")
+        r = tk.Frame(field, bg=app.PANEL)
+        r.pack(fill="x", pady=(px(4), 0))
+        app._field_label(r, "이름", width=8).pack(side="left")
+        app._entry(r, name_var, 22).pack(side="left", fill="x", expand=True, ipady=px(1))
+        tk.Label(field, text="비워 두면 이 PC 의 이름을 씁니다. 접속은 공용 키로 자동으로 됩니다", font=app.FONT_SMALL,
+                 fg=app.TEXT_DIM, bg=app.PANEL, anchor="w").pack(fill="x", pady=(px(2), 0))
 
         def show_field():
             if role_var.get() == "field":
@@ -993,15 +1068,25 @@ class WanTab(NullUI):
                 field.pack_forget()
 
         def ok():
-            if self.controller.import_connection(code_var.get(), role_var.get() == "field", name_var.get(),
-                                                 access_var.get()):
+            if self.controller.import_connection(code_var.get(), role_var.get() == "field", name_var.get()):
                 win.destroy()
+
+        def find():
+            hint.configure(text="같은 망에서 중계 PC 를 찾는 중…")
+            self.controller.find_on_lan()
         btns = tk.Frame(pad, bg=app.PANEL)
         btns.pack(fill="x", pady=(px(10), 0))
         app._button(btns, "확인", "primary", ok).pack(side="left")
         app._button(btns, "취소", "secondary", win.destroy).pack(side="left", padx=(px(8), 0))
-        self._import_win = SimpleNamespaceDialog(win, code_var, role_var, name_var, access_var, ok)
+        app._button(btns, "같은 망에서 다시 찾기", "secondary", find, small=True).pack(side="right")
+        self._import_win = SimpleNamespaceDialog(win, code_var, role_var, name_var, ok)
         self._import_win.field, self._import_win.btns, self._import_win.show_field = field, btns, show_field
+        self._import_win.hint = hint
+        show_field()
+        if code_var.get():
+            hint.configure(text="복사해 둔 접속 정보를 넣었습니다")
+        else:
+            find()                                                   # 복사해 둔 게 없으면 같은 망에서 자동으로 찾는다
 
     def _relay_toggled(self):
         self._relay_layout()
@@ -1024,15 +1109,13 @@ class WanTab(NullUI):
 
     def _connect(self):
         agent_id = self._selected()
-        if not agent_id:
-            return
-        agent = self.controller.agent(agent_id) or {}
-        label = (agent.get("name") or "").strip() or format_id(agent_id)
-        code = self.sd.askstring("접속 코드", f"'{label}' 의 접속 코드를 입력하세요", show="*", parent=self.root,
-                                 initialvalue=self.controller.remembered_code(agent_id))
-        if code is None:
-            return
-        self.controller.connect(agent_id, code)
+        if agent_id:
+            self.controller.quick_connect(agent_id)
+
+    def ask_code(self, agent_id, label, why, on_answer):
+        msg = f"'{label}' 의 접속 코드를 입력하세요" + (f"\n({why})" if why else "")
+        on_answer(self.sd.askstring("접속 코드", msg, show="*", parent=self.root,
+                                    initialvalue=self.controller.remembered_code(agent_id)))
 
     def _config_dialog(self):
         agent_id = self._selected()
@@ -1145,8 +1228,8 @@ class WanTab(NullUI):
 
 class SimpleNamespaceDialog:
     """붙여넣기 창의 입력값 묶음 (시험이 창을 조작할 수 있게 보관)"""
-    def __init__(self, win, code, role, name, access, ok):
-        self.win, self.code, self.role, self.name, self.access, self.ok = win, code, role, name, access, ok
+    def __init__(self, win, code, role, name, ok):
+        self.win, self.code, self.role, self.name, self.ok = win, code, role, name, ok
 
 
 def build_tab(app, parent, ctx) -> WanTab:

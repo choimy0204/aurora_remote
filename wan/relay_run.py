@@ -15,7 +15,9 @@ import threading
 import time
 
 from .agent import FileLog, _watch_parent
-from .config import RELAY_EXIT_PORT_BUSY as EXIT_PORT_BUSY, default_dir
+from . import connect_code, discover
+from .config import DISCOVER_PORT, RELAY_EXIT_PORT_BUSY as EXIT_PORT_BUSY, WanConfig, default_dir
+from .netutil import lan_addresses
 from .server import RelayServer, run_server
 
 
@@ -46,6 +48,7 @@ def main(argv=None) -> int:
     ap.add_argument("--data", default=os.path.join(default_dir(), "relay_data"))
     ap.add_argument("--update-dir", default="")
     ap.add_argument("--parent-pid", type=int, default=0)
+    ap.add_argument("--discover-port", type=int, default=DISCOVER_PORT)
     args, _ = ap.parse_known_args(argv)          # --wan-relay 같은 진입 표시는 무시
     base = default_dir()
     log = FileLog(os.path.join(base, "wan_relay.log"))
@@ -55,6 +58,12 @@ def main(argv=None) -> int:
         _watch_parent(args.parent_pid)
     threading.Thread(target=_alive_loop, args=(os.path.join(base, "wan_relay.alive"),), daemon=True).start()
     key = os.environ.get("AURORA_RELAY_KEY", "")
+
+    def code() -> str:
+        ext = (WanConfig(base).get("relay_external") or "").strip()
+        urls = ([connect_code.make_url(ext, args.port)] if ext else []) + [f"ws://{ip}:{args.port}" for ip in lan_addresses()[:3]]
+        return connect_code.encode(urls, key)
+    threading.Thread(target=discover.serve, args=(code, threading.Event(), args.discover_port, log), daemon=True).start()
     server = RelayServer(args.data, key, args.update_dir or None)
     try:
         asyncio.run(run_server(server, args.host, args.port))

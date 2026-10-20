@@ -140,6 +140,7 @@ def test_auto_button_and_paste_dialog_with_real_widgets(app, monkeypatch):
     assert hasattr(tab, "auto_btn") and hasattr(tab, "relay_code_var") and hasattr(tab, "admin_btn")
     got = []
     monkeypatch.setattr(tab.controller, "import_connection", lambda *a, **k: got.append(a) or True)
+    monkeypatch.setattr(tab.controller, "find_on_lan", lambda: None)
     app._select_tab(4)
     tab._import_dialog()
     d = tab._import_win
@@ -147,10 +148,9 @@ def test_auto_button_and_paste_dialog_with_real_widgets(app, monkeypatch):
     d.code.set(code)
     d.role.set("field")
     d.name.set("CCW 1")
-    d.access.set("4321")
     d.ok()
     app.root.update()
-    assert got == [(code, True, "CCW 1", "4321")]
+    assert got == [(code, True, "CCW 1")]
     assert not d.win.winfo_exists()                                      # 성공하면 창이 닫힘
     tab.set_relay_code("AW1-test")
     assert tab.relay_code_var.get() == "AW1-test"
@@ -167,9 +167,10 @@ def test_auto_button_and_paste_dialog_with_real_widgets(app, monkeypatch):
     assert not tab.admin_btn.winfo_ismapped()
 
 
-def test_paste_dialog_field_inputs_appear_above_the_buttons(app):
+def test_paste_dialog_field_inputs_appear_above_the_buttons(app, monkeypatch):
     """현장 PC 를 고르면 나오는 이름·접속 코드 칸이 확인/취소 버튼 위에 있어야 한다 (예전에는 버튼 아래로 밀렸음)"""
     tab = app._wan_tab
+    monkeypatch.setattr(tab.controller, "find_on_lan", lambda: None)
     app._select_tab(4)
     tab._import_dialog()
     d = tab._import_win
@@ -183,3 +184,24 @@ def test_paste_dialog_field_inputs_appear_above_the_buttons(app):
     d.win.update()
     assert not d.field.winfo_ismapped()
     d.win.destroy()
+
+
+def test_paste_dialog_searches_lan_when_clipboard_is_empty_and_fills_result(app, monkeypatch):
+    """복사해 둔 게 없으면 열자마자 같은 망에서 찾고, 찾은 접속 정보가 입력칸에 들어온다"""
+    from wan import connect_code
+    tab = app._wan_tab
+    searched = []
+    monkeypatch.setattr(tab.controller, "find_on_lan", lambda: searched.append(1))
+    try:
+        app.root.clipboard_clear()
+    except Exception:
+        pass
+    app._select_tab(4)
+    tab._import_dialog()
+    d = tab._import_win
+    assert searched == [1] and "찾는 중" in d.hint.cget("text")
+    code = connect_code.encode(["ws://10.0.0.5:9100"], "k")
+    tab.set_found_code(code)
+    assert d.code.get() == code and "찾았습니다" in d.hint.cget("text")
+    d.win.destroy()
+    tab.set_found_code(code)                                              # 창이 닫힌 뒤 늦게 도착해도 오류 없음

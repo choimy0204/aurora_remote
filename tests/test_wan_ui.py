@@ -540,7 +540,7 @@ def test_apply_server_uses_worker_thread_by_default():
 
 def test_field_info_texts():
     ctl, ctx, _ = make_ctl()
-    assert ctl.field_info() == ("A1B2-C3D4-E5F6", "(이름 없음)", "접속 코드 미설정 — 미설정이면 모두 거부")
+    assert ctl.field_info() == ("A1B2-C3D4-E5F6", "(이름 없음)", "접속 코드 · 공용 키 없음 — 모두 거부")
     ctx["cfg"].d.update(name=" 사무실 ", access_code="1234")
     assert ctl.field_info()[1:] == ("사무실", "접속 코드 설정됨")
 
@@ -880,21 +880,36 @@ def test_tab_field_checkbox(fake_tk):
 
 
 def test_tab_connect_flow(fake_tk):
+    """더블클릭/원격 연결: 접속 코드를 묻지 않고 공용 키로 바로 연결"""
     tab, app, ctx = make_tab(fake_tk)
     ctx["client"].agents = [ag("x1", "현장A")]
     tab.tree.selection.return_value = ("x1",)
-    sys.modules["tkinter.simpledialog"].askstring.return_value = "9999"
+    ask = sys.modules["tkinter.simpledialog"].askstring
+    ask.reset_mock()
     button_cmd(app, "원격 연결")()
-    kw = sys.modules["tkinter.simpledialog"].askstring.call_args.kwargs
+    assert not ask.called
+    assert ctx["client"].calls[-1] == ("open", "x1", "k", "현장A")
+    ctx["open_remote"].assert_called_once()
+
+
+def test_tab_connect_asks_for_code_only_when_no_key(fake_tk):
+    tab, app, ctx = make_tab(fake_tk)
+    ctx["cfg"].d["relay_key"] = ""
+    ctx["client"].agents = [ag("x1", "현장A")]
+    tab.tree.selection.return_value = ("x1",)
+    ask = sys.modules["tkinter.simpledialog"].askstring
+    ask.return_value = "9999"
+    button_cmd(app, "원격 연결")()
+    kw = ask.call_args.kwargs
     assert kw["show"] == "*" and kw["initialvalue"] == ""
     assert ctx["client"].calls[-1] == ("open", "x1", "9999", "현장A")
-    ctx["open_remote"].assert_called_once()
-    button_cmd(app, "원격 연결")()                                  # 두 번째 — 기억한 코드가 미리 채워짐
-    assert sys.modules["tkinter.simpledialog"].askstring.call_args.kwargs["initialvalue"] == "9999"
+    button_cmd(app, "원격 연결")()                                  # 두 번째 — 기억한 코드로 묻지 않고 연결
+    assert ask.call_count == 1
 
 
 def test_tab_connect_cancel_and_no_selection(fake_tk):
     tab, app, ctx = make_tab(fake_tk)
+    ctx["cfg"].d["relay_key"] = ""
     ctx["client"].agents = [ag("x1", "A")]
     tab.tree.selection.return_value = ()
     button_cmd(app, "원격 연결")()

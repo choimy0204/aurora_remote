@@ -181,7 +181,7 @@ class WanAgent:
         self._fails = [t for t in self._fails if now - t < CODE_LOCK]
         if len(self._fails) >= CODE_FAILS:
             return "locked"
-        real = self.cfg.get("access_code")
+        real = self.cfg.get("access_code") or self.cfg.get("relay_key")      # 코드를 따로 안 정했으면 공용 키가 접속 코드
         if not real:
             return "no_code"
         if not hmac.compare_digest(str(code).encode("utf-8"), real.encode("utf-8")):

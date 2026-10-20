@@ -148,17 +148,26 @@ def test_import_as_user_sets_address_key_and_connects(monkeypatch):
     ctx["client"].start.assert_called_once()
 
 
-def test_import_as_field_requires_code_then_turns_on_field_mode(monkeypatch):
+def test_import_as_field_needs_no_code_and_defaults_name(monkeypatch):
+    ctl, ctx, ui = with_ctx(monkeypatch)
+    monkeypatch.setattr(cc, "pick_reachable", lambda urls, timeout=2.0: urls[0])
+    monkeypatch.setattr(wui.socket, "gethostname", lambda: "PC-FIELD-7")
+    ctx["cfg"].d.update(enabled=False, access_code="", name="")
+    ctx["set_field_mode"] = MagicMock()
+    code = cc.encode(["ws://h:9100"], "k")
+    assert ctl.import_connection(code, as_field=True) is True              # 접속 코드·이름 없이도 됨
+    assert ctx["cfg"].get("access_code") == "" and ctx["cfg"].get("name") == "PC-FIELD-7"
+    ctx["set_field_mode"].assert_called_once_with(True)
+    assert ctx["cfg"].get("relay_key") == "k"                              # 이 공용 키가 곧 접속 코드
+
+
+def test_import_as_field_keeps_name_and_sets_code_when_given(monkeypatch):
     ctl, ctx, ui = with_ctx(monkeypatch)
     monkeypatch.setattr(cc, "pick_reachable", lambda urls, timeout=2.0: urls[0])
     ctx["cfg"].d.update(enabled=False, access_code="", name="")
     ctx["set_field_mode"] = MagicMock()
-    code = cc.encode(["ws://h:9100"], "k")
-    assert ctl.import_connection(code, as_field=True, name="CCW 1", code="") is False
-    assert "접속 코드" in ui.last("show_error")[1]
-    assert ctl.import_connection(code, as_field=True, name="CCW 1", code="4321") is True
+    assert ctl.import_connection(cc.encode(["ws://h:9100"], "k"), as_field=True, name="CCW 1", code="4321") is True
     assert ctx["cfg"].get("access_code") == "4321" and ctx["cfg"].get("name") == "CCW 1"
-    ctx["set_field_mode"].assert_called_once_with(True)
 
 
 def test_import_garbage_shows_error_and_changes_nothing(monkeypatch):
@@ -202,3 +211,153 @@ def test_auto_setup_then_paste_connects_for_real(host, tmp_path, monkeypatch):
         assert other.cfg.get("relay_key") == relay_pc.cfg.get("relay_key") != ""
     finally:
         other.shutdown()
+
+
+# ── 더블클릭 연결 (접속 코드를 묻지 않음) ──
+from wan.protocol import WanDenied
+
+
+def conn_ctl(monkeypatch, **cfg):
+    ctl, ctx, ui = with_ctx(monkeypatch, relay_key="공용키", **cfg)
+    ctx["cfg"].d.setdefault("saved_codes", {})
+    ctl.client.agents = [{"id": "a1", "name": "현장1", "online": True}]
+    ctl.agent = lambda aid: {"id": aid, "name": "현장1"} if aid == "a1" else None
+    ctx["open_remote"] = MagicMock()
+    ctl.ctx = ctx
+    return ctl, ctx, ui
+
+
+def test_double_click_uses_shared_key_without_asking(monkeypatch):
+    ctl, ctx, ui = conn_ctl(monkeypatch)
+    ctl.client.open_session = MagicMock(return_value=MagicMock(mode="direct"))
+    assert ctl.quick_connect("a1") is True
+    ctl.client.open_session.assert_called_once_with("a1", "공용키", "현장1")
+    assert not [c for c in ui.calls if c[0] in ("ask_code", "show_error")]
+    ctx["open_remote"].assert_called_once()
+    assert ctx["cfg"].get("saved_codes") == {}                              # 공용 키는 따로 저장하지 않음
+
+
+def test_wrong_key_asks_once_then_remembers_typed_code(monkeypatch):
+    ctl, ctx, ui = conn_ctl(monkeypatch)
+    calls = []
+
+    def open_session(aid, code, name):
+        calls.append(code)
+        if code != "내코드":
+            raise WanDenied("접속 코드가 맞지 않습니다")
+        return MagicMock(mode="relay")
+    ctl.client.open_session = open_session
+    asked = []
+    ui.ask_code = lambda aid, label, why, cb: (asked.append((label, why)), cb("내코드"))
+    ctl.quick_connect("a1")
+    assert calls == ["공용키", "내코드"] and len(asked) == 1 and "따로" in asked[0][1]
+    assert ctx["cfg"].get("saved_codes") == {"a1": "내코드"}
+    calls.clear(); asked.clear()
+    ctl._codes.clear()
+    ctl.quick_connect("a1")                                                 # 다음 더블클릭은 묻지 않고 기억한 코드로
+    assert calls == ["내코드"] and not asked
+
+
+def test_saved_code_that_stops_working_is_forgotten_and_asked_again(monkeypatch):
+    ctl, ctx, ui = conn_ctl(monkeypatch)
+    ctx["cfg"].d["saved_codes"] = {"a1": "옛코드"}
+    ctl.client.open_session = MagicMock(side_effect=WanDenied("접속 코드가 맞지 않습니다"))
+    asked = []
+    ui.ask_code = lambda aid, label, why, cb: (asked.append(1), cb(None))   # 사용자가 취소
+    ctl.quick_connect("a1")
+    assert ctx["cfg"].get("saved_codes") == {} and asked == [1]
+
+
+def test_locked_or_offline_is_an_error_not_a_prompt(monkeypatch):
+    ctl, ctx, ui = conn_ctl(monkeypatch)
+    ctl.client.open_session = MagicMock(side_effect=WanDenied("접속 코드를 여러 번 틀려 잠시 막혔습니다"))
+    ui.ask_code = MagicMock()
+    ctl.quick_connect("a1")
+    ui.ask_code.assert_not_called()
+    assert ui.last("show_error")
+
+
+def test_no_key_and_no_saved_code_asks_directly(monkeypatch):
+    ctl, ctx, ui = conn_ctl(monkeypatch)
+    ctx["cfg"].d["relay_key"] = ""
+    asked = []
+    ui.ask_code = lambda aid, label, why, cb: asked.append(label)
+    ctl.quick_connect("a1")
+    assert asked == ["현장1"]
+
+
+def test_field_info_text_for_key_based_access(monkeypatch):
+    ctl, ctx, _ = conn_ctl(monkeypatch)
+    assert ctl.field_info()[2] == "접속 코드 없음 — 공용 키로 접속"
+    ctx["cfg"].d["access_code"] = "x"
+    assert ctl.field_info()[2] == "접속 코드 설정됨"
+    ctx["cfg"].d.update(access_code="", relay_key="")
+    assert "모두 거부" in ctl.field_info()[2]
+
+
+# ── 같은 망 자동 찾기 ──
+def test_discovery_roundtrip_on_loopback():
+    import threading
+    from wan import discover
+    with socket.socket(socket.SOCK_DGRAM and socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    stop = threading.Event()
+    code = cc.encode(["ws://192.168.0.5:9100"], "키")
+    t = threading.Thread(target=discover.serve, args=(lambda: code, stop, port), daemon=True)
+    t.start()
+    try:
+        import time
+        time.sleep(0.3)
+        got = discover.find_relay(timeout=3, port=port, targets=[("127.0.0.1", port)])
+        assert got == code and cc.decode(got) == (["ws://192.168.0.5:9100"], "키")
+        assert discover.find_relay(timeout=0.5, port=port, targets=[("127.0.0.1", port + 1)]) is None
+    finally:
+        stop.set()
+        t.join(3)
+
+
+def test_discovery_serve_port_in_use_does_not_crash():
+    import threading
+    from wan import discover
+    msgs = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as blocker:
+        blocker.bind(("0.0.0.0", 0))
+        port = blocker.getsockname()[1]
+        # SO_REUSEADDR 로 열리는 환경이면 조용히 같이 열리고, 아니면 로그만 남기고 끝난다 — 어느 쪽이든 예외가 새지 않아야 함
+        stop = threading.Event()
+        stop.set()
+        discover.serve(lambda: "x", stop, port, msgs.append)
+
+
+def test_find_on_lan_fills_dialog_or_reports(monkeypatch):
+    ctl, ctx, ui = with_ctx(monkeypatch)
+    from wan import discover
+    monkeypatch.setattr(discover, "find_relay", lambda *a, **k: "AW1-abc")
+    ctl.find_on_lan()
+    assert ui.last("set_found_code") == ("AW1-abc",)
+    monkeypatch.setattr(discover, "find_relay", lambda *a, **k: None)
+    ui.calls.clear()
+    ctl.find_on_lan()
+    assert not [c for c in ui.calls if c[0] == "set_found_code"]
+
+
+def test_firewall_commands_include_discovery_udp():
+    from wan import netutil
+    cmds = netutil.firewall_commands(9100)
+    assert "protocol=TCP" in cmds[0] and "localport=9100" in cmds[0]
+    assert "protocol=UDP" in cmds[1] and "localport=9101" in cmds[1]
+
+
+def test_agent_accepts_shared_key_only_when_no_access_code():
+    from wan.agent import WanAgent
+    class C:
+        def __init__(self, **d): self.d = d
+        def get(self, k, default=None): return self.d.get(k, default)
+    mk = lambda **d: WanAgent(C(**d), 1, lambda: "", "1", lambda m: None)
+    a = mk(access_code="", relay_key="공용키")
+    assert a.check_code("공용키") is None
+    assert mk(access_code="", relay_key="공용키").check_code("틀림") == "bad_code"
+    assert mk(access_code="4321", relay_key="공용키").check_code("공용키") == "bad_code"   # 코드를 정했으면 키로는 안 열림
+    assert mk(access_code="4321", relay_key="공용키").check_code("4321") is None
+    assert mk(access_code="", relay_key="").check_code("") == "no_code"                  # 둘 다 없으면 모두 거부

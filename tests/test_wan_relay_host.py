@@ -43,7 +43,8 @@ def host(tmp_path, monkeypatch):
     def _make(**cfg):
         r = rt.WanRuntime("2.16.0", lambda: [sys.executable, "-c", "import time; time.sleep(60)"], None, str(tmp_path),
                           lambda m: None,
-                          relay_command=lambda: [sys.executable, "-m", "wan.relay_run", "--parent-pid", str(os.getpid())])
+                          relay_command=lambda: [sys.executable, "-m", "wan.relay_run", "--parent-pid", str(os.getpid()),
+                                                 "--discover-port", str(free_port())])
         r.cfg.update(relay_port=free_port(), relay_key=KEY, **cfg)
         made.append(r)
         return r

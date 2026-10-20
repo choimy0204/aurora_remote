@@ -23,6 +23,8 @@ MAX_PREFETCH = 3
 
 RELAY_EXIT_PORT_BUSY = 3    # 안내 서버 프로세스가 포트를 못 잡고 끝날 때의 종료 코드 (화면에 이유를 보여 주려고)
 
+DISCOVER_PORT = 9101        # 같은 망에서 중계 PC 를 자동으로 찾는 UDP 포트
+
 DEFAULT_STUN = "stun:stun.l.google.com:19302"
 
 
@@ -51,6 +53,7 @@ DEFAULTS = {
     "auto_update":  True,
     "relay_host":   False,    # 이 PC 에서 안내 서버(중계)도 운영할지 — 공용 키는 relay_key 를 그대로 씀
     "relay_port":   9100,     # 안내 서버가 받을 포트
+    "saved_codes":  {},       # 사용자 PC: 현장 PC 별로 한 번 입력해 둔 접속 코드 {agent_id: code} (따로 정한 코드가 있는 현장만)
     "relay_external": "",     # 다른 망에서 이 안내 서버에 닿는 주소(공인 IP · 도메인) — 접속 정보에 넣음
 }
 

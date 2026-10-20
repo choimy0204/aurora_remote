@@ -64,8 +64,31 @@ def test_no_code_configured_denies_everything(world):
     world.client.set_config(world.agent_id, {"access_code": ""})
     # 빈 코드는 sanitize 를 통과하지만 현장은 코드가 비어 있으면 모두 거부해야 함
     eventually(lambda: world.agent.cfg.get("access_code") == "")
-    with pytest.raises(P.WanDenied, match="설정되지 않"):
+    with pytest.raises(P.WanDenied, match="공용 키도 없"):
         world.client.open_session(world.agent_id, "")
+
+
+def test_shared_key_opens_field_without_access_code(tmp_path):
+    """접속 코드를 따로 정하지 않은 현장은 공용 키가 곧 접속 코드 — 더블클릭만으로 연결"""
+    w = World(tmp_path, code="", key="shared-key-1")
+    try:
+        s = w.client.open_session(w.agent_id, "shared-key-1")
+        assert s.request("GET", "/info").status_code == 200
+        s.close()
+        with pytest.raises(P.WanDenied, match="맞지 않"):
+            w.client.open_session(w.agent_id, "wrong")
+    finally:
+        w.close()
+
+
+def test_explicit_access_code_is_not_opened_by_shared_key(tmp_path):
+    w = World(tmp_path, code="4321", key="shared-key-1")
+    try:
+        with pytest.raises(P.WanDenied, match="맞지 않"):
+            w.client.open_session(w.agent_id, "shared-key-1")
+        w.client.open_session(w.agent_id, "4321").close()
+    finally:
+        w.close()
 
 
 def test_code_check_happens_on_field_not_server(world):
