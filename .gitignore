@@ -9,3 +9,6 @@ __pycache__/
 *.pyc
 *.done
 *.log
+.pytest_cache/
+relay_data/
+*.alive

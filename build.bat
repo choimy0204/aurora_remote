@@ -13,6 +13,12 @@ rem 패키지가 없을 때만 설치 (매번 pip 확인하던 시간 절약)
     "%PY%" -m pip install requests psutil pystray pillow pyinstaller --quiet
 )
 
+rem WAN remote packages (optional) - bundled only when installed; the build works without them
+"%PY%" -c "import aiortc, websockets" >nul 2>&1 || (
+    echo Installing WAN packages - optional...
+    "%PY%" -m pip install aiortc websockets --quiet
+)
+
 rem dist 에서 실행 중인 exe 만 종료 + 버전이 바뀌었으면 dist\latest → dist\old\v이전버전 으로 보관
 "%PY%" "%ROOT%tools\release.py" prepare || exit /b 1
 

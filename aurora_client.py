@@ -1728,6 +1728,7 @@ class AuroraClientApp:
         "Aurora 실행 경로를 지정하고, 등록한 exe 이름의 프로세스를 강제 종료하는 탭입니다.",
         "규칙(폴더·확장자·기한·ON)에 따라 오래된 파일이나 날짜 폴더를 날짜가 바뀔 때(자정) 자동 삭제하는 탭입니다.",
         "중계 PC(LHS)를 거쳐 직접 연결되지 않는 장비와 파일을 주고받는 탭입니다. 반출 모드는 장비 → 내 PC, 반입 모드는 내 PC → 장비이며, D 드라이브와 바탕화면만 접근할 수 있습니다. 오른쪽 파일 목록에서 우클릭으로 이름 바꾸기·삭제·새 폴더, 탐색기에서 끌어다 놓으면 반입합니다.",
+        "인터넷을 건너 멀리 있는 현장 PC 를 원격으로 보고 조작하는 탭입니다(출장용). 회사 안내 서버를 통해 현장 PC 를 찾아 직접 연결하며, LAN 기능(위의 다른 탭)과는 완전히 분리되어 서로 영향을 주지 않습니다.",
     ]
 
     # ── 색상 ─────────────────────────────
@@ -1964,7 +1965,7 @@ class AuroraClientApp:
         self._tab_frames = []
         self._tab_labels = []
         self._tab_lines  = []
-        for i, title in enumerate(["설정", "프로세스 관리", "자동 삭제", "반입/반출"]):
+        for i, title in enumerate(["설정", "프로세스 관리", "자동 삭제", "반입/반출", "WAN 원격"]):
             cell = tk.Frame(tabbar, bg=self.PANEL)
             cell.pack(side="left", padx=(_px(8) if i == 0 else 0, 0))
             lbl = tk.Label(cell, text=title, font=self.FONT_TAB, fg=self.TEXT_DIM,
@@ -1982,6 +1983,7 @@ class AuroraClientApp:
         self._build_process_tab(self._tab_frames[1])
         self._build_delete_tab(self._tab_frames[2])
         self._build_export_tab(self._tab_frames[3])
+        self._build_wan_tab(self._tab_frames[4])
         self._select_tab(0)
 
     EXPORT_TAB = 3
@@ -3939,6 +3941,91 @@ class AuroraClientApp:
             self._auto_ping_client_running = False
         threading.Thread(target=_loop, daemon=True).start()
 
+    # ─────────────────────────────────────────
+    # WAN 원격 (인터넷 너머 현장 PC) — 모든 코드는 wan/ 패키지에 있고 여기는 연결점만 둔다.
+    # 여기서 생기는 어떤 오류도 LAN 기능에 번지지 않도록 전부 try/except 로 감싼다.
+    # ─────────────────────────────────────────
+    def _build_wan_tab(self, parent):
+        try:
+            from wan.runtime import WanRuntime
+            from wan import ui as wan_ui
+            self._wan = WanRuntime(APP_VERSION, self._wan_agent_command, self._wan_apply_update, log=self.add_log)
+            ctx = self._wan.tab_context(self._wan_open_remote, px=_px, log=self.add_log)
+            self._wan_tab = wan_ui.build_tab(self, parent, ctx)
+        except Exception as e:
+            self._wan = None
+            for w in parent.winfo_children():
+                w.destroy()
+            tk.Label(parent, text=f"WAN 원격을 사용할 수 없습니다\n\n{type(e).__name__}: {e}\n\n"
+                                  "(LAN 기능은 영향 없이 정상 동작합니다)",
+                     font=self.FONT_INPUT, fg=self.TEXT_DIM, bg=self.BG, justify="left").pack(anchor="w")
+            self.add_log(f"WAN 탭을 만들지 못했습니다: {type(e).__name__}: {e}")
+
+    def _wan_start(self):
+        wan = getattr(self, "_wan", None)
+        if wan is not None:
+            try:
+                wan.start()
+            except Exception as e:
+                self.add_log(f"[WAN] 시작 실패: {type(e).__name__}: {e}")
+
+    def _wan_shutdown(self):
+        wan = getattr(self, "_wan", None)
+        if wan is not None:
+            try:
+                wan.shutdown()
+            except Exception:
+                pass
+
+    def _wan_agent_command(self) -> list:
+        """현장 모드: 같은 exe 를 --wan-agent 로 한 번 더 실행 (별도 프로세스 — WAN 이 죽어도 이 프로그램은 계속)"""
+        from wan.supervisor import build_agent_command
+        return build_agent_command(getattr(sys, "frozen", False), sys.executable,
+                                   os.path.abspath(__file__), os.getpid())
+
+    def _wan_apply_update(self, info: dict):
+        """안내 서버에서 받아 둔 새 버전으로 교체 후 재시작 (업데이트 스레드에서 호출됨)"""
+        version = info["version"]
+        if aurora_update.parse_ver(version) <= aurora_update.parse_ver(APP_VERSION):
+            return
+        if aurora_update.auto_already_tried("client", version):
+            self.add_log(f"[WAN] v{version} 자동 업데이트를 이미 시도했지만 버전이 그대로입니다 — 건너뜁니다")
+            return
+        self._wan.stop_agent()                     # 에이전트가 exe 를 잡고 있으면 교체가 실패함
+        err = aurora_update.apply("client", info["path"], version, ["--tray"])
+        if err:
+            self.add_log(f"[WAN] 업데이트 실패: {err}")
+            if self._wan.cfg.get("enabled"):
+                self._wan.set_field_mode(True)     # 현장 모드 에이전트를 다시 켬
+            return
+        self.root.after(0, self.quit_app)
+
+    def _wan_open_remote(self, session, agent: dict):
+        """WAN 원격 창 (장비마다 1개) — 화면은 RemoteViewer 를 바탕으로, 오른쪽 반입/반출은 LAN 창과 같은 패널"""
+        try:
+            views = self.__dict__.setdefault("_wan_views", {})
+            aid = agent["id"]
+            if aid in views and views[aid].alive:
+                views[aid].focus()
+                session.close()
+                return
+            if not hasattr(self, "_wan_viewer_cls"):
+                from wan.viewer import make_viewer_class
+                self._wan_viewer_cls = make_viewer_class(aurora_remote.RemoteViewer)
+            label = agent.get("name") or aid
+            dev = {"ip": aid, "host": label, "label": label, "relay": False}
+            pane = []
+            views[aid] = self._wan_viewer_cls(
+                self.root, f"WAN 원격 — {label}", session, px=_px, font=self.FONT_INPUT, side_width=_px(420),
+                side=lambda frame: pane.append(_WanTransferPane(self, frame, dev, session)),
+                on_closed=lambda v: (pane and pane[0]._exp_cancel.set(),
+                                     views.pop(aid, None) if views.get(aid) is v else None))
+            self.add_log(f"[WAN] 원격 창 열기: {label} ({session.mode or '연결 중'})")
+        except Exception as e:
+            session.close()
+            self.add_log(f"[WAN] 원격 창을 열지 못했습니다: {type(e).__name__}: {e}")
+            messagebox.showerror("WAN 원격", f"원격 창을 열지 못했습니다.\n\n{e}", parent=self.root)
+
     def _start_threads(self):
         threading.Thread(target=run_command_server,       daemon=True).start()
         threading.Thread(target=self._status_report_loop, daemon=True).start()
@@ -3951,6 +4038,7 @@ class AuroraClientApp:
             self._start_auto_ping_client()
 
         self.add_log(f"클라이언트 시작됨 (v{APP_VERSION})")
+        self._wan_start()
         # 켜질 때 업데이트 폴더 자동 확인 (화면이 뜬 뒤)
         self.root.after(3000, lambda: self._check_update(manual=False))
         server_addrs = ", ".join(f"{ip}:{SERVER_PORT}" for ip in config.get("server_ips", []))
@@ -4130,6 +4218,24 @@ for _name in _TransferPane.BORROWED:
     setattr(_TransferPane, _name, AuroraClientApp.__dict__[_name])
 
 
+class _WanTransferPane(_TransferPane):
+    """WAN 원격 창 오른쪽 반입/반출 — 장비로 가는 요청만 WAN 통로(Session)로 바꾸고 화면·동작은 LAN 패널과 같음"""
+    _exp_connected = True   # 연결이 끊기면 요청이 오류로 돌아와 LOG 에 표시됨
+
+    def __init__(self, app, parent, dev: dict, session):
+        self._session = session
+        super().__init__(app, parent, dev)
+
+    def _export_request(self, route: str, params: dict = None, target: str = None,
+                        timeout=(3, 30), method: str = "GET", **kw):
+        return self._session.request(method, route, params, headers=kw.pop("headers", None),
+                                     data=kw.pop("data", None), stream=kw.pop("stream", False), timeout=timeout)
+
+    def _export_route_text(self) -> str:
+        kind = {"direct": "직접 연결", "relay": "비상 중계"}.get(self._session.mode, "연결 중")
+        return f"내 PC → 인터넷({kind}) → {self._dev['label']}"
+
+
 # ─────────────────────────────────────────
 # 진입점
 # ─────────────────────────────────────────
@@ -4143,7 +4249,27 @@ def load_tray_icon(ico_name):
     return PILImage.new("RGBA", (64, 64), (26, 82, 160, 255))
 
 
+def _run_wan_agent():
+    """--wan-agent: 창 없이 WAN 에이전트만 돌리는 별도 프로세스. LAN 프로그램(부모)이 띄우고 감시한다.
+    기존 CommandHandler 를 127.0.0.1 의 임의 포트에 하나 더 띄워 WAN 전용 통로로 쓴다
+    (LAN 용 포트·스레드와 분리 — LAN 포트가 바뀌거나 막혀도 WAN 은 영향이 없다)"""
+    parent_pid = None
+    if "--parent-pid" in sys.argv:
+        try:
+            parent_pid = int(sys.argv[sys.argv.index("--parent-pid") + 1])
+        except (ValueError, IndexError):
+            pass
+    from wan import agent as wan_agent
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CommandHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    wan_agent.run_agent(None, server.server_address[1], lambda: config.get("export_key", ""),
+                        APP_VERSION, parent_pid)
+
+
 def main():
+    if "--wan-agent" in sys.argv[1:]:
+        return _run_wan_agent()
     _acquire_lock(19701)
     root = tk.Tk()
     start_in_tray = "--tray" in sys.argv[1:]   # 서버 업데이트 신호로 재시작된 경우 — 창 없이 트레이로
@@ -4175,6 +4301,7 @@ def main():
 
     def quit_app(icon=None, item=None):
         app.running = False
+        app._wan_shutdown()
         if tray: tray.stop()
         root.after(0, root.destroy)
 

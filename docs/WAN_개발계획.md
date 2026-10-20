@@ -1,94 +1,111 @@
-# WAN 원격 개발 계획
+# WAN 원격 개발 계획 · 현황
 
-기존 LAN 방식은 그대로 두고, 인터넷을 건너는 **WAN 원격**을 같은 AuroraClient 안에 더한다.
-세부 절차와 단계별 작업은 [`개발_프롬프트_Sonnet.md`](../개발_프롬프트_Sonnet.md)를 따르고,
-이 문서는 **지시서와 달라진 결정**과 **LAN/WAN 격리 원칙**을 기록한다.
+기존 LAN 방식은 그대로 두고, 인터넷을 건너는 **WAN 원격**을 같은 AuroraClient 안에 더했다.
+단계별 지시는 [`개발_프롬프트_Sonnet.md`](../개발_프롬프트_Sonnet.md), 사용법은 [`WAN_사용설명서.md`](WAN_사용설명서.md).
+이 문서는 **지시서와 달라진 결정 · LAN/WAN 격리 구현 · 검증 현황 · 남은 일**을 기록한다.
 
 ## 1. 지시서와 달라진 결정
 
 | 항목 | 지시서 원안 | 결정 |
 |---|---|---|
-| 배치 | 현장용·사용자용·안내 서버 **별도 프로그램** 3개, 원본 복사 | **기존 AuroraClient에 WAN 기능을 더함**. 안내 서버만 새 프로그램 |
-| 원본 보존 | 원본 폴더 수정 금지 | 기존 LAN 동작은 바꾸지 않음 (코드는 이 저장소에서 직접 수정) |
-| 화면 | 반출 탭을 바탕으로 사용자용을 만듦 | 반입/반출 탭은 LAN용으로 그대로 두고 **"WAN 원격" 탭을 새로 만듦** |
-| 가져올 코드 | — | `RemoteViewer`, `_TransferPane`만 재사용 (요청 함수만 교체) |
-| 빼는 기능 | Aurora 실행·종료, 배포 뷰, 공유 폴더 배포, `/discover`, `via` | 별도 프로그램이 아니므로 **뺄 것이 아니라 WAN 경로에서 막을 것**으로 바뀜 (3절) |
+| 배치 | 현장용·사용자용·안내 서버 **별도 프로그램** 3개, 원본 복사 | **기존 AuroraClient에 WAN 기능을 더함**. 안내 서버만 새 프로그램(`AuroraRelay.exe`) |
+| 화면 | 반출 탭을 바탕으로 사용자용을 만듦 | 반입/반출 탭은 LAN용 그대로, **"WAN 원격" 탭을 새로 만듦** |
+| 재사용 | — | `RemoteViewer`(파생 클래스로), `_TransferPane`(요청 함수만 교체)만 가져옴 |
+| 빼는 기능 | Aurora 실행·종료, 배포, `/discover`, `via` | 별도 프로그램이 아니므로 **WAN 경로에서 차단**(허용 목록) |
+| 현장 에이전트 | 현장용 프로그램 | 같은 exe를 `--wan-agent`로 한 번 더 실행하는 **별도 프로세스** |
+| 감독 | — | 죽으면 WAN만 자동 재시작(간격 2→600초, 포기하지 않음), 멈추면 강제 재시작 |
 
 용어: LAN = 같은 공정망 안(지금 방식), WAN = 인터넷 너머의 현장과 회사를 잇는 방식(새로 만듦).
 
-## 2. 격리 원칙: 한쪽 고장이 다른 쪽으로 번지지 않게
+## 2. 구조
 
-### 요구사항
-- WAN에 문제가 생겨도 LAN은 영향이 없다.
-- LAN에 문제가 생겨도 WAN은 영향이 없다.
+```
+[내 PC: WAN 원격 탭] ── 직접(aiortc) 또는 비상 중계(websocket) ──▶ [현장 PC: AuroraClient --wan-agent]
+          │                                                              │  127.0.0.1 전용 포트
+          └──────────────── 안내 서버(AuroraRelay) ◀── 상시 연결 ────────┘   └▶ 기존 CommandHandler
+```
 
-### 번질 수 있는 곳과 막는 방법
-
-| 번질 수 있는 곳 | 막는 방법 |
+| 파일 | 역할 |
 |---|---|
-| aiortc를 못 불러오면 클라이언트 전체가 시작 단계에서 죽음 | WAN 모듈은 필요할 때만 불러옴. 실패하면 "WAN 사용 불가"만 표시. 설정 `wan_enabled`로 끌 수 있고 기본값은 꺼짐 |
-| 설정 파일 공유: `load_config`는 JSON이 깨지면 기본값으로 되돌려 LAN 설정이 날아감 | WAN 설정은 별도 파일 `D:\RemoteConfig\wan_config.json` |
-| HTTP 서버 공유: WAN 요청이 몰리면 LAN용 9001 서버의 스레드를 다 씀 | WAN 전용 서버를 별도 포트(127.0.0.1만)에 하나 더 띄움. `CommandHandler` 코드는 그대로 쓰고 서버만 분리 |
-| WAN이 LAN을 건드림 | WAN 통로에서 `/command`(실행·종료), `via=`(LAN 다단 중계), `/discover`(대역 스캔)를 차단하고 `/info`, `/fs/*`, `/remote/*`만 허용 |
-| LAN 장애가 WAN을 막음 | WAN은 `listen_port`, `server_ips`, `export_relay`, `/status` 루프를 쓰지 않음. 장비 목록도 안내 서버에서 받음 |
-| 공용 코드(`RemoteViewer`) 수정이 LAN 동작을 바꿈 | 새 기능은 옵션 인자로만 추가하고 기본값은 지금 동작 그대로. LAN 호출부는 바꾸지 않음 |
-| WAN 탭 생성 실패 | `try/except`로 만들고 실패해도 나머지 탭은 정상 표시 |
-| 스레드·이벤트 루프 | WAN은 전용 스레드/프로세스에서 돌고 오류는 그 안에서 처리. 화면 갱신은 `root.after`로만 접근 |
+| `wan/config.py` | `wan_config.json`(LAN 설정과 별개) · 현장 고유 ID · 화질 상수 한 곳 |
+| `wan/protocol.py` · `mux.py` | 요청/응답을 16KB 조각으로 싣는 메시지 형식, 요청 다중화, 우선순위(입력>화면>파일), 흐름 제어(ACK 창) |
+| `wan/links.py` | 통로 두 종류: `DirectLink`(aiortc 데이터 채널) · `RelayLink`(websocket). aiortc는 필요할 때만 불러옴 |
+| `wan/bridge.py` | 받은 요청을 로컬 서버로 넘김. 허용 경로만 통과, 화질 상한 적용, LAN 키를 현장에서 붙임 |
+| `wan/server.py` | 안내 서버: 현장 목록·설정 보관/전달·연결 정보 중개·비상 중계·새 버전 배포 |
+| `wan/agent.py` | 현장 에이전트: 상시 연결·재접속·접속 코드 확인·ID 중복 처리 |
+| `wan/client.py` | 사용자 쪽: 목록·설정 보내기·연결(직접→중계)·끊기면 자동 재연결 |
+| `wan/supervisor.py` · `runtime.py` | 에이전트 프로세스 감독 · AuroraClient와의 단일 접점 |
+| `wan/ui.py` · `viewer.py` | "WAN 원격" 탭 · `WanRemoteViewer`(항상 절약으로 시작, 사용량 표시) |
+| `wan/update.py` | 안내 서버에서 새 버전 내려받기(SHA-256 검증) |
 
-### 한계와 대응: 같은 프로세스에서는 막을 수 없는 것
-같은 프로세스 안에서는 파이썬 오류와 불러오기 실패는 막을 수 있다.
-그러나 aiortc가 쓰는 C 라이브러리(`av`, `pylibsrtp`, `cryptography` 등)가 비정상 종료되거나
-메모리를 과하게 쓰면 LAN까지 같이 죽는다. 현장 PC는 사람이 없어서 클라이언트가 꺼지면
-Aurora 감시·상태 보고·서버 명령 수신이 모두 멈추고, 서버에는 "오프라인"으로만 보인다.
+수정한 기존 파일: `aurora_client.py`(연결점만, 아래 3절), `AuroraClient.spec`(hiddenimports), `build.bat`(WAN 패키지 선택 설치), `.gitignore`.
 
-**결정**
-- **현장 PC**: WAN 에이전트를 같은 exe의 별도 프로세스(`AuroraClient.exe --wan-agent`)로 실행한다.
-  - LAN 프로세스가 WAN 프로세스를 감시하고, 죽으면 WAN만 자동 재시작한다 (재시작 간격을 점차 늘리고, 계속 실패하면 로그만 남기고 포기).
-  - LAN 프로세스가 끝나면 WAN도 같이 끝난다.
-- **내 PC**: 창을 보고 있으므로 같은 프로세스에서 필요할 때만 불러온다.
+## 3. LAN/WAN 격리 — 구현 위치
 
-### 별도 프로세스 구현 시 챙길 것
-- 중복 실행 방지: 지금은 포트 19701 선점(`_acquire_lock`)으로 한 번만 뜬다. `--wan-agent`는 이 검사를 건너뛰고 WAN 전용 잠금을 따로 둔다.
-- 함께 종료: 트레이 "종료" 시 WAN 프로세스도 끝나야 한다. 안 끝나면 exe가 잠겨 업데이트가 실패한다.
-- 자동 업데이트: `aurora_update.apply`는 exe를 교체하므로 WAN 프로세스를 먼저 끝낸 뒤 교체한다.
-- 단일 exe는 시작할 때 압축을 풀어서 WAN 프로세스 시작이 몇 초 느리다.
-- **미확인**: LAN과 WAN이 각각의 프로세스에서 같은 화면을 캡처할 때 충돌이 없는지는 실제 Windows에서 확인해야 한다.
+| 번질 수 있는 곳 | 구현 |
+|---|---|
+| aiortc를 못 불러오면 시작 단계에서 죽음 | `wan/` 안의 aiortc import는 모두 함수 안. 못 불러오면 비상 중계만 사용. `aurora_client.py`는 모듈 맨 위에서 `wan`을 import하지 않음 |
+| 설정 파일 공유 · 깨짐 | WAN은 `wan_config.json`만 씀. 깨지면 `.bad`로 치우고 기본값 (LAN 설정 무관, 테스트로 확인) |
+| 9001 서버 · 스레드 공유 | 에이전트가 `127.0.0.1` 임의 포트에 `CommandHandler`를 하나 더 띄움 (`_run_wan_agent`). LAN `listen_port`와 무관 |
+| WAN이 LAN을 건드림 | `bridge.ALLOWED` 허용 목록: `/command` · `/discover` · `via=` · 그 밖의 경로 모두 403 |
+| LAN 장애가 WAN을 막음 | WAN은 `server_ips` · `export_relay` · `/status` 루프를 쓰지 않음. LAN 로컬 서버가 죽어도 WAN은 502 응답 후 계속 |
+| C 라이브러리 비정상 종료 · 메모리 폭주 | 현장 에이전트는 **별도 프로세스**(`supervisor.py`). 부모가 끝나면 같이 끝남, 멈추면 `wan_agent.alive` 로 감지해 재시작 |
+| 공용 코드(`RemoteViewer`) 수정 | 수정 없음. `make_viewer_class`로 파생 클래스를 만들어 `aurora_remote.py`는 그대로 |
+| WAN 탭 생성 실패 | `_build_wan_tab` try/except — 실패해도 다른 탭 정상, 안내 문구 표시 |
+| 시작/종료 | `_wan_start` · `_wan_shutdown` try/except. 기본값 `enabled=False`, 안내 서버 주소가 없으면 아무것도 시작하지 않음 |
 
-## 3. WAN 경로 설계 메모
+`aurora_client.py`에서 바뀐 곳: 탭 도움말/제목 1개 추가, `_build_wan_tab`·`_wan_*` 메서드, `_WanTransferPane`, `_run_wan_agent`, `main()` 앞부분의 `--wan-agent` 분기, 종료 시 `_wan_shutdown`.
+**알려진 결합 하나**: 재사용한 `_TransferPane._export_start`가 반출 저장 폴더를 `client_config.json`에 저장한다(LAN 원격 창도 똑같이 하는 기존 동작).
 
-```
-[내 PC: WAN 원격 탭] ─ 직접(aiortc) 또는 비상 중계 ─ [현장 PC: --wan-agent] ─ 127.0.0.1 전용 포트 ─ CommandHandler
-                              ▲                                   │
-                              └───────── 안내 서버 (목록·연결 정보 전달·설정 보관) ◀┘
-```
-
-- 현장 에이전트는 받은 요청을 LAN용 9001이 아니라 **WAN 전용 loopback 서버**로 넘긴다. LAN 포트(`listen_port`) 변경·점유와 무관하게 동작한다.
-- 허용 경로는 `/info`, `/fs/*`, `/remote/*`뿐이다. `/command`, `/discover`, `via=`는 거부한다.
-- 파일 전송은 별도 탭 없이 원격 창 옆의 `_TransferPane`을 재사용한다.
-
-## 4. 단계 (지시서 7절 기준)
+## 4. 단계 현황
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
-| 0 | 홀 펀칭 시험 (`tests/holepunch_test.py`) | 스크립트 완료 (루프백·2프로세스 시험 통과). **서로 다른 망의 두 PC에서 실행해 결과 확인 필요** |
-| 1 | 구조 확정(이 문서의 2·3절을 구체화한 안을 보여 주고 확인) → WAN 설정 파일, 현장 고유 ID | 대기 |
-| 2 | 안내 서버 (websockets, 화면 없음) | 대기 |
-| 3 | 직접 연결 + 비상 중계 (`transport.py`) | 대기 |
-| 4 | 데이터 절약·화질 3단계·사용량 표시 | 대기 |
-| 5 | 업데이트·설치 정리 | 대기 |
+| 0 | 홀 펀칭 시험 (`tests/holepunch_test.py`) | 스크립트 완료. **서로 다른 망의 두 PC 실측은 아직** |
+| 1 | 구조 · 설정 파일 · 현장 고유 ID | 완료 (`wan/`, `wan_config.json`, 처음 실행 때 ID 생성) |
+| 2 | 안내 서버 | 완료 (현장 목록, 설정 보관·전달, 키, `/health`, 서버 재시작 후에도 유지) |
+| 3 | 직접 연결 + 비상 중계 | 완료 (6초 안에 직접이 안 되면 중계, 끊기면 자동 재연결, 접속 코드는 현장이 확인) |
+| 4 | 데이터 절약 | 부분: 화질 3단계 · 항상 절약으로 시작 · 연결별 사용량/속도 표시 · 날짜별 누적 기록 완료. **화면 선요청(프리페치) 미구현**(아래) · 화질별 실사용량 측정은 Windows 실기 필요 |
+| 5 | 업데이트 · 설치 · 설명서 | 완료 (안내 서버 경유 새 버전 + SHA-256, `tools/make_wan_config.py`, `WanRelay.spec`, 사용 설명서) |
 
-한 단계가 끝나면 보고하고 멈춘다. 모듈 구조·설정 파일 형식·메시지 형식은 만들기 전에 안을 보여 주고 확인받는다.
+### 프리페치를 구현하지 않은 이유
+`/remote/frame`의 바뀐 영역은 보는 쪽이 보낸 `last` 번호 이후 **누적**으로 계산된다(직전에 보낸 화면 기준이 아님). 따라서 요청이 겹쳐도 안전하게 하려면 보는 쪽이 "받은 조각의 기준 번호가 내가 가진 번호 이하이면 붙이고, 새 화면 번호가 이미 지났으면 버린다"는 규칙으로 `_apply`를 바꾸고 `_frame_loop`를 두 갈래로 돌려야 한다. 이 루프는 Windows 화면·입력과 얽혀 있어 이 환경에서 검증할 수 없고, 잘못되면 화면이 깨진다. 실측으로 지연이 문제로 확인된 뒤에 해당 파생 클래스에서 구현하는 것을 권한다.
 
-## 5. 의도된 설계 (바꾸지 않음)
+## 5. 검증 현황
 
-운영 중인 방식이므로 이번 작업에서 손대지 않는다.
+`python -m pytest` → 전체 통과. 테스트 파일별:
+
+| 파일 | 내용 |
+|---|---|
+| `test_wan_basic` | 설정(깨진 파일·알 수 없는 키·LAN 설정 불간섭) · 사용량 · 메시지 조각 |
+| `test_wan_mux` | 응답 모양 · 차단 · 대용량 · 이어받기 · 업로드 · 우선순위 · 흐름 제어 · 끊김/시간 초과 · 사용량 일치 |
+| `test_wan_e2e` | 실제 안내 서버 + 현장 에이전트 + 사용자 + **실제 aiortc/websockets**: 접속 코드 · 잠금 · 설정 전달 · 직접/중계 · 막힌 망 · 재연결 · 서버 재시작 · 키 · ID 중복 · LAN 로컬 서버 장애 |
+| `test_wan_real_handler` | **실제 `aurora_client.CommandHandler`**를 WAN 통로로 (파일 목록/다운로드/이어받기/업로드/경로 제한/차단) |
+| `test_wan_supervisor` · `update` · `runtime` · `tools` | 프로세스 감독 · 새 버전 다운로드/검증 · 런타임 · 설정 파일 도구 |
+| `test_wan_ui` · `ui_strict` | UI 로직 + 엄격한 가짜 tkinter(pack/grid 혼용·오타 옵션 검출) |
+
+측정(이 환경, 루프백): 60MB 전송 중 입력 왕복 — 직접 연결 중앙 80ms / 최대 393ms, 비상 중계 중앙 10ms / 최대 15ms (전송 중이 아닐 때 약 3~4ms).
+
+### 확인하지 못한 것 (Windows 실기 · 실제 인터넷 필요)
+1. 서로 다른 망에서 실제 홀 펀칭 (이 환경은 외부 UDP 불가 — `host` 후보만 확인)
+2. tkinter 화면 (이 환경에 tkinter 없음 — 위젯 구성은 가짜 tkinter로만 검증)
+3. PyInstaller 빌드, Python 3.14에서 `aiortc`/`av` 설치 가능 여부
+4. 현장 PC에서 LAN 프로세스와 WAN 에이전트가 동시에 화면 캡처(DXGI)할 때의 충돌 여부
+5. 화질별 실제 데이터 사용량
+
+### 알려진 사항
+- **exe 크기**: aiortc가 끌고 오는 `av`(FFmpeg)가 압축 전 약 105MB. `AuroraClient.exe`가 눈에 띄게 커진다(공정망 업데이트 복사량 증가). aiortc 없이 빌드하면 비상 중계만 동작.
+- **직접 연결 전송 속도**: aiortc의 SCTP가 순수 파이썬이라 이 환경에서 약 3.5MB/s(≈28Mbps)에서 CPU가 병목이다. 같은 조건에서 비상 중계는 26MB/s. 화면 원격에는 충분하지만 큰 파일은 중계가 더 빠를 수 있다.
+- 통신은 `ws://`(암호화 없음) + 공용 키 + 접속 코드. 안내 서버는 접속 코드를 평문으로 보관한다. 필요하면 TLS 프록시(`wss://`).
+
+## 6. 의도된 설계 (바꾸지 않음)
 
 - 배포 계정 `user`/`1`, 반출 키 `aurora-export` 등 기본값
 - `D:\RemoteConfig`, `D:\RemoteVersion` 고정 경로와 `build.bat`의 Python 경로
 - `dist/`에 버전별 exe를 git으로 보관하는 방식, pre-commit 자동 빌드 훅
 - 서버·클라이언트가 파일 하나씩으로 독립된 구조
 
-## 6. 보류
+## 7. 보류
 
-- 보안 강화: `/command`·`/status` 인증, `setpath` 검증, 업데이트 해시 확인 (보류 결정)
-- 공용 코드 분리, `aurora_client.py` 분할, 테스트 추가, `Claude/CLAUDE.md` 갱신
+- LAN 보안 강화: `/command`·`/status` 인증, `setpath` 검증, 업데이트 해시 확인 (보류 결정. WAN 새 버전만 SHA-256 검증)
+- 공용 코드 분리, `aurora_client.py` 분할, `Claude/CLAUDE.md` 갱신
