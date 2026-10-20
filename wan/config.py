@@ -21,6 +21,8 @@ SAVER_BOX = (1280, 720)     # "절약" 에서 요청하는 화면 크기 상한
 PREFETCH = {"절약": 1, "보통": 2, "고화질": 2}
 MAX_PREFETCH = 3
 
+RELAY_EXIT_PORT_BUSY = 3    # 안내 서버 프로세스가 포트를 못 잡고 끝날 때의 종료 코드 (화면에 이유를 보여 주려고)
+
 DEFAULT_STUN = "stun:stun.l.google.com:19302"
 
 
@@ -47,6 +49,8 @@ DEFAULTS = {
     "stun":         DEFAULT_STUN,
     "direct_timeout": 6.0,    # 직접 연결을 기다리는 시간(초) — 넘으면 비상 중계로
     "auto_update":  True,
+    "relay_host":   False,    # 이 PC 에서 안내 서버(중계)도 운영할지 — 공용 키는 relay_key 를 그대로 씀
+    "relay_port":   9100,     # 안내 서버가 받을 포트
 }
 
 # 안내 서버가 원격으로 바꿀 수 있는 항목

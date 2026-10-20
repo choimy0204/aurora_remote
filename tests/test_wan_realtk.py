@@ -105,3 +105,28 @@ def _find(w, cls_name):
         if c.winfo_class() == cls_name:
             return c
     return None
+
+
+def test_relay_card_exists_and_toggle_reaches_runtime(app, monkeypatch):
+    """중계 PC 용 '안내 서버 운영' 칸 — 진짜 위젯으로 체크하면 런타임이 불리고, 잘못된 포트는 막힘"""
+    tab = app._wan_tab
+    assert hasattr(tab, "relay_var"), "안내 서버 운영 칸이 만들어지지 않음"
+    calls = []
+    monkeypatch.setattr(app._wan, "set_relay_host", lambda on: calls.append(on))
+    tab.ctx["set_relay_host"] = app._wan.set_relay_host
+    monkeypatch.setattr(tab.mb, "showerror", lambda *a, **k: calls.append("error"))
+    app._select_tab(4)
+    tab.relay_port_var.set("abc")
+    tab.relay_var.set(True)
+    tab._relay_toggled()
+    for _ in range(5):
+        app.root.update()
+        import time; time.sleep(0.05)
+    assert calls == ["error"] and tab.relay_var.get() is False          # 포트가 잘못되면 체크가 풀리고 런타임은 안 불림
+    tab.relay_port_var.set("9333")
+    tab.relay_var.set(True)
+    tab._relay_toggled()
+    deadline = __import__("time").time() + 3
+    while not calls[1:] and __import__("time").time() < deadline:
+        app.root.update()
+    assert calls[1:] == [True] and app._wan.cfg.get("relay_port") == 9333

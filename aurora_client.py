@@ -3949,7 +3949,8 @@ class AuroraClientApp:
         try:
             from wan.runtime import WanRuntime
             from wan import ui as wan_ui
-            self._wan = WanRuntime(APP_VERSION, self._wan_agent_command, self._wan_apply_update, log=self.add_log)
+            self._wan = WanRuntime(APP_VERSION, self._wan_agent_command, self._wan_apply_update, log=self.add_log,
+                                   relay_command=self._wan_relay_command)
             ctx = self._wan.tab_context(self._wan_open_remote, px=_px, log=self.add_log)
             self._wan_tab = wan_ui.build_tab(self, parent, ctx)
         except Exception as e:
@@ -3981,6 +3982,12 @@ class AuroraClientApp:
         """현장 모드: 같은 exe 를 --wan-agent 로 한 번 더 실행 (별도 프로세스 — WAN 이 죽어도 이 프로그램은 계속)"""
         from wan.supervisor import build_agent_command
         return build_agent_command(getattr(sys, "frozen", False), sys.executable,
+                                   os.path.abspath(__file__), os.getpid())
+
+    def _wan_relay_command(self) -> list:
+        """이 PC 에서 안내 서버 운영: 같은 exe 를 --wan-relay 로 한 번 더 실행 (별도 프로세스)"""
+        from wan.supervisor import build_relay_command
+        return build_relay_command(getattr(sys, "frozen", False), sys.executable,
                                    os.path.abspath(__file__), os.getpid())
 
     def _wan_apply_update(self, info: dict):
@@ -4270,6 +4277,9 @@ def _run_wan_agent():
 def main():
     if "--wan-agent" in sys.argv[1:]:
         return _run_wan_agent()
+    if "--wan-relay" in sys.argv[1:]:
+        from wan.relay_run import main as run_wan_relay      # --wan-agent 와 같은 방식의 별도 프로세스
+        sys.exit(run_wan_relay(sys.argv[1:]))
     _acquire_lock(19701)
     root = tk.Tk()
     start_in_tray = "--tray" in sys.argv[1:]   # 서버 업데이트 신호로 재시작된 경우 — 창 없이 트레이로

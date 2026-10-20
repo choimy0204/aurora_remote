@@ -24,6 +24,12 @@ def build_agent_command(frozen: bool, executable: str, script: str, parent_pid: 
     return [executable] + tail if frozen else [executable, script] + tail
 
 
+def build_relay_command(frozen: bool, executable: str, script: str, parent_pid: int) -> list:
+    """안내 서버를 띄울 명령줄 (에이전트와 같은 방식 — 같은 exe + --wan-relay)"""
+    tail = ["--wan-relay", "--parent-pid", str(parent_pid)]
+    return [executable] + tail if frozen else [executable, script] + tail
+
+
 # ─────────────────────────────────────────
 # 프로세스 끝내기
 # ─────────────────────────────────────────
