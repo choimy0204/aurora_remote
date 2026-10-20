@@ -64,16 +64,27 @@ def _px(v):
 
 # ── 중복 실행 방지 ────────────────────────
 _LOCK_SOCK = None
-def _acquire_lock(port=19701):
+def _acquire_lock(port=19701, wait=0):
+    """wait: 이전 프로그램이 끝나기를 기다릴 최대 초 — 관리자 권한으로 다시 시작할 때만 쓴다 (평소엔 0 = 기존 동작)"""
     global _LOCK_SOCK
-    try:
-        _LOCK_SOCK = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        _LOCK_SOCK.bind(("127.0.0.1", port))
-    except OSError:
-        _r = tk.Tk(); _r.withdraw()
-        messagebox.showerror("실행 오류", "Aurora Client 가 이미 실행 중입니다.")
-        _r.destroy()
-        raise SystemExit
+    deadline = time.time() + wait
+    while True:
+        try:
+            _LOCK_SOCK = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _LOCK_SOCK.bind(("127.0.0.1", port))
+            break
+        except OSError:
+            _LOCK_SOCK.close()
+            if time.time() < deadline:
+                time.sleep(0.3)
+                continue
+            _lock_failed()
+
+def _lock_failed():
+    _r = tk.Tk(); _r.withdraw()
+    messagebox.showerror("실행 오류", "Aurora Client 가 이미 실행 중입니다.")
+    _r.destroy()
+    raise SystemExit
 
 # ─────────────────────────────────────────
 # 설정 파일
@@ -3951,7 +3962,8 @@ class AuroraClientApp:
             from wan import ui as wan_ui
             self._wan = WanRuntime(APP_VERSION, self._wan_agent_command, self._wan_apply_update, log=self.add_log,
                                    relay_command=self._wan_relay_command)
-            ctx = self._wan.tab_context(self._wan_open_remote, px=_px, log=self.add_log)
+            ctx = self._wan.tab_context(self._wan_open_remote, px=_px, log=self.add_log,
+                                        relaunch_admin=self._wan_relaunch_admin)
             self._wan_tab = wan_ui.build_tab(self, parent, ctx)
         except Exception as e:
             self._wan = None
@@ -3969,6 +3981,15 @@ class AuroraClientApp:
                 wan.start()
             except Exception as e:
                 self.add_log(f"[WAN] 시작 실패: {type(e).__name__}: {e}")
+            if "--wan-autosetup" in sys.argv[1:]:                # 관리자 권한으로 다시 시작한 뒤 자동 설정을 이어서 한다
+                self.root.after(1500, self._wan_autosetup)
+
+    def _wan_autosetup(self):
+        try:
+            tab = self._wan_tab
+            tab.controller._auto_setup_now(self._wan.cfg.get("relay_external") or "")      # 이미 다시 시작한 뒤라 관리자 확인은 건너뜀
+        except Exception as e:
+            self.add_log(f"[WAN] 자동 설정 실패: {type(e).__name__}: {e}")
 
     def _wan_shutdown(self):
         wan = getattr(self, "_wan", None)
@@ -3983,6 +4004,16 @@ class AuroraClientApp:
         from wan.supervisor import build_agent_command
         return build_agent_command(getattr(sys, "frozen", False), sys.executable,
                                    os.path.abspath(__file__), os.getpid())
+
+    def _wan_relaunch_admin(self, extra_args: list):
+        """관리자 권한(UAC)으로 같은 프로그램을 다시 띄우고 성공하면 이 프로그램을 끝냄 → (성공 여부, 안내 글자)"""
+        from wan import netutil
+        keep = [a for a in sys.argv[1:] if a not in ("--tray", "--relaunched", "--wan-autosetup")]
+        args = ([] if getattr(sys, "frozen", False) else [os.path.abspath(__file__)]) + keep + ["--relaunched"] + list(extra_args)
+        ok, msg = netutil.relaunch_as_admin(sys.executable, args)
+        if ok:
+            self.root.after(500, lambda: self.quit_app())      # 새 프로그램이 잠금을 얻을 때까지 기다린다 (_acquire_lock)
+        return ok, msg
 
     def _wan_relay_command(self) -> list:
         """이 PC 에서 안내 서버 운영: 같은 exe 를 --wan-relay 로 한 번 더 실행 (별도 프로세스)"""
@@ -4280,7 +4311,7 @@ def main():
     if "--wan-relay" in sys.argv[1:]:
         from wan.relay_run import main as run_wan_relay      # --wan-agent 와 같은 방식의 별도 프로세스
         sys.exit(run_wan_relay(sys.argv[1:]))
-    _acquire_lock(19701)
+    _acquire_lock(19701, wait=15 if "--relaunched" in sys.argv[1:] else 0)
     root = tk.Tk()
     start_in_tray = "--tray" in sys.argv[1:]   # 서버 업데이트 신호로 재시작된 경우 — 창 없이 트레이로
     if start_in_tray:

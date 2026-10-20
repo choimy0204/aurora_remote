@@ -130,3 +130,38 @@ def test_relay_card_exists_and_toggle_reaches_runtime(app, monkeypatch):
     while not calls[1:] and __import__("time").time() < deadline:
         app.root.update()
     assert calls[1:] == [True] and app._wan.cfg.get("relay_port") == 9333
+
+
+def test_auto_button_and_paste_dialog_with_real_widgets(app, monkeypatch):
+    """진짜 위젯: 자동 설정 버튼이 있고, 접속 정보 붙여넣기 창이 입력값을 컨트롤러에 넘긴다"""
+    import time
+    from wan import connect_code
+    tab = app._wan_tab
+    assert hasattr(tab, "auto_btn") and hasattr(tab, "relay_code_var") and hasattr(tab, "admin_btn")
+    got = []
+    monkeypatch.setattr(tab.controller, "import_connection", lambda *a, **k: got.append(a) or True)
+    app._select_tab(4)
+    tab._import_dialog()
+    d = tab._import_win
+    code = connect_code.encode(["ws://10.0.0.5:9100"], "k")
+    d.code.set(code)
+    d.role.set("field")
+    d.name.set("CCW 1")
+    d.access.set("4321")
+    d.ok()
+    app.root.update()
+    assert got == [(code, True, "CCW 1", "4321")]
+    assert not d.win.winfo_exists()                                      # 성공하면 창이 닫힘
+    tab.set_relay_code("AW1-test")
+    assert tab.relay_code_var.get() == "AW1-test"
+    tab.set_server_fields("ws://a:1", "kk")
+    assert (tab.url_var.get(), tab.key_var.get()) == ("ws://a:1", "kk")
+    from wan import ui as wan_ui
+    monkeypatch.setattr(wan_ui, "is_admin", lambda: False)             # 주기 갱신이 관리자 여부를 다시 계산하므로 값을 고정
+    tab.controller.refresh_relay()
+    app.root.update()
+    assert tab.admin_btn.winfo_ismapped()                               # 관리자가 아니면 '관리자로 다시 시작' 버튼이 보임
+    monkeypatch.setattr(wan_ui, "is_admin", lambda: True)
+    tab.controller.refresh_relay()
+    app.root.update()
+    assert not tab.admin_btn.winfo_ismapped()

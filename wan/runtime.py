@@ -167,8 +167,8 @@ class WanRuntime:
         return res
 
     # ── 화면(탭)에 넘길 값 ──
-    def tab_context(self, open_remote, px=lambda v: v, log=None) -> dict:
-        return {"cfg": self.cfg, "client": self.client, "usage": self.usage,
+    def tab_context(self, open_remote, px=lambda v: v, log=None, relaunch_admin=None) -> dict:
+        return {"relaunch_admin": relaunch_admin, "cfg": self.cfg, "client": self.client, "usage": self.usage,
                 "supervisor_state": self.supervisor_state, "set_field_mode": self.set_field_mode,
                 "relay_state": self.relay_state, "set_relay_host": self.set_relay_host,
                 "restart_relay": self.restart_relay, "relay_available": self.relay_command is not None,

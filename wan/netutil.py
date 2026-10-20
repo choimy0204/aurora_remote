@@ -47,3 +47,29 @@ def open_firewall(port: int) -> tuple:
         return True, f"방화벽에서 TCP {port} 를 열었습니다"
     return False, ("방화벽을 바꾸지 못했습니다 (관리자 권한이 필요합니다).\n"
                    "관리자 권한 명령 프롬프트에서 아래 명령을 실행하세요:\n\n" + firewall_command(port))
+
+
+def is_admin() -> bool:
+    """관리자 권한으로 실행 중인지. Windows 가 아니면 권한 올리기가 필요 없으니 True"""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_as_admin(exe: str, args: list) -> tuple:
+    """같은 프로그램을 관리자 권한(UAC 확인 창)으로 새로 띄운다 → (성공 여부, 안내 글자).
+    성공하면 부르는 쪽이 자기 자신을 끝내야 한다.  사용자가 UAC 창에서 '아니요'를 누르면 실패로 돌려준다"""
+    if os.name != "nt":
+        return False, "Windows 에서만 지원합니다"
+    try:
+        import ctypes
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, subprocess.list2cmdline(args), None, 1)
+    except Exception as e:
+        return False, f"다시 시작하지 못했습니다: {e}"
+    if rc > 32:
+        return True, "관리자 권한으로 다시 시작합니다"
+    return False, "관리자 권한 요청이 취소되었거나 실패했습니다 (UAC 창에서 '예'를 눌러야 합니다)"

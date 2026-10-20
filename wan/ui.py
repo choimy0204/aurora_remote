@@ -20,13 +20,15 @@ ctx (aurora_client 가 넘겨 줌)
 """
 
 import math
+import os
 import threading
 import time
 from collections import deque
 from datetime import datetime
 
+from . import connect_code
 from .config import QUALITY, RELAY_EXIT_PORT_BUSY, format_id
-from .netutil import lan_addresses, open_firewall
+from .netutil import is_admin, lan_addresses, open_firewall
 from .protocol import WanDenied, WanError
 from .usage import fmt_bytes
 
@@ -121,6 +123,10 @@ class NullUI:
     def set_relay_status(self, text, level): pass             # 이 PC 에서 안내 서버 운영 상태
     def set_relay_info(self, port_text, hint, warn): pass
     def set_relay_enabled(self, enabled): pass
+    def set_relay_code(self, code): pass                       # 다른 PC 에 붙여넣을 접속 정보
+    def set_server_fields(self, url, key): pass                # 안내 서버 칸의 주소 · 공용 키 글자
+    def set_admin(self, is_admin): pass                        # 관리자 권한 여부 (아니면 '관리자로 다시 시작' 버튼 표시)
+    def ask_yes_no(self, title, message, on_answer): pass      # 예/아니오 물어보고 on_answer(bool) 을 부름 (화면 스레드)
     def set_relay_status(self, text, level):
         if hasattr(self, "relay_lbl"):
             self.relay_lbl.configure(text=f"● {text}", fg=self._color(level))
@@ -130,6 +136,24 @@ class NullUI:
             self.relay_hint_lbl.configure(text=hint)
             self.relay_warn_lbl.configure(text=warn)
             self._relay_layout()
+
+    def set_relay_code(self, code):
+        if hasattr(self, "relay_code_var"):
+            self.relay_code_var.set(code)
+
+    def set_server_fields(self, url, key):
+        self.url_var.set(url)
+        self.key_var.set(key)
+
+    def set_admin(self, is_admin):
+        if hasattr(self, "admin_btn"):
+            if is_admin:
+                self.admin_btn.master.pack_forget()      # _button 은 테두리 프레임에 담겨 있어 프레임을 숨겨야 함
+            else:
+                self.admin_btn.pack(side="left", padx=(self.px(10), 0))
+
+    def ask_yes_no(self, title, message, on_answer):
+        on_answer(bool(self.mb.askyesno(title, message, parent=self.root)))
 
     def set_relay_enabled(self, enabled):
         if hasattr(self, "relay_var"):
@@ -281,6 +305,7 @@ class WanTabController:
         if self.relay_available():
             self._ui("set_relay_status", *self.relay_status())
             self._ui("set_relay_info", *self.relay_info())
+            self._ui("set_admin", is_admin() or not self.ctx.get("relaunch_admin"))
 
     def relay_toggled(self, enabled: bool, port_text) -> bool:
         """'이 PC 에서 안내 서버 운영' 체크가 바뀜 → 포트·설정 저장 + 서버 프로세스 시작/중지 (작업 스레드).  포트가 잘못되면 False"""
@@ -305,6 +330,111 @@ class WanTabController:
                 self._ui("set_relay_enabled", not enabled)
                 self._ui("show_error", "안내 서버 운영", f"변경하지 못했습니다.\n{e}")
             self.refresh_relay()
+        self._spawn(work)
+        return True
+
+    def relay_urls(self) -> list:
+        """다른 PC 가 접속할 안내 서버 주소 후보: 외부 주소(적었으면) → 이 PC 의 내부 주소들"""
+        port = self.relay_port()
+        out = []
+        ext = (self.cfg.get("relay_external") or "").strip()
+        if ext:
+            out.append(connect_code.make_url(ext, port))
+        out += [f"ws://{ip}:{port}" for ip in lan_addresses()[:3]]
+        return out
+
+    def relay_code(self) -> str:
+        urls = self.relay_urls()
+        return connect_code.encode(urls, self.cfg.get("relay_key") or "") if urls else ""
+
+    def set_relay_external(self, text):
+        self.cfg.update(relay_external=(text or "").strip())
+        self._ui("set_relay_code", self.relay_code())
+
+    def relay_auto_setup(self, external=""):
+        """버튼 한 번: 공용 키 만들기(없으면) · 포트 정하기 · 안내 서버 시작 · 방화벽 열기 · 접속 정보 만들기 (작업 스레드)"""
+        if not self.relay_available():
+            self._ui("show_error", "자동 설정", "이 프로그램에서는 안내 서버를 운영할 수 없습니다")
+            return False
+        if not is_admin() and self.ctx.get("relaunch_admin"):
+            self._ui("ask_yes_no", "관리자 권한",
+                     "방화벽을 자동으로 열려면 관리자 권한이 필요합니다.\n\n관리자 권한으로 다시 시작할까요?\n"
+                     "(Windows 확인 창이 뜨면 '예'를 누르세요. 다시 시작한 뒤 자동 설정이 이어집니다)\n\n"
+                     "'아니요'를 누르면 방화벽은 직접 열어야 합니다.",
+                     lambda yes: self.relaunch_admin(["--wan-autosetup"]) if yes else self._auto_setup_now(external))
+            return True
+        return self._auto_setup_now(external)
+
+    def relaunch_admin(self, extra_args=()) -> bool:
+        """관리자 권한으로 다시 시작 (성공하면 이 프로그램은 곧 끝남)"""
+        fn = self.ctx.get("relaunch_admin")
+        if fn is None:
+            return False
+        ok, msg = fn(list(extra_args))
+        self._note(msg)
+        if not ok:
+            self._ui("show_error", "관리자 권한", msg)
+        return ok
+
+    def _auto_setup_now(self, external=""):
+        key = (self.cfg.get("relay_key") or "").strip() or connect_code.new_key()
+        port = self.relay_port()
+        self.cfg.update(relay_key=key, relay_port=port, relay_external=(external or "").strip(), relay_url="")
+        self._ui("set_server_fields", "", key)
+        self._ui("set_relay_info", str(port), *self.relay_info()[1:])
+        self._note(f"중계 PC 자동 설정: 공용 키 준비, 포트 {port}")
+
+        def work():
+            try:
+                self.ctx["set_relay_host"](True)
+                self._ui("set_relay_enabled", True)
+            except Exception as e:
+                self.cfg.update(relay_host=False)
+                self._note(f"안내 서버 시작 실패: {type(e).__name__}: {e}")
+                self._ui("show_error", "자동 설정", f"안내 서버를 시작하지 못했습니다.\n{e}")
+                return
+            try:
+                self.client.stop()                   # 이 PC 는 안내 서버 운영용 — 다른 안내 서버에 접속해 있었다면 끊음
+            except Exception:
+                pass
+            ok, msg = open_firewall(port)
+            self._note(msg.splitlines()[0])
+            self._ui("set_relay_code", self.relay_code())
+            self.refresh_server()
+            self.refresh_relay()
+            if not ok and os.name == "nt":
+                self._ui("show_error", "방화벽", msg)
+            self._ui("set_relay_code", self.relay_code())
+        self._spawn(work)
+        return True
+
+    def import_connection(self, text, as_field=False, name="", code="") -> bool:
+        """다른 PC: 중계 PC 의 접속 정보를 붙여넣어 주소·공용 키를 채우고 바로 연결 (현장이면 이름·접속 코드도 함께)"""
+        try:
+            urls, key = connect_code.decode(text)
+        except ValueError as e:
+            self._ui("show_error", "접속 정보", str(e))
+            return False
+        if as_field:
+            code, err = validate_code(code)
+            if err:
+                self._ui("show_error", "접속 정보", f"현장 PC 로 쓰려면 접속 코드가 필요합니다.\n{err}")
+                return False
+        self._ui("set_busy", "server", True)
+
+        def work():
+            try:
+                url = connect_code.pick_reachable(urls)
+                self.cfg.update(relay_url=url, relay_key=key)
+                self._ui("set_server_fields", url, key)
+                self._note(f"접속 정보 적용: {url}")
+                if as_field:
+                    self.cfg.update(access_code=code, **({"name": name.strip()[:NAME_MAX]} if name.strip() else {}))
+                    self.field_toggled(True)
+                self._restart_client()
+            except Exception as e:
+                self._note(f"접속 정보 적용 실패: {type(e).__name__}: {e}")
+                self._ui("set_busy", "server", False)
         self._spawn(work)
         return True
 
@@ -671,27 +801,52 @@ class WanTab(NullUI):
         self.server_btn.pack(side="left")
         self.server_lbl = tk.Label(row, text="● 끊김", font=app.FONT_BOLD, fg=app.RED, bg=app.PANEL)
         self.server_lbl.pack(side="left", padx=(px(12), 0))
+        app._button(row, "접속 정보 붙여넣기", "secondary", lambda: self._import_dialog(), small=True
+                    ).pack(side="right")
 
     def _build_relay(self):
-        """이 PC 가 중계 PC 일 때 — 안내 서버를 앱 안에서 켜고 끈다 (공용 키는 위 '안내 서버' 칸의 값을 씀)"""
+        """이 PC 가 중계 PC 일 때 — 버튼 한 번으로 안내 서버를 세팅하고, 다른 PC 에 줄 '접속 정보'를 만든다"""
         app, tk, px = self.app, self.tk, self.px
         if not self.ctx.get("relay_available"):
             return
         box = self._section("안내 서버 운영 (이 PC 가 중계 PC 일 때)")
-        self.relay_var = tk.BooleanVar(value=bool(self.ctx["cfg"].get("relay_host")))
+        cfg = self.ctx["cfg"]
+        self.relay_var = tk.BooleanVar(value=bool(cfg.get("relay_host")))
+        top = tk.Frame(box, bg=app.PANEL)
+        top.pack(fill="x")
+        self.auto_btn = app._button(top, "자동 설정", "primary", lambda: self._relay_auto(), small=False)
+        self.auto_btn.pack(side="left")
+        app._tip(self.auto_btn, "공용 키 만들기 · 안내 서버 시작 · 방화벽 열기 · 접속 정보 만들기를 한 번에 합니다")
+        self.relay_lbl = tk.Label(top, text="● 꺼짐", font=app.FONT_BOLD, fg=app.TEXT_DIM, bg=app.PANEL)
+        self.relay_lbl.pack(side="right")
         row = tk.Frame(box, bg=app.PANEL)
-        row.pack(fill="x")
-        tk.Checkbutton(row, text="이 PC 에서 안내 서버 운영", variable=self.relay_var, command=self._relay_toggled,
+        row.pack(fill="x", pady=(px(6), 0))
+        tk.Checkbutton(row, text="안내 서버 운영", variable=self.relay_var, command=self._relay_toggled,
                        bg=app.PANEL, fg=app.TEXT, font=app.FONT, activebackground=app.PANEL,
                        selectcolor=app.PANEL, bd=0, anchor="w").pack(side="left")
-        app._field_label(row, "포트", width=5).pack(side="left", padx=(px(16), 0))
-        self.relay_port_var = tk.StringVar(value=str(self.ctx["cfg"].get("relay_port") or 9100))
+        app._field_label(row, "포트", width=5).pack(side="left", padx=(px(12), 0))
+        self.relay_port_var = tk.StringVar(value=str(cfg.get("relay_port") or 9100))
         app._entry(row, self.relay_port_var, 6).pack(side="left", ipady=px(1))
         app._button(row, "방화벽 열기", "secondary", lambda: self.controller.open_firewall(), small=True
-                    ).pack(side="left", padx=(px(12), 0))
-        self.relay_lbl = tk.Label(row, text="● 꺼짐", font=app.FONT_BOLD, fg=app.TEXT_DIM, bg=app.PANEL)
-        self.relay_lbl.pack(side="right")
+                    ).pack(side="left", padx=(px(10), 0))
+        self.admin_btn = app._button(top, "관리자로 다시 시작", "secondary", lambda: self.controller.relaunch_admin(),
+                                     small=True)
         self.relay_more = tk.Frame(box, bg=app.PANEL)            # 켰을 때만 보임 — 창이 좁아서 평소엔 접어 둔다
+        ext = tk.Frame(self.relay_more, bg=app.PANEL)
+        ext.pack(fill="x", pady=(px(6), 0))
+        app._field_label(ext, "외부 주소", width=8).pack(side="left")
+        self.relay_ext_var = tk.StringVar(value=cfg.get("relay_external") or "")
+        ent = app._entry(ext, self.relay_ext_var, 24)
+        ent.pack(side="left", fill="x", expand=True, ipady=px(1))
+        ent.bind("<FocusOut>", lambda e: self.controller.set_relay_external(self.relay_ext_var.get()))
+        ent.bind("<Return>", lambda e: self.controller.set_relay_external(self.relay_ext_var.get()))
+        app._tip(ent, "다른 망(출장지)에서 이 PC 에 닿는 공인 IP 또는 도메인 (선택). 공유기에서 포트포워딩이 필요합니다")
+        code = tk.Frame(self.relay_more, bg=app.PANEL)
+        code.pack(fill="x", pady=(px(4), 0))
+        app._field_label(code, "접속 정보", width=8).pack(side="left")
+        self.relay_code_var = tk.StringVar(value="")
+        app._entry(code, self.relay_code_var, 24).pack(side="left", fill="x", expand=True, ipady=px(1))
+        app._button(code, "복사", "secondary", lambda: self._copy_code(), small=True).pack(side="left", padx=(px(6), 0))
         self.relay_hint_lbl = tk.Label(self.relay_more, text="", font=app.FONT_SMALL, fg=app.TEXT_DIM,
                                        bg=app.PANEL, anchor="w", justify="left")
         self.relay_hint_lbl.pack(fill="x", pady=(px(4), 0))
@@ -737,7 +892,7 @@ class WanTab(NullUI):
                         foreground=app.TEXT_DIM, relief="flat", borderwidth=0, padding=(px(6), px(5)))
         wrap = tk.Frame(box, bg=app.PANEL, highlightthickness=1, highlightbackground=app.INPUT_BORDER)
         wrap.pack(fill="x")
-        self.tree = ttk.Treeview(wrap, columns=COLUMNS, show="headings", height=4,
+        self.tree = ttk.Treeview(wrap, columns=COLUMNS, show="headings", height=3,
                                  selectmode="browse", style="Wan.Treeview")
         for col, w in zip(COLUMNS, COLUMN_WIDTHS):
             self.tree.heading(col, text=col)
@@ -782,6 +937,70 @@ class WanTab(NullUI):
 
     def _field_toggled(self):
         self.controller.field_toggled(self.enabled_var.get())
+
+    def _relay_auto(self):
+        self.controller.relay_auto_setup(self.relay_ext_var.get())
+
+    def _copy_code(self):
+        code = self.relay_code_var.get()
+        if not code:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code)
+            self.controller.log("접속 정보를 복사했습니다 — 다른 PC 의 '접속 정보 붙여넣기'에 붙여넣으세요")
+        except Exception:
+            pass
+
+    def _import_dialog(self):
+        """다른 PC: 접속 정보를 붙여넣고 역할(출장지/현장)을 고르면 주소·키·(현장이면 이름·접속 코드)까지 한 번에 적용"""
+        app, tk, px = self.app, self.tk, self.px
+        win = tk.Toplevel(self.root)
+        win.title("접속 정보 붙여넣기")
+        win.configure(bg=app.PANEL)
+        win.transient(self.root)
+        pad = tk.Frame(win, bg=app.PANEL)
+        pad.pack(fill="both", expand=True, padx=px(16), pady=px(12))
+        tk.Label(pad, text="중계 PC 에서 복사한 접속 정보를 붙여넣으세요", font=app.FONT_BOLD, fg=app.TEXT, bg=app.PANEL,
+                 anchor="w").pack(fill="x")
+        code_var = tk.StringVar()
+        try:
+            clip = self.root.clipboard_get()
+            if connect_code.PREFIX in clip:
+                code_var.set(clip.strip())
+        except Exception:
+            pass
+        app._entry(pad, code_var, 46).pack(fill="x", pady=(px(6), px(8)), ipady=px(2))
+        role_var = tk.StringVar(value="user")
+        for text, val in (("출장지 PC — 현장 PC 에 원격으로 접속하는 쪽", "user"), ("현장 PC — 원격 접속을 받는 쪽", "field")):
+            tk.Radiobutton(pad, text=text, variable=role_var, value=val, bg=app.PANEL, fg=app.TEXT, font=app.FONT,
+                           activebackground=app.PANEL, selectcolor=app.PANEL, anchor="w",
+                           command=lambda: show_field()).pack(fill="x")
+        field = tk.Frame(pad, bg=app.PANEL)
+        name_var, access_var = tk.StringVar(), tk.StringVar()
+        for label, var in (("이름", name_var), ("접속 코드", access_var)):
+            r = tk.Frame(field, bg=app.PANEL)
+            r.pack(fill="x", pady=(px(4), 0))
+            app._field_label(r, label, width=8).pack(side="left")
+            app._entry(r, var, 22).pack(side="left", fill="x", expand=True, ipady=px(1))
+        tk.Label(field, text="접속 코드는 이 현장 PC 에 접속할 때 쓰는 비밀번호입니다", font=app.FONT_SMALL, fg=app.TEXT_DIM,
+                 bg=app.PANEL, anchor="w").pack(fill="x", pady=(px(2), 0))
+
+        def show_field():
+            if role_var.get() == "field":
+                field.pack(fill="x", pady=(px(6), 0))
+            else:
+                field.pack_forget()
+
+        def ok():
+            if self.controller.import_connection(code_var.get(), role_var.get() == "field", name_var.get(),
+                                                 access_var.get()):
+                win.destroy()
+        btns = tk.Frame(pad, bg=app.PANEL)
+        btns.pack(fill="x", pady=(px(10), 0))
+        app._button(btns, "확인", "primary", ok).pack(side="left")
+        app._button(btns, "취소", "secondary", win.destroy).pack(side="left", padx=(px(8), 0))
+        self._import_win = SimpleNamespaceDialog(win, code_var, role_var, name_var, access_var, ok)
 
     def _relay_toggled(self):
         self._relay_layout()
@@ -921,6 +1140,12 @@ class WanTab(NullUI):
 
     def show_info(self, title, message):
         self.mb.showinfo(title, message, parent=self.root)
+
+
+class SimpleNamespaceDialog:
+    """붙여넣기 창의 입력값 묶음 (시험이 창을 조작할 수 있게 보관)"""
+    def __init__(self, win, code, role, name, access, ok):
+        self.win, self.code, self.role, self.name, self.access, self.ok = win, code, role, name, access, ok
 
 
 def build_tab(app, parent, ctx) -> WanTab:

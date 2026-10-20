@@ -51,6 +51,7 @@ DEFAULTS = {
     "auto_update":  True,
     "relay_host":   False,    # 이 PC 에서 안내 서버(중계)도 운영할지 — 공용 키는 relay_key 를 그대로 씀
     "relay_port":   9100,     # 안내 서버가 받을 포트
+    "relay_external": "",     # 다른 망에서 이 안내 서버에 닿는 주소(공인 IP · 도메인) — 접속 정보에 넣음
 }
 
 # 안내 서버가 원격으로 바꿀 수 있는 항목
