@@ -25,6 +25,8 @@ RELAY_EXIT_PORT_BUSY = 3    # 안내 서버 프로세스가 포트를 못 잡고
 
 DISCOVER_PORT = 9101        # 같은 망에서 중계 PC 를 자동으로 찾는 UDP 포트
 
+DEFAULT_RELAY_KEY = "aurora-wan"    # 공용 키 기본값 — 따로 정하지 않아도 모든 PC 가 같은 키로 시작한다 (믿는 망에서 쓰는 편의 값)
+
 DEFAULT_STUN = "stun:stun.l.google.com:19302"
 
 
@@ -41,7 +43,7 @@ def default_dir() -> str:
 DEFAULTS = {
     "enabled":      False,    # 이 PC 를 WAN 원격 대상(현장)으로 쓸지
     "relay_url":    "",       # 안내 서버 주소  ws://주소:포트
-    "relay_key":    "",       # 안내 서버 공용 키 (서버에 키를 걸었을 때만 필요)
+    "relay_key":    DEFAULT_RELAY_KEY,   # 안내 서버 공용 키 — 현장 접속 코드를 따로 안 정했으면 이 키가 접속 코드
     "agent_id":     "",       # 이 PC 의 고유 ID — 처음 한 번 만들어 계속 씀
     "name":         "",       # 표시 이름 (안내 서버에서 원격으로 바꿀 수 있음)
     "access_code":  "",       # 접속 코드 — 비어 있으면 모든 접속을 거부

@@ -28,7 +28,7 @@ from collections import deque
 from datetime import datetime
 
 from . import connect_code, discover
-from .config import QUALITY, RELAY_EXIT_PORT_BUSY, format_id
+from .config import DEFAULT_RELAY_KEY, QUALITY, RELAY_EXIT_PORT_BUSY, format_id
 from .netutil import is_admin, lan_addresses, open_firewall
 from .protocol import WanDenied, WanError
 from .usage import fmt_bytes
@@ -311,7 +311,13 @@ class WanTabController:
         same = "  ·  ".join(f"ws://{ip}:{port}" for ip in ips[:3]) or "(내부 주소를 찾지 못했습니다)"
         hint = (f"같은 망의 PC 에 입력할 주소:  {same}\n"
                 f"다른 망(출장지)에서 쓰려면 공유기에서 TCP {port} 를 이 PC 로 포트포워딩하고  ws://공인IP:{port}  를 입력")
-        warn = "" if (self.cfg.get("relay_key") or "").strip() else "공용 키가 비어 있어 누구나 접속을 시도할 수 있습니다 (위 '공용 키' 칸에 입력)"
+        key = (self.cfg.get("relay_key") or "").strip()
+        if not key:
+            warn = "공용 키가 비어 있어 누구나 접속을 시도할 수 있습니다 (위 '공용 키' 칸에 입력)"
+        elif key == DEFAULT_RELAY_KEY and (self.cfg.get("relay_external") or "").strip():
+            warn = "기본 공용 키입니다 — 인터넷에 열면 키를 아는 누구나 현장 PC 에 접속할 수 있습니다 (위 '공용 키' 칸에서 바꾸세요)"
+        else:
+            warn = ""
         return str(port), hint, warn
 
     def refresh_relay(self):
@@ -390,7 +396,7 @@ class WanTabController:
         return ok
 
     def _auto_setup_now(self, external=""):
-        key = (self.cfg.get("relay_key") or "").strip() or connect_code.new_key()
+        key = (self.cfg.get("relay_key") or "").strip() or DEFAULT_RELAY_KEY
         port = self.relay_port()
         self.cfg.update(relay_key=key, relay_port=port, relay_external=(external or "").strip(), relay_url="")
         self._ui("set_server_fields", "", key)

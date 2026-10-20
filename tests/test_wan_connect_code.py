@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from wan import connect_code as cc
+from wan.config import DEFAULT_RELAY_KEY, WanConfig
 from wan import ui as wui
 from test_wan_relay_host import Rec, host, make_ctl  # noqa: F401  (host 는 pytest 도구)
 
@@ -65,11 +66,11 @@ def with_ctx(monkeypatch, admin=True, lan=("192.168.0.140",), firewall=(True, "�
     return ctl, ctx, ui
 
 
-def test_auto_setup_generates_key_starts_relay_and_builds_code(monkeypatch):
+def test_auto_setup_uses_default_key_starts_relay_and_builds_code(monkeypatch):
     ctl, ctx, ui = with_ctx(monkeypatch)
     assert ctl.relay_auto_setup("") is True
     key = ctx["cfg"].get("relay_key")
-    assert len(key) >= 16
+    assert key == DEFAULT_RELAY_KEY                                       # 키를 따로 안 정했으면 기본 공용 키
     ctx["set_relay_host"].assert_called_once_with(True)
     urls, k = cc.decode(ui.last("set_relay_code")[0])
     assert urls == ["ws://192.168.0.140:9100"] and k == key
@@ -192,7 +193,7 @@ def test_auto_setup_then_paste_connects_for_real(host, tmp_path, monkeypatch):
     monkeypatch.setattr(wui, "lan_addresses", lambda: ["127.0.0.1"])
     monkeypatch.setattr(wui, "open_firewall", lambda port: (True, "열었습니다"))
     relay_pc = host()
-    relay_pc.cfg.update(relay_key="")                                     # 키 없이 시작 → 자동으로 만들어져야 함
+    relay_pc.cfg.update(relay_key="")                                     # 키 없이 시작 → 기본 공용 키가 들어가야 함
     ctl1 = wui.WanTabController(relay_pc.tab_context(lambda *a: None, relaunch_admin=None), lambda f: f(),
                                 ui=Rec(), spawn=lambda f: f())
     ui1 = ctl1.ui
@@ -208,7 +209,7 @@ def test_auto_setup_then_paste_connects_for_real(host, tmp_path, monkeypatch):
         ctl2 = wui.WanTabController(other.tab_context(lambda *a: None), lambda f: f(), ui=ui2, spawn=lambda f: f())
         assert ctl2.import_connection(code) is True
         eventually(lambda: other.client.state == "연결됨", 15, msg=f"붙여넣기만으로 연결되어야 함: {other.client.state}")
-        assert other.cfg.get("relay_key") == relay_pc.cfg.get("relay_key") != ""
+        assert other.cfg.get("relay_key") == relay_pc.cfg.get("relay_key") == DEFAULT_RELAY_KEY
     finally:
         other.shutdown()
 
@@ -361,3 +362,29 @@ def test_agent_accepts_shared_key_only_when_no_access_code():
     assert mk(access_code="4321", relay_key="공용키").check_code("공용키") == "bad_code"   # 코드를 정했으면 키로는 안 열림
     assert mk(access_code="4321", relay_key="공용키").check_code("4321") is None
     assert mk(access_code="", relay_key="").check_code("") == "no_code"                  # 둘 다 없으면 모두 거부
+
+
+# ── 기본 공용 키 ──
+def test_fresh_config_starts_with_default_key(tmp_path):
+    assert WanConfig(str(tmp_path / "new")).get("relay_key") == DEFAULT_RELAY_KEY
+
+
+def test_existing_empty_key_is_not_overwritten(tmp_path):
+    cfg = WanConfig(str(tmp_path / "old"))
+    cfg.update(relay_key="")
+    assert WanConfig(str(tmp_path / "old")).get("relay_key") == ""         # 이미 저장된 설정은 그대로
+
+
+def test_user_chosen_key_is_kept_by_auto_setup(monkeypatch):
+    ctl, ctx, ui = with_ctx(monkeypatch, relay_key="내키")
+    ctl.relay_auto_setup("")
+    assert ctx["cfg"].get("relay_key") == "내키"
+
+
+def test_default_key_warns_only_when_exposed_to_internet(monkeypatch):
+    ctl, ctx, _ = with_ctx(monkeypatch, relay_key=DEFAULT_RELAY_KEY)
+    assert ctl.relay_info()[2] == ""                                       # 같은 망만 쓰면 경고 없음
+    ctx["cfg"].d["relay_external"] = "203.0.113.5"
+    assert "기본 공용 키" in ctl.relay_info()[2]                             # 외부 주소를 쓰면 경고
+    ctx["cfg"].d["relay_key"] = "내가 바꾼 키"
+    assert ctl.relay_info()[2] == ""
