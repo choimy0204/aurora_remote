@@ -51,6 +51,14 @@ class FakeLabel:
         return self.kw.get("text", "")
 
 
+class FakeCheck(FakeLabel):
+    """tk.Checkbutton 흉내 — 옵션을 기록하고 pack 만 받음"""
+
+
+class FakeFrame(FakeLabel):
+    """tk.Frame 흉내"""
+
+
 class FakeWin:
     def __init__(self):
         self.jobs = []
@@ -66,11 +74,14 @@ class FakeWin:
 class FakeBase:
     """aurora_remote.RemoteViewer 가 쓰는 속성만 흉내 낸 기반 클래스"""
     QUALITY = {"낮음": (45, 8), "보통": (60, 15), "높음": (75, 20)}
-    BG, DIM = "#000", "#888"
+    BG, DIM, FG = "#000", "#888", "#fff"
 
     def __init__(self, root, title, request, px=lambda v: v, quality="보통", on_quality=None,
                  on_closed=None, font=None, side=None, side_width=0):
-        self._tk = SimpleNamespace(Label=FakeLabel, TclError=FakeTclError)
+        self._tk = SimpleNamespace(Label=FakeLabel, Checkbutton=FakeCheck, Frame=FakeFrame, BooleanVar=FakeVar,
+                                  TclError=FakeTclError)
+        self.canvas = SimpleNamespace(focus_set=lambda: None)
+        self._area = object()
         self._request, self._on_quality, self._on_closed = request, on_quality, on_closed
         self._quality = quality if quality in self.QUALITY else "보통"
         self.alive = True
@@ -234,9 +245,11 @@ def test_viewer_no_cap_at_other_quality_or_route(viewer_cls):
     assert s.requests[-1][1]["w"] == 1920
 
 
-def test_viewer_info_label_on_toolbar_right(viewer_cls):
+def test_viewer_info_row_is_below_toolbar_not_squeezed_into_it(viewer_cls):
+    """도구 막대에 끼우면 창이 좁을 때 잘려 보이지 않으므로 별도 줄에 둔다 (실제 Tk 화면에서 확인된 문제)"""
     v, _ = make_viewer(viewer_cls)
-    assert v._info.master is v._status.master
+    assert v._info.master is v._info_row and v._info_row.master is v.win
+    assert v._info_row.master is not v._status.master
     assert v._info.packed["side"] == "right"
     assert v._info.text == "직접 연결 · 이번 연결 0 B · 0 KB/s · 절약"
     assert v.win.jobs and v.win.jobs[0][0] == 1000

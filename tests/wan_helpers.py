@@ -310,7 +310,8 @@ class RelayRunner:
 
 
 class AgentRunner:
-    def __init__(self, cfg_dir, relay_url, local_port, name="현장1", code="", key="", direct_mode="normal"):
+    def __init__(self, cfg_dir, relay_url, local_port, name="현장1", code="", key="", direct_mode="normal",
+                 key_getter=lambda: LOCAL_KEY):
         from wan.agent import WanAgent
         from wan.config import WanConfig
         self.cfg = WanConfig(cfg_dir)
@@ -318,7 +319,7 @@ class AgentRunner:
         self.agent_id = self.cfg.ensure_id()
         self.logs = []
         self.lt = LoopThread()
-        self.agent = WanAgent(self.cfg, local_port, lambda: LOCAL_KEY, "2.16.0", self.logs.append, direct_mode)
+        self.agent = WanAgent(self.cfg, local_port, key_getter, "2.16.0", self.logs.append, direct_mode)
         self.task = asyncio.run_coroutine_threadsafe(self.agent.run(), self.lt.loop)
 
     def stop(self):

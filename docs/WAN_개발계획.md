@@ -65,15 +65,20 @@
 | 1 | 구조 · 설정 파일 · 현장 고유 ID | 완료 (`wan/`, `wan_config.json`, 처음 실행 때 ID 생성) |
 | 2 | 안내 서버 | 완료 (현장 목록, 설정 보관·전달, 키, `/health`, 서버 재시작 후에도 유지) |
 | 3 | 직접 연결 + 비상 중계 | 완료 (6초 안에 직접이 안 되면 중계, 끊기면 자동 재연결, 접속 코드는 현장이 확인) |
-| 4 | 데이터 절약 | 부분: 화질 3단계 · 항상 절약으로 시작 · 연결별 사용량/속도 표시 · 날짜별 누적 기록 완료. **화면 선요청(프리페치) 미구현**(아래) · 화질별 실사용량 측정은 Windows 실기 필요 |
+| 4 | 데이터 절약 | 화질 3단계 · 항상 절약으로 시작 · 연결별 사용량/속도 표시 · 날짜별 누적 기록 · **화면 선요청("빠르게" 옵션, 아래)** 완료. 화질별 실사용량 측정은 Windows 실기 필요 |
 | 5 | 업데이트 · 설치 · 설명서 | 완료 (안내 서버 경유 새 버전 + SHA-256, `tools/make_wan_config.py`, `WanRelay.spec`, 사용 설명서) |
 
-### 프리페치를 구현하지 않은 이유
-`/remote/frame`의 바뀐 영역은 보는 쪽이 보낸 `last` 번호 이후 **누적**으로 계산된다(직전에 보낸 화면 기준이 아님). 따라서 요청이 겹쳐도 안전하게 하려면 보는 쪽이 "받은 조각의 기준 번호가 내가 가진 번호 이하이면 붙이고, 새 화면 번호가 이미 지났으면 버린다"는 규칙으로 `_apply`를 바꾸고 `_frame_loop`를 두 갈래로 돌려야 한다. 이 루프는 Windows 화면·입력과 얽혀 있어 이 환경에서 검증할 수 없고, 잘못되면 화면이 깨진다. 실측으로 지연이 문제로 확인된 뒤에 해당 파생 클래스에서 구현하는 것을 권한다.
+### 화면 선요청("빠르게") — 구현과 대가
+`/remote/frame`의 바뀐 영역은 보는 쪽이 보낸 `last` 번호 이후 **누적**으로 계산된다(직전에 보낸 화면 기준이 아님). 그래서 요청이 겹쳐도 화면이 깨지지 않게 `WanRemoteViewer._apply`가 다음 규칙을 쓴다:
+- 이미 더 새 화면이 있으면(응답의 `seq` ≤ 내 번호) 늦게 온 응답은 버린다.
+- 조각의 기준 번호(`base`)가 내 번호보다 오래됐어도 붙인다 — 바뀌지 않은 칸은 같은 내용이므로.
+- 기준 화면이 모자라면 통째로 다시 받는다. 화면 종류·크기·화질이 바뀌면 이전 요청의 응답은 버린다.
+
+**대가**: 겹친 요청이 같은 변화를 두 번 받아서 초당 화면 수가 2배가 되는 만큼 **데이터도 약 1.9배**가 된다(시뮬레이션: RTT 300ms, 계속 바뀌는 화면 3.0→5.7장/초, 24.8→46.3KB/s). 핫스팟 데이터 절약이 1순위이므로 **기본은 꺼짐**이고 원격 창의 "빠르게" 체크박스로 켠다. "절약" 화질은 켜도 한 장씩. 값은 `wan/config.py`의 `PREFETCH`.
 
 ## 5. 검증 현황
 
-`python -m pytest` → 전체 통과. 테스트 파일별:
+`python -m pytest` → 전체 통과 (Python 3.12 + 진짜 Tk(Xvfb) 289개, tkinter 없는 환경 264개 + 화면 시험 3개 파일 건너뜀). 테스트 파일별:
 
 | 파일 | 내용 |
 |---|---|
@@ -83,18 +88,26 @@
 | `test_wan_real_handler` | **실제 `aurora_client.CommandHandler`**를 WAN 통로로 (파일 목록/다운로드/이어받기/업로드/경로 제한/차단) |
 | `test_wan_supervisor` · `update` · `runtime` · `tools` | 프로세스 감독 · 새 버전 다운로드/검증 · 런타임 · 설정 파일 도구 |
 | `test_wan_ui` · `ui_strict` | UI 로직 + 엄격한 가짜 tkinter(pack/grid 혼용·오타 옵션 검출) |
+| `test_wan_realtk` | **진짜 tkinter(Xvfb)** 로 실제 `AuroraClientApp` 전체를 띄워 WAN 탭 구성·창 안 배치·목록 표시 확인 |
+| `test_wan_viewer_real` | **진짜 `RemoteViewer`** + 가짜 현장 화면(`sim_host.py`, 지연·지터): 모든 화질에서 화면이 현장과 같아지는지, 응답 뒤바뀜, 화질 전환, 크기 변경, 선요청 효과 |
+| `test_wan_full_chain` | **끝에서 끝까지**: 실제 앱의 `_wan_open_remote` → 진짜 `RemoteViewer` + 진짜 `CommandHandler` + 안내 서버 + 현장 에이전트 + aiortc. 화면 동기화 · 입력 전달 · 반입/반출 패널 요청 · 닫기 · 중복 열기 |
+| `tools/wan_frozen_check/` | PyInstaller 번들 점검: `AuroraClient.spec`의 제외 목록·hiddenimports 로 묶은 실행 파일 안에서 직접·중계 연결이 되는지 (Linux 확인 완료, **Windows 빌드 PC에서 1회 실행 권장**) |
 
 측정(이 환경, 루프백): 60MB 전송 중 입력 왕복 — 직접 연결 중앙 80ms / 최대 393ms, 비상 중계 중앙 10ms / 최대 15ms (전송 중이 아닐 때 약 3~4ms).
 
+Linux 에서 Windows 전용 부분을 `tests/winshim.py` 로 흡수해 **실제 `aurora_client.py` · `aurora_remote.py` 코드**를 시험한다. tkinter 가 설치된 환경에서는 `xvfb-run -a python -m pytest` 로 전체(화면 시험 포함)를 돌린다. tkinter 가 없으면 화면 시험은 건너뛴다.
+
 ### 확인하지 못한 것 (Windows 실기 · 실제 인터넷 필요)
-1. 서로 다른 망에서 실제 홀 펀칭 (이 환경은 외부 UDP 불가 — `host` 후보만 확인)
-2. tkinter 화면 (이 환경에 tkinter 없음 — 위젯 구성은 가짜 tkinter로만 검증)
-3. PyInstaller 빌드, Python 3.14에서 `aiortc`/`av` 설치 가능 여부
+1. **서로 다른 망에서 실제 홀 펀칭** — 이 환경은 외부 UDP 불가(`host` 후보만 확인). `tests/holepunch_test.py` 를 두 PC에서 돌린 결과가 필요
+2. Windows 에서의 화면 동작 (DPI · 제목 표시줄 제거 · 키보드 훅 · 파일 끌어놓기 등). Linux 의 Tk 로 구성과 흐름은 확인했지만 Windows 전용 호출은 흡수해서 시험
+3. **Windows 에서의 PyInstaller 빌드** — Linux 에서 같은 `EXCLUDES`·`hiddenimports` 로 묶은 실행 파일이 직접 연결·중계 모두 동작함은 확인
 4. 현장 PC에서 LAN 프로세스와 WAN 에이전트가 동시에 화면 캡처(DXGI)할 때의 충돌 여부
 5. 화질별 실제 데이터 사용량
 
+확인된 것: Python 3.14 용 Windows(win_amd64) 휠이 `aiortc`·`av`·`pylibsrtp`·`cryptography`·`google-crc32c`·`websockets`·`cffi` 등 의존성 전부에 존재한다(조회 결과).
+
 ### 알려진 사항
-- **exe 크기**: aiortc가 끌고 오는 `av`(FFmpeg)가 압축 전 약 105MB. `AuroraClient.exe`가 눈에 띄게 커진다(공정망 업데이트 복사량 증가). aiortc 없이 빌드하면 비상 중계만 동작.
+- **exe 크기**: WAN 스택(aiortc·`av`(FFmpeg) 등)이 exe에 **약 53MB**를 더한다(같은 제외 목록으로 빈 프로그램 7.1MB → 59.9MB, Linux 빌드 측정; Windows 휠 압축 해제 합계 약 85MB). 기존 `AuroraClient.exe`가 약 64MB이므로 100MB를 넘길 것으로 예상(공정망 업데이트 복사량 증가). aiortc 없이 빌드하면 비상 중계만 동작.
 - **직접 연결 전송 속도**: aiortc의 SCTP가 순수 파이썬이라 이 환경에서 약 3.5MB/s(≈28Mbps)에서 CPU가 병목이다. 같은 조건에서 비상 중계는 26MB/s. 화면 원격에는 충분하지만 큰 파일은 중계가 더 빠를 수 있다.
 - 통신은 `ws://`(암호화 없음) + 공용 키 + 접속 코드. 안내 서버는 접속 코드를 평문으로 보관한다. 필요하면 TLS 프록시(`wss://`).
 
