@@ -795,3 +795,29 @@ def test_quick_setup_reports_when_wan_cannot_start(monkeypatch):
     ctx["set_wan_enabled"].side_effect = OSError("시작 실패")
     ctl.quick_setup(cc.encode(["wss://10.0.0.1:9100"], "k"))
     assert "시작 실패" in ui.last("show_error")[1] and not ctx["cfg"].d.get("relay_url")
+
+
+# ── 말씀하신 흐름 그대로: 현장 PC 는 켜 두기만, 접속하는 PC 는 중계 PC 정보만 ──
+def test_user_pc_knowing_only_relay_info_sees_and_opens_every_field_pc(tmp_path):
+    from wan_helpers import World, eventually, AgentRunner, FakeLocal
+    w = World(tmp_path, code="", key="shared-key-9")                   # 현장 1: 접근 코드를 따로 정하지 않음(공용 키로 열림)
+    local2 = FakeLocal()
+    field2 = AgentRunner(str(tmp_path / "field2"), w.relay.url, local2.port, name="현장2", code="현장2-자동생성-코드", key="shared-key-9")
+    try:
+        opened = []
+        ctx = {"cfg": w.user_cfg, "client": w.client, "usage": w.usage, "supervisor_state": lambda: {"state": "stopped"},
+               "set_field_mode": MagicMock(), "px": lambda v: v, "log": MagicMock(),
+               "open_remote": lambda session, agent: opened.append((agent["name"], session))}
+        ctl = wui.WanTabController(ctx, lambda fn: fn(), ui=RecUI(), spawn=lambda fn: fn())
+        eventually(lambda: len([a for a in w.client.agents if a["online"]]) == 2, msg="현장 PC 두 대가 목록에 자동으로 나타남")
+        rows = ctl.rows()
+        assert {r[0] for r in rows} == {"현장1", "현장2"} and all(r[2] == "켜짐" for r in rows)     # 따로 등록한 적 없음
+        for aid, values in ctl.rows_with_ids():
+            ctl.quick_connect(aid)                                                              # 코드는 한 번도 묻지 않음
+        assert sorted(n for n, _ in opened) == ["현장1", "현장2"]
+        assert not ctl.ui.all("ask_code") and not ctl.ui.all("show_error")
+        for _, s in opened:
+            assert s.request("GET", "/info").status_code == 200
+            s.close()
+    finally:
+        field2.stop(); local2.stop(); w.close()

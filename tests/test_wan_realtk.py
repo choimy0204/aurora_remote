@@ -429,3 +429,21 @@ def test_off_screen_shows_only_code_box_and_start_runs_full_setup(tmp_path, monk
     finally:
         application._wan_shutdown()
         winshim.destroy_root(root)
+
+
+def test_checking_field_box_without_relay_info_asks_for_it_right_away(app, monkeypatch):
+    tab = app._wan_tab
+    app._wan.cfg.update(relay_url="", git_source="", enabled=False)
+    monkeypatch.setattr(tab.controller, "field_toggled", lambda on: None)
+    monkeypatch.setattr(tab.controller, "find_on_lan", lambda: None)
+    app._select_tab(4)
+    tab._connect_win = None
+    tab.enabled_var.set(True)
+    tab._field_toggled()
+    app.root.update()
+    assert tab._connect_win is not None and tab._connect_win.win.winfo_exists()      # 접속 정보 입력창이 바로 뜸
+    tab._connect_win.win.destroy()
+    app._wan.cfg.update(relay_url="ws://h:1")
+    tab._connect_win = None
+    tab._field_toggled()                                                              # 이미 중계 PC 정보가 있으면 묻지 않음
+    assert tab._connect_win is None

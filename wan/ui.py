@@ -915,6 +915,10 @@ class WanTabController:
         if enabled:
             self.refresh_public()
 
+    def needs_relay_info(self) -> bool:
+        """중계 PC 에 붙을 방법(주소 · Git 저장소)이 아직 하나도 없는지"""
+        return not ((self.cfg.get("relay_url") or "").strip() or (self.cfg.get("git_source") or "").strip())
+
     def field_toggled(self, enabled: bool):
         """'이 PC를 원격 대상으로 사용' 체크가 바뀜 → 설정 저장 + 에이전트 시작/중지 (작업 스레드)"""
         enabled = bool(enabled)
@@ -1660,6 +1664,8 @@ class WanTab(NullUI):
     def _field_toggled(self):
         self._field_layout()
         self.controller.field_toggled(self.enabled_var.get())
+        if self.enabled_var.get() and self.controller.needs_relay_info():
+            self._connect_dialog()                  # 현장 PC 로 켰는데 중계 PC 정보가 아직 없으면 바로 물어본다 (체크 + 접속 정보면 끝)
 
     def _apply_code(self):
         self.controller.set_access_code(self.code_var.get())
