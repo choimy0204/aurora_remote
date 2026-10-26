@@ -12,7 +12,10 @@ import secrets
 import socket
 from urllib.parse import urlsplit
 
+from .config import DIRECT_PORT
+
 PREFIX = "AW1-"
+PREFIX_DIRECT = "AD1-"    # 현장 PC 하나에 주소로 바로 접속하는 정보 — JSON = {"u": [주소, ...], "k": 접근 코드}
 KEY_BYTES = 12            # 자동으로 만드는 공용 키 길이 (글자 약 16자)
 
 
@@ -28,19 +31,56 @@ def make_url(host: str, port: int) -> str:
     return f"ws://{host}" if ":" in host else f"ws://{host}:{port}"
 
 
-def encode(urls, key: str) -> str:
+def parse_address(text: str, default_port: int = DIRECT_PORT) -> str:
+    """'192.168.0.5' · '192.168.0.5:9102' · 'ws://host:9102' 어느 모양이든 '주소:포트' 로 정리. 잘못되면 ValueError"""
+    t = (text or "").strip()
+    if "://" in t:
+        t = t.split("://", 1)[1]
+    t = t.rstrip("/")
+    try:
+        p = urlsplit("//" + t)
+        host, port = p.hostname, p.port
+    except ValueError:
+        raise ValueError("주소 형식이 올바르지 않습니다 (예: 192.168.0.5 또는 192.168.0.5:9102)") from None
+    if not host or any(c.isspace() for c in t):
+        raise ValueError("현장 PC 의 주소를 입력하세요 (예: 192.168.0.5 또는 192.168.0.5:9102)")
+    if ":" in host:
+        raise ValueError("IPv6 주소는 지원하지 않습니다 — IPv4 주소나 도메인을 입력하세요")
+    return f"{host}:{port or default_port}"
+
+
+def encode(urls, key: str, prefix: str = PREFIX) -> str:
     raw = json.dumps({"u": list(urls), "k": key or ""}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return PREFIX + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return prefix + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def decode(text: str) -> tuple:
-    """→ (주소 목록, 공용 키).  형식이 맞지 않으면 ValueError (화면에 보여 줄 글자)"""
-    t = "".join((text or "").split())                    # 줄바꿈·공백이 끼어 붙여넣어져도 허용
+def encode_direct(urls, code: str) -> str:
+    return encode(urls, code, PREFIX_DIRECT)
+
+
+def kind_of(text: str) -> str:
+    """붙여넣은 글자의 종류 → relay(중계 PC) · direct(현장 PC 주소) · ''(알 수 없음)"""
+    t = "".join((text or "").split())
     if PREFIX in t:
-        t = t[t.index(PREFIX):]
-    if not t.startswith(PREFIX):
-        raise ValueError("접속 정보가 아닙니다 — 중계 PC 에서 '접속 정보 복사'로 복사한 글자를 붙여넣으세요")
-    body = t[len(PREFIX):]
+        return "relay"
+    if PREFIX_DIRECT in t:
+        return "direct"
+    return ""
+
+
+def decode_direct(text: str) -> tuple:
+    """→ (주소 목록, 접근 코드)"""
+    return decode(text, PREFIX_DIRECT)
+
+
+def decode(text: str, prefix: str = PREFIX) -> tuple:
+    """→ (주소 목록, 공용 키 또는 접근 코드).  형식이 맞지 않으면 ValueError (화면에 보여 줄 글자)"""
+    t = "".join((text or "").split())                    # 줄바꿈·공백이 끼어 붙여넣어져도 허용
+    if prefix in t:
+        t = t[t.index(prefix):]
+    if not t.startswith(prefix):
+        raise ValueError("접속 정보가 아닙니다 — 복사해 둔 접속 정보를 그대로 붙여넣으세요")
+    body = t[len(prefix):]
     try:
         data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode("utf-8"))
         urls = [u for u in data["u"] if isinstance(u, str) and u.lower().startswith(("ws://", "wss://"))]
@@ -63,3 +103,32 @@ def pick_reachable(urls, timeout: float = 2.0) -> str:
         except (OSError, ValueError):
             continue
     return urls[0]
+
+
+def apply_relay_code(cfg, text: str) -> str:
+    """중계 PC 의 접속 정보를 설정에 적용 → 고른 안내 서버 주소 (닿는 주소를 찾느라 몇 초 걸릴 수 있음)"""
+    urls, key = decode(text)
+    url = pick_reachable(urls)
+    cfg.update(relay_url=url, relay_key=key)
+    return url
+
+
+def remember_direct(cfg, text: str, name: str = "") -> str:
+    """현장 PC 주소 접속 정보를 '접속했던 현장' 목록에 저장 → '주소:포트'"""
+    urls, code = decode_direct(text)
+    address = urlsplit(pick_reachable(urls)).netloc
+    targets = dict(cfg.get("direct_targets") or {})
+    old = targets.get(address, {})
+    targets[address] = {"name": name or old.get("name", ""), "code": code, "last": old.get("last", 0)}
+    cfg.update(direct_targets=targets)
+    return address
+
+
+def reachable(address: str, timeout: float = 0.8) -> bool:
+    """'주소:포트' 에 TCP 로 닿는지 (현장 목록에 켜짐/꺼짐을 보여 주려고)"""
+    host, _, port = address.rpartition(":")
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False

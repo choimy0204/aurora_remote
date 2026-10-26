@@ -1,7 +1,10 @@
 """안내 서버 운영 화면이 쓰는 네트워크 도우미 — 이 PC 의 내부 주소 찾기, Windows 방화벽 포트 열기"""
 
 import os
+import re
+import secrets
 import socket
+import struct
 import subprocess
 
 FIREWALL_RULE = "Aurora WAN Relay"
@@ -29,6 +32,48 @@ def lan_addresses() -> list:
     return out
 
 
+STUN_MAGIC = 0x2112A442
+
+
+def stun_server(url: str) -> tuple:
+    """'stun:host:port' → (host, port)"""
+    t = (url or "").split(":", 1)[-1] if (url or "").startswith(("stun:", "stuns:")) else (url or "")
+    host, _, port = t.partition(":")
+    return host, int(port or 3478)
+
+
+def public_address(stun: str, timeout: float = 2.0) -> str | None:
+    """인터넷에서 보이는 이 망의 공인 IP (STUN 에 한 번 물어봄).  못 알아내면 None.
+    STUN 은 UDP 한 번 주고받는 것이 전부이며 화면 · 코드 같은 정보는 보내지 않는다"""
+    if not stun:
+        return None
+    try:
+        host, port = stun_server(stun)
+        tid = secrets.token_bytes(12)
+        req = struct.pack(">HHI", 0x0001, 0, STUN_MAGIC) + tid
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(timeout)
+            s.sendto(req, (host, port))
+            data, _ = s.recvfrom(2048)
+        return _parse_stun(data, tid)
+    except (OSError, ValueError):
+        return None
+
+
+def _parse_stun(data: bytes, tid: bytes) -> str | None:
+    if len(data) < 20 or data[8:20] != tid or struct.unpack(">H", data[:2])[0] != 0x0101:
+        return None
+    pos, end = 20, 20 + struct.unpack(">H", data[2:4])[0]
+    while pos + 4 <= min(end, len(data)):
+        atype, alen = struct.unpack(">HH", data[pos:pos + 4])
+        body = data[pos + 4:pos + 4 + alen]
+        if atype in (0x0020, 0x0001) and len(body) >= 8 and body[1] == 1:       # XOR-MAPPED / MAPPED, IPv4
+            raw = struct.unpack(">I", body[4:8])[0]
+            return socket.inet_ntoa(struct.pack(">I", raw ^ STUN_MAGIC if atype == 0x0020 else raw))
+        pos += 4 + alen + (-alen % 4)
+    return None
+
+
 def firewall_command(port: int) -> str:
     return (f'netsh advfirewall firewall add rule name="{FIREWALL_RULE} {port}" dir=in action=allow '
             f"protocol=TCP localport={port}")
@@ -42,21 +87,40 @@ def firewall_commands(port: int) -> list:
             f"protocol=UDP localport={DISCOVER_PORT}"]
 
 
-def open_firewall(port: int) -> tuple:
-    """Windows 방화벽에서 TCP 포트를 연다 → (성공 여부, 안내 글자).  관리자 권한이 없으면 실패하고 직접 할 명령을 알려 준다"""
+def direct_firewall_command(port: int) -> str:
+    """현장 PC 가 주소 접속을 받는 TCP 포트"""
+    return (f'netsh advfirewall firewall add rule name="Aurora WAN Direct {port}" dir=in action=allow '
+            f"protocol=TCP localport={port}")
+
+
+def delete_rule_command(add_cmd: str) -> str:
+    """add rule 명령에서 같은 이름의 규칙을 지우는 명령을 만든다"""
+    name = re.search(r'name="([^"]+)"', add_cmd).group(1)
+    return f'netsh advfirewall firewall delete rule name="{name}"'
+
+
+def _run(cmd: str):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=20,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def open_firewall(port: int, direct: bool = False) -> tuple:
+    """Windows 방화벽에서 TCP 포트를 연다 → (성공 여부, 안내 글자).  관리자 권한이 없으면 실패하고 직접 할 명령을 알려 준다.
+    direct=True 면 현장 PC 의 주소 접속 포트 하나만 연다 (안내 서버용 포트 · 자동 찾기는 건드리지 않음)"""
     if os.name != "nt":
         return False, "Windows 에서만 지원합니다"
-    cmds = firewall_commands(port)
+    cmds = [direct_firewall_command(port)] if direct else firewall_commands(port)
     for cmd in cmds:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=20,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            _run(delete_rule_command(cmd))                # 같은 이름의 옛 규칙이 있으면 지우고 다시 만든다 (눌러 볼 때마다 규칙이 쌓이지 않게)
+            r = _run(cmd)
         except (OSError, subprocess.SubprocessError) as e:
             return False, f"실행하지 못했습니다: {e}"
         if r.returncode != 0:
             return False, ("방화벽을 바꾸지 못했습니다 (관리자 권한이 필요합니다).\n"
                            "관리자 권한 명령 프롬프트에서 아래 명령을 실행하세요:\n\n" + "\n".join(cmds))
-    return True, f"방화벽에서 TCP {port} 와 자동 찾기(UDP)를 열었습니다"
+    return True, (f"방화벽에서 TCP {port} 를 열었습니다" if direct
+                  else f"방화벽에서 TCP {port} 와 자동 찾기(UDP)를 열었습니다")
 
 
 def is_admin() -> bool:

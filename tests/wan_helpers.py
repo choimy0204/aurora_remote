@@ -311,11 +311,13 @@ class RelayRunner:
 
 class AgentRunner:
     def __init__(self, cfg_dir, relay_url, local_port, name="현장1", code="", key="", direct_mode="normal",
-                 key_getter=lambda: LOCAL_KEY):
+                 key_getter=lambda: LOCAL_KEY, direct_port=None):
+        """direct_port: 주소 접속(안내 서버 없이)을 받을 포트. 주지 않으면 받지 않는다 (시험끼리 포트가 겹치지 않게)"""
         from wan.agent import WanAgent
         from wan.config import WanConfig
         self.cfg = WanConfig(cfg_dir)
-        self.cfg.update(relay_url=relay_url, relay_key=key, name=name, access_code=code, stun="", enabled=True)
+        self.cfg.update(relay_url=relay_url, relay_key=key, name=name, access_code=code, stun="", enabled=True,
+                        direct_listen=bool(direct_port), **({"direct_port": direct_port} if direct_port else {}))
         self.agent_id = self.cfg.ensure_id()
         self.logs = []
         self.lt = LoopThread()
@@ -369,3 +371,10 @@ class World:
                 fn()
             except Exception:
                 pass
+
+
+def free_port() -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]

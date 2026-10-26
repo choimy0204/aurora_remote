@@ -132,33 +132,31 @@ def test_relay_card_exists_and_toggle_reaches_runtime(app, monkeypatch):
     assert calls[1:] == [True] and app._wan.cfg.get("relay_port") == 9333
 
 
-def test_auto_button_and_paste_dialog_with_real_widgets(app, monkeypatch):
-    """진짜 위젯: 자동 설정 버튼이 있고, 접속 정보 붙여넣기 창이 입력값을 컨트롤러에 넘긴다"""
-    import time
+def test_auto_button_and_connect_dialog_with_real_widgets(app, monkeypatch):
+    """진짜 위젯: 자동 설정 버튼이 있고, 연결 추가 창이 입력값을 컨트롤러에 넘긴다"""
     from wan import connect_code
     tab = app._wan_tab
     assert hasattr(tab, "auto_btn") and hasattr(tab, "relay_code_var") and hasattr(tab, "admin_btn")
     got = []
-    monkeypatch.setattr(tab.controller, "import_connection", lambda *a, **k: got.append(a) or True)
+    monkeypatch.setattr(tab.controller, "add_connection", lambda *a, **k: got.append(a) or True)
     monkeypatch.setattr(tab.controller, "find_on_lan", lambda: None)
     app._select_tab(4)
-    tab._import_dialog()
-    d = tab._import_win
+    tab._connect_dialog()
+    d = tab._connect_win
     code = connect_code.encode(["ws://10.0.0.5:9100"], "k")
-    d.code.set(code)
-    d.role.set("field")
-    d.name.set("CCW 1")
+    d.text.set(code)
+    d.field.set(True)
     d.ok()
     app.root.update()
-    assert got == [(code, True, "CCW 1")]
+    assert got == [(code, "", True)]
     assert not d.win.winfo_exists()                                      # 성공하면 창이 닫힘
     tab.set_relay_code("AW1-test")
     assert tab.relay_code_var.get() == "AW1-test"
-    tab.set_server_fields("ws://a:1", "kk")
-    assert (tab.url_var.get(), tab.key_var.get()) == ("ws://a:1", "kk")
     from wan import ui as wan_ui
     monkeypatch.setattr(wan_ui, "is_admin", lambda: False)             # 주기 갱신이 관리자 여부를 다시 계산하므로 값을 고정
     tab.controller.refresh_relay()
+    app.root.update()
+    tab._relay_expand(True)
     app.root.update()
     assert tab.admin_btn.winfo_ismapped()                               # 관리자가 아니면 '관리자로 다시 시작' 버튼이 보임
     monkeypatch.setattr(wan_ui, "is_admin", lambda: True)
@@ -167,29 +165,49 @@ def test_auto_button_and_paste_dialog_with_real_widgets(app, monkeypatch):
     assert not tab.admin_btn.winfo_ismapped()
 
 
-def test_paste_dialog_field_inputs_appear_above_the_buttons(app, monkeypatch):
-    """현장 PC 를 고르면 나오는 이름·접속 코드 칸이 확인/취소 버튼 위에 있어야 한다 (예전에는 버튼 아래로 밀렸음)"""
+def test_connect_dialog_shows_code_row_only_for_addresses(app, monkeypatch):
+    """주소를 넣으면 접근 코드 칸(공용 키로 미리 채움)이 버튼 위에 나타나고, 접속 정보를 넣으면 숨는다"""
+    from wan import connect_code
     tab = app._wan_tab
+    app._wan.cfg.update(relay_key="공용키", relay_url="ws://h:1")
     monkeypatch.setattr(tab.controller, "find_on_lan", lambda: None)
     app._select_tab(4)
-    tab._import_dialog()
-    d = tab._import_win
-    d.role.set("field")
-    d.show_field()
+    tab._connect_dialog()
+    d = tab._connect_win
     d.win.update()
-    assert d.field.winfo_ismapped()
-    assert d.field.winfo_y() < d.btns.winfo_y(), (d.field.winfo_y(), d.btns.winfo_y())
-    d.role.set("user")
-    d.show_field()
+    assert not d.code_row.winfo_ismapped() and not d.field_chk.winfo_ismapped()
+    d.text.set("192.168.0.5")
     d.win.update()
-    assert not d.field.winfo_ismapped()
+    assert d.code_row.winfo_ismapped() and d.code.get() == "공용키"
+    assert d.code_row.winfo_y() < d.btns.winfo_y(), (d.code_row.winfo_y(), d.btns.winfo_y())
+    assert not d.field_chk.winfo_ismapped()
+    d.text.set(connect_code.encode(["ws://10.0.0.5:9100"], "k"))
+    d.win.update()
+    assert not d.code_row.winfo_ismapped() and d.field_chk.winfo_ismapped()
+    assert d.field_chk.winfo_y() < d.btns.winfo_y()
+    d.text.set(connect_code.encode_direct(["ws://10.0.0.5:9102"], "c"))
+    d.win.update()
+    assert not d.code_row.winfo_ismapped() and not d.field_chk.winfo_ismapped()
+    assert "현장 PC" in d.hint.cget("text")
     d.win.destroy()
 
 
-def test_paste_dialog_searches_lan_when_clipboard_is_empty_and_fills_result(app, monkeypatch):
-    """복사해 둔 게 없으면 열자마자 같은 망에서 찾고, 찾은 접속 정보가 입력칸에 들어온다"""
+def test_connect_dialog_opened_from_status_prefills_current_relay(app, monkeypatch):
+    app._wan.cfg.update(relay_url="ws://h:7", relay_key="kk")
+    tab = app._wan_tab
+    app._select_tab(4)
+    tab._connect_dialog(tab._current_relay())
+    d = tab._connect_win
+    d.win.update()
+    assert d.text.get() == "ws://h:7" and d.code.get() == "kk" and d.code_row.winfo_ismapped()
+    d.win.destroy()
+
+
+def test_connect_dialog_searches_lan_when_no_relay_and_clipboard_is_empty(app, monkeypatch):
+    """중계 PC 가 아직 없고 복사해 둔 게 없으면 열자마자 같은 망에서 찾고, 찾은 접속 정보가 입력칸에 들어온다"""
     from wan import connect_code
     tab = app._wan_tab
+    app._wan.cfg.update(relay_url="")
     searched = []
     monkeypatch.setattr(tab.controller, "find_on_lan", lambda: searched.append(1))
     try:
@@ -197,11 +215,88 @@ def test_paste_dialog_searches_lan_when_clipboard_is_empty_and_fills_result(app,
     except Exception:
         pass
     app._select_tab(4)
-    tab._import_dialog()
-    d = tab._import_win
+    tab._connect_dialog()
+    d = tab._connect_win
     assert searched == [1] and "찾는 중" in d.hint.cget("text")
     code = connect_code.encode(["ws://10.0.0.5:9100"], "k")
     tab.set_found_code(code)
-    assert d.code.get() == code and "찾았습니다" in d.hint.cget("text")
+    assert d.text.get() == code and "찾았습니다" in d.hint.cget("text")
     d.win.destroy()
     tab.set_found_code(code)                                              # 창이 닫힌 뒤 늦게 도착해도 오류 없음
+
+
+def test_connect_dialog_does_not_search_when_relay_already_set(app, monkeypatch):
+    tab = app._wan_tab
+    app._wan.cfg.update(relay_url="ws://h:1")
+    searched = []
+    monkeypatch.setattr(tab.controller, "find_on_lan", lambda: searched.append(1))
+    app._select_tab(4)
+    tab._connect_dialog()
+    tab._connect_win.win.destroy()
+    assert searched == []
+
+
+def test_field_card_shows_address_and_code_only_when_enabled(app, monkeypatch):
+    tab = app._wan_tab
+    app._select_tab(4)
+    tab.set_field_enabled(False)
+    app.root.update()
+    assert not tab.field_box.winfo_ismapped()
+    tab.set_field_enabled(True)
+    tab.set_field_address("192.168.0.5:9102")
+    tab.set_field_code("my-code")
+    tab.set_field_info("A1B2-C3D4-E5F6", "사무실", "")
+    app.root.update()
+    assert tab.field_box.winfo_ismapped()
+    assert tab.address_lbl.cget("text") == "192.168.0.5:9102" and tab.code_var.get() == "my-code"
+    assert "사무실" in tab.id_lbl.cget("text") and "A1B2-C3D4-E5F6" in tab.id_lbl.cget("text")
+
+
+def test_editing_access_code_on_screen_saves_it(app, monkeypatch):
+    tab = app._wan_tab
+    app._wan.cfg.update(relay_key="공용키", access_code="")
+    app._select_tab(4)
+    tab.code_var.set("새코드")
+    tab._apply_code()
+    assert app._wan.cfg.get("access_code") == "새코드"
+    tab.code_var.set("공용키")                                             # 공용 키와 같으면 '따로 정한 코드 없음'
+    tab._apply_code()
+    assert app._wan.cfg.get("access_code") == ""
+
+
+def test_relay_card_is_collapsed_until_opened(app, monkeypatch):
+    tab = app._wan_tab
+    app._wan.cfg.update(relay_host=False)
+    tab._relay_expand(False)
+    app._select_tab(4)
+    app.root.update()
+    assert not tab.relay_more.winfo_ismapped() and "▸" in tab.relay_toggle_lbl.cget("text")
+    tab.relay_toggle_lbl.event_generate("<Button-1>")
+    app.root.update()
+    assert tab.relay_more.winfo_ismapped() and "▾" in tab.relay_toggle_lbl.cget("text")
+
+
+def test_rows_menu_and_delete_key_for_saved_address_targets(app, monkeypatch):
+    tab = app._wan_tab
+    app._wan.cfg.update(direct_targets={"10.0.0.5:9102": {"name": "사무실", "code": "c", "last": 0}})
+    app._select_tab(4)
+    tab.controller.refresh_agents()
+    app.root.update()
+    assert tab.tree.exists("d:10.0.0.5:9102")
+    tab.tree.selection_set("d:10.0.0.5:9102")
+    tab._forget()
+    app.root.update()
+    assert not tab.tree.exists("d:10.0.0.5:9102") and app._wan.cfg.get("direct_targets") == {}
+
+
+def test_save_path_and_copy_helpers(app, monkeypatch, tmp_path):
+    tab = app._wan_tab
+    monkeypatch.setattr(tab.fd, "asksaveasfilename", lambda **k: str(tmp_path / "x.conn"))
+    got = []
+    tab.ask_save_path(str(tmp_path), "aurora_wan.conn", got.append)
+    assert got == [str(tmp_path / "x.conn")]
+    monkeypatch.setattr(tab.fd, "asksaveasfilename", lambda **k: "")
+    tab.ask_save_path(str(tmp_path), "aurora_wan.conn", got.append)
+    assert got[-1] is None                                                # 취소
+    tab.copy_text("hello", "복사됨")
+    assert app.root.clipboard_get() == "hello"

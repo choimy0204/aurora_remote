@@ -115,6 +115,52 @@ class RelayLink(Link):
         self._mark_closed()
 
 
+class WsLink(Link):
+    """주소로 바로 맺은 websocket (안내 서버 없음).  연결 하나가 세션 하나라 RelayLink 와 달리 세션 표시를 붙이지 않는다"""
+    kind = "direct"
+
+    def __init__(self, ws):
+        super().__init__()
+        self.ws = ws
+
+    async def pump(self):
+        """받은 프레임을 위(Mux)로 넘김. 연결이 끝나면 닫힘 처리 (끝날 때까지 돌아오지 않음)"""
+        try:
+            async for msg in self.ws:
+                if isinstance(msg, (bytes, bytearray)):
+                    self.deliver(bytes(msg))
+        except Exception:
+            pass
+        finally:
+            self._mark_closed()
+
+    async def send(self, frame: bytes):
+        if self.closed:
+            raise P.WanError("연결이 닫혔습니다")
+        try:
+            await self.ws.send(frame)
+        except Exception as e:
+            raise P.WanError(f"전송 실패: {e}") from e
+
+    @property
+    def buffered(self) -> int:
+        try:
+            return self.ws.transport.get_write_buffer_size()
+        except Exception:
+            return 0
+
+    def close(self):
+        if not self.closed:
+            asyncio.ensure_future(self._close_ws())
+        self._mark_closed()
+
+    async def _close_ws(self):
+        try:
+            await self.ws.close()
+        except Exception:
+            pass
+
+
 # ─────────────────────────────────────────
 # aiortc 는 필요할 때만 불러온다 — 못 불러와도(설치 안 됨·DLL 문제) 비상 중계는 쓸 수 있게
 # ─────────────────────────────────────────

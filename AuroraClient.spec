@@ -23,7 +23,8 @@ a = Analysis(
     # 건너뜀(aiortc 가 없으면 직접 연결 없이 비상 중계만, websockets 도 없으면 WAN 탭만 "사용할 수 없음")
     hiddenimports=['wan.runtime', 'wan.ui', 'wan.viewer', 'wan.supervisor', 'wan.update', 'wan.client',
                    'wan.agent', 'wan.server', 'wan.bridge', 'wan.mux', 'wan.links', 'wan.config', 'wan.usage',
-                   'wan.protocol', 'wan.relay_run', 'wan.netutil', 'websockets.asyncio.client', 'websockets.asyncio.server',
+                   'wan.protocol', 'wan.relay_run', 'wan.netutil', 'wan.direct', 'wan.connfile', 'wan.connect_code',
+                   'websockets.asyncio.client', 'websockets.asyncio.server',
                    'aiortc', 'aioice', 'pylibsrtp', 'pyee', 'dns', 'ifaddr', 'google_crc32c'],
     hookspath=[],
     hooksconfig={},

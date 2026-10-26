@@ -20,7 +20,7 @@ KNOWN = {
     "activebackground", "activeforeground", "selectcolor", "takefocus", "yscrollcommand", "xscrollcommand",
     "insertbackground", "wrap", "disabledforeground", "readonlybackground", "exportselection", "maximum", "value",
     "length", "mode", "offvalue", "onvalue", "selectbackground", "selectforeground", "padding", "height", "name",
-    "background", "foreground", "activestyle", "spacing1", "spacing3", "insertwidth", "fieldbackground",
+    "background", "foreground", "activestyle", "tearoff", "spacing1", "spacing3", "insertwidth", "fieldbackground",
 }
 
 
@@ -161,6 +161,9 @@ class Widget:
     def delete(self, *a, **k):
         self.items.clear()
 
+    def selection(self, *a):
+        return ()
+
     def get_children(self, *a):
         return [f"I{i + 1}" for i in range(len(self.items))]
 
@@ -179,6 +182,17 @@ class Toplevel(Widget):
 Frame = Label = Entry = Button = Checkbutton = Radiobutton = Text = Canvas = Scrollbar = Listbox = Widget
 
 
+class Menu(Widget):
+    def add_command(self, **kw):
+        self._check({k: v for k, v in kw.items() if k not in ("label", "command")})
+
+    def tk_popup(self, *a):
+        pass
+
+    def grab_release(self):
+        pass
+
+
 class Style:
     def configure(self, *a, **k):
         pass
@@ -191,7 +205,7 @@ def build_modules():
     tk = types.ModuleType("tkinter")
     for n, cls in dict(Frame=Frame, Label=Label, Entry=Entry, Button=Button, Checkbutton=Checkbutton,
                        Radiobutton=Radiobutton, Text=Text, Canvas=Canvas, Scrollbar=Scrollbar, Listbox=Listbox,
-                       Toplevel=Toplevel, StringVar=StringVar, BooleanVar=BooleanVar, IntVar=IntVar,
+                       Toplevel=Toplevel, Menu=Menu, StringVar=StringVar, BooleanVar=BooleanVar, IntVar=IntVar,
                        TclError=TclError).items():
         setattr(tk, n, cls)
     ttk = types.ModuleType("tkinter.ttk")
@@ -204,8 +218,11 @@ def build_modules():
         setattr(mb, n, lambda *a, **k: True)
     sd = types.ModuleType("tkinter.simpledialog")
     sd.askstring = lambda *a, **k: None
-    tk.ttk, tk.messagebox, tk.simpledialog = ttk, mb, sd
-    return {"tkinter": tk, "tkinter.ttk": ttk, "tkinter.messagebox": mb, "tkinter.simpledialog": sd}
+    fd = types.ModuleType("tkinter.filedialog")
+    fd.askopenfilename = fd.asksaveasfilename = lambda *a, **k: ""
+    tk.ttk, tk.messagebox, tk.simpledialog, tk.filedialog = ttk, mb, sd, fd
+    return {"tkinter": tk, "tkinter.ttk": ttk, "tkinter.messagebox": mb, "tkinter.simpledialog": sd,
+            "tkinter.filedialog": fd}
 
 
 def install(monkeypatch):

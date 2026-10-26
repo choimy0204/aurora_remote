@@ -442,7 +442,7 @@ class RecUI(wui.NullUI):
         self.calls = []
 
     def __getattribute__(self, name):
-        if name.startswith(("set_", "show_")):
+        if name.startswith(("set_", "show_", "copy_")):
             def rec(*a):
                 object.__getattribute__(self, "calls").append((name,) + a)
             return rec
@@ -480,9 +480,33 @@ def test_rows_sorted_online_first_and_formatted():
     ]
     rows = ctl.rows()
     assert [r[0] for r in rows] == ["alpha", "Beta", "(이름 없음)", "zeta"]     # 켜짐 먼저, 이름순(대소문자 무시)
-    assert rows[1] == ("Beta", "AAAA-AAAA-AAAA", "켜짐", "지금", "1.0", "적용됨")
-    assert rows[3] == ("zeta", "BBBB-BBBB-BBBB", "꺼짐", "3분 전", "1.1", "대기 중")
-    assert rows[2][3] == "2시간 전" and rows[2][4] == "-"
+    assert rows[1] == ("Beta", "중계", "켜짐", "지금")
+    assert rows[0][2] == "켜짐"
+    assert rows[3] == ("zeta", "중계", "꺼짐 · 설정 대기", "3분 전")
+    assert rows[2][3] == "2시간 전"
+
+
+def test_rows_disambiguate_duplicate_names_with_id_prefix():
+    ctl, ctx, _ = make_ctl()
+    ctx["client"].agents = [ag("aaaa11112222", "현장"), ag("bbbb33334444", "현장"), ag("cccc55556666", "다른")]
+    names = [r[0] for r in ctl.rows()]
+    assert "현장 (AAAA)" in names and "현장 (BBBB)" in names and "다른" in names
+
+
+def test_rows_include_direct_targets_with_reachability():
+    ctl, ctx, _ = make_ctl()
+    ctx["cfg"].d["direct_targets"] = {"10.0.0.5:9102": {"name": "사무실", "code": "c", "last": NOW - 120},
+                                      "10.0.0.6:9102": {"name": "", "code": "", "last": 0}}
+    ctx["client"].agents = [ag("x1", "중계현장")]
+    rows = dict(ctl.rows_with_ids())
+    assert rows["d:10.0.0.5:9102"] == ("사무실", "주소", "확인 중", "2분 전")
+    assert rows["d:10.0.0.6:9102"][0] == "10.0.0.6:9102"                        # 이름이 없으면 주소
+    ctl._reach["10.0.0.5:9102"] = True
+    ctl._reach["10.0.0.6:9102"] = False
+    rows = dict(ctl.rows_with_ids())
+    assert rows["d:10.0.0.5:9102"][2:] == ("켜짐", "지금") and rows["d:10.0.0.6:9102"][2] == "꺼짐"
+    ids = [r[0] for r in ctl.rows_with_ids()]
+    assert ids.index("d:10.0.0.5:9102") < ids.index("d:10.0.0.6:9102")           # 켜진 것이 먼저
 
 
 def test_rows_with_ids_and_agent_lookup():
@@ -496,6 +520,8 @@ def test_rows_with_ids_and_agent_lookup():
 
 def test_server_status_text_and_level():
     ctl, ctx, ui = make_ctl()
+    assert ctl.server_status() == ("중계 PC 없음", "off")                      # 주소를 안 정한 PC
+    ctx["cfg"].d["relay_url"] = "ws://h:1"
     ctx["client"].state = "키 불일치"
     assert ctl.server_status() == ("● 키 불일치", "bad")
     ctx["client"].state = "연결 중"
@@ -540,9 +566,9 @@ def test_apply_server_uses_worker_thread_by_default():
 
 def test_field_info_texts():
     ctl, ctx, _ = make_ctl()
-    assert ctl.field_info() == ("A1B2-C3D4-E5F6", "(이름 없음)", "접속 코드 · 공용 키 없음 — 모두 거부")
+    assert ctl.field_info() == ("A1B2-C3D4-E5F6", "(이름 없음)", "접근 코드도 공용 키도 없어 모든 접속을 거부합니다")
     ctx["cfg"].d.update(name=" 사무실 ", access_code="1234")
-    assert ctl.field_info()[1:] == ("사무실", "접속 코드 설정됨")
+    assert ctl.field_info()[1:] == ("사무실", "")                                # 코드가 있으면 경고 없음
 
 
 @pytest.mark.parametrize("st,text,level", [
@@ -581,7 +607,7 @@ def test_field_toggled_on_and_off():
     ctl.field_toggled(True)
     assert ctx["cfg"].d["enabled"] is True
     ctx["set_field_mode"].assert_called_with(True)
-    assert any("접속 코드" in line for line in ui.last("set_log")[0])      # 코드 없음 안내
+    assert any("접근 코드" in line for line in ui.last("set_log")[0])      # 코드 없음 안내
     ctl.field_toggled(False)
     assert ctx["cfg"].d["enabled"] is False
     ctx["set_field_mode"].assert_called_with(False)
@@ -775,7 +801,8 @@ def test_ticks_refresh_expected_parts():
     assert {c[0] for c in ui.calls} == {"set_server_status", "set_rows"}
     ui.calls.clear()
     ctl.tick_fast()
-    assert {c[0] for c in ui.calls} == {"set_usage", "set_field_info", "set_field_status"}
+    assert {c[0] for c in ui.calls} == {"set_usage", "set_field_info", "set_field_status", "set_field_enabled",
+                                        "set_field_code", "set_field_address"}
 
 
 # ═════════════════════════════════════════
@@ -838,9 +865,9 @@ def test_build_tab_runs_and_wires_client(fake_tk):
     client.on_change = prev
     tab, app, ctx = make_tab(fake_tk, client=client)
     assert isinstance(tab, wui.WanTab) and isinstance(tab.controller, wui.WanTabController)
-    assert tab.url_var.get() == "ws://h:1" and tab.key_var.get() == "k" and tab.enabled_var.get() is True
+    assert tab.enabled_var.get() is True
     texts = [c.args[1] for c in app._button.call_args_list]
-    assert {"적용 후 연결", "원격 연결", "설정 보내기"} <= set(texts)
+    assert {"+ 연결 추가", "원격 연결", "설정 보내기"} <= set(texts)
     # on_change 연결 — 원래 콜백도 계속 불림
     client.on_change("agents")
     prev.assert_called_once_with("agents")
@@ -857,16 +884,15 @@ def test_build_tab_columns_and_treeview(fake_tk):
     tab, _, _ = make_tab(fake_tk)
     ttk = sys.modules["tkinter.ttk"]
     assert ttk.Treeview.call_args.kwargs["columns"] == wui.COLUMNS
-    assert wui.COLUMNS == ("이름", "ID", "상태", "마지막 접속", "버전", "설정")
+    assert wui.COLUMNS == ("이름", "방식", "상태", "마지막 접속")
     assert tab.tree.heading.call_count == len(wui.COLUMNS)
 
 
-def test_tab_apply_server_button(fake_tk):
+def test_tab_add_connection_with_relay_url_applies_server(fake_tk):
+    """연결 추가 창에 ws:// 주소와 공용 키를 넣으면 그 안내 서버로 다시 연결"""
     tab, app, ctx = make_tab(fake_tk)
-    tab.url_var.set("ws://new:2")
-    tab.key_var.set("kk")
-    button_cmd(app, "적용 후 연결")()
-    assert ctx["cfg"].d["relay_url"] == "ws://new:2"
+    tab.controller.add_connection("ws://new:2", "kk")
+    assert ctx["cfg"].d["relay_url"] == "ws://new:2" and ctx["cfg"].d["relay_key"] == "kk"
     assert ctx["client"].calls[-2:] == ["stop", "start"]
 
 

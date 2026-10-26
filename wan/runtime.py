@@ -10,12 +10,16 @@ aurora_client.py 에는 이 객체를 만들고 start/shutdown 을 부르는 몇
 모든 단계의 오류는 여기서 잡아 로그로만 남기고 밖(LAN 쪽)으로 던지지 않는다.
 """
 
+import json
 import os
 import threading
+import time
 
+from . import connect_code, connfile
 from . import update as wan_update
 from .client import WanClient
 from .config import WanConfig
+from .direct import DirectClient
 from .server import parse_ver
 from .usage import UsageStore
 
@@ -35,6 +39,7 @@ class WanRuntime:
         self.cfg = WanConfig(cfg_dir)
         self.usage = UsageStore(os.path.join(self.cfg.dir, "wan_usage.json"))
         self.client = WanClient(self.cfg, self.usage, version, log=lambda m: self.log(f"[WAN] {m}"))
+        self.direct = DirectClient(self.cfg, self.usage, version, log=lambda m: self.log(f"[WAN] {m}"))
         self.supervisor = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -42,18 +47,24 @@ class WanRuntime:
 
     # ── 시작/종료 ──
     def start(self):
+        self._safely("접속 설정 파일 적용", self.apply_conn_file)
         self._safely("안내 서버 운영 시작", lambda: self.cfg.get("relay_host") and self.set_relay_host(True))
         self._safely("현장 모드 시작", lambda: self.cfg.get("enabled") and self.set_field_mode(True))
         if self.cfg.get("relay_url") and not self.cfg.get("enabled"):
-            self._safely("안내 서버 연결", self.client.start)
+            self._safely("안내 서버 연결", self._start_client)
         self._update_thread = threading.Thread(target=self._update_loop, name="wan-update", daemon=True)
         self._update_thread.start()
+
+    def _start_client(self):
+        with self._lock:                     # 접속 설정 파일을 적용하는 스레드와 겹쳐 시작·중지되지 않게
+            self.client.start()
 
     def shutdown(self):
         self._stop.set()
         self.stop_agent()
         self.stop_relay()
         self._safely("클라이언트 종료", self.client.stop)
+        self._safely("직접 접속 종료", self.direct.stop)
         self._safely("사용량 저장", self.usage.flush)
 
     def _safely(self, what: str, fn):
@@ -61,6 +72,40 @@ class WanRuntime:
             return fn()
         except Exception as e:
             self.log(f"[WAN] {what} 실패: {type(e).__name__}: {e}")
+
+    # ── 접속 설정 파일 (exe 옆에 둔 aurora_wan.conn) ──
+    def apply_conn_file(self):
+        """실행 파일 옆의 aurora_wan.conn 이 있고 처음 보는 내용이면 적용 (주소를 확인하느라 걸리는 시간이 있어 별도 스레드)"""
+        path = connfile.find(connfile.search_dirs(self.cfg.dir))
+        if path is None:
+            return
+        try:
+            text = connfile.read(path)
+        except ValueError as e:
+            self.log(f"[WAN] 설정 파일 {path}: {e}")
+            return
+        if connfile.fingerprint(text) == self.cfg.get("conn_hash"):
+            return
+        if connect_code.kind_of(text) == "relay" and self.cfg.get("relay_host"):
+            self.log("[WAN] 이 PC 는 중계 PC 라 다른 중계 PC 의 설정 파일은 적용하지 않습니다")
+            return
+        threading.Thread(target=self._apply_conn_text, args=(text, path), name="wan-conn-file", daemon=True).start()
+
+    def _apply_conn_text(self, text: str, path: str):
+        def work():
+            if connect_code.kind_of(text) == "relay":
+                url = connect_code.apply_relay_code(self.cfg, text)
+                self.log(f"[WAN] 설정 파일 적용: 안내 서버 {url}")
+                if not self.cfg.get("enabled"):
+                    with self._lock:
+                        self.client.stop()
+                        self.client.start()
+            else:
+                address = connect_code.remember_direct(self.cfg, text)
+                self.log(f"[WAN] 설정 파일 적용: 현장 PC {address}")
+            self.cfg.update(conn_hash=connfile.fingerprint(text))
+            self._conn_applied = path
+        self._safely("접속 설정 파일 적용", work)
 
     # ── 현장 모드 (에이전트 프로세스) ──
     def set_field_mode(self, enabled: bool):
@@ -86,6 +131,18 @@ class WanRuntime:
             sup, self.supervisor = self.supervisor, None
         if sup is not None:
             self._safely("에이전트 종료", sup.stop)
+
+    def agent_info(self) -> dict:
+        """에이전트가 5초마다 적는 상태 파일 → {"direct": off · listening · busy, "online": 안내 서버 접속 여부}.  오래됐으면 빈 값"""
+        try:
+            path = os.path.join(self.cfg.dir, "wan_agent.alive")
+            if time.time() - os.path.getmtime(path) > 20:
+                return {}
+            with open(path, "r", encoding="utf-8") as f:
+                info = json.load(f)
+            return info if isinstance(info, dict) else {}
+        except (OSError, ValueError):
+            return {}
 
     def supervisor_state(self) -> dict:
         sup = self.supervisor
@@ -170,6 +227,7 @@ class WanRuntime:
     def tab_context(self, open_remote, px=lambda v: v, log=None, relaunch_admin=None) -> dict:
         return {"relaunch_admin": relaunch_admin, "cfg": self.cfg, "client": self.client, "usage": self.usage,
                 "supervisor_state": self.supervisor_state, "set_field_mode": self.set_field_mode,
+                "direct": self.direct, "agent_info": self.agent_info, "conn_dirs": connfile.search_dirs(self.cfg.dir),
                 "relay_state": self.relay_state, "set_relay_host": self.set_relay_host,
                 "restart_relay": self.restart_relay, "relay_available": self.relay_command is not None,
                 "open_remote": open_remote, "px": px, "log": log or self.log}

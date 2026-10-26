@@ -1,6 +1,7 @@
 """
 현장 PC 의 WAN 에이전트
 =======================
+- (선택) 안내 서버 없이도 주소로 바로 들어오는 접속을 direct_port 로 받는다 — 같은 접근 코드 확인을 거친다.
 - 안내 서버에 상시 연결해 고유 ID 로 등록한다 ("켜져 있음" 신호). 끊기면 간격을 늘려 가며 다시 접속한다.
 - 사용자가 연결을 요청하면 **접속 코드를 이 PC 가 직접 확인**하고, 직접 연결(aiortc)을 맺거나
   안 되면 안내 서버를 거치는 비상 중계로 받는다.
@@ -14,14 +15,16 @@ import hmac
 import json
 import os
 import random
+import secrets
 import socket
 import threading
 import time
 
 from . import protocol as P
 from .bridge import Bridge, Policy
-from .config import WanConfig, new_agent_id
-from .links import DirectLink, RelayLink, direct_available, make_peer_connection, session_description, wait_open
+from .config import DIRECT_PORT, WanConfig, new_agent_id
+from .links import (DirectLink, RelayLink, WsLink, direct_available, make_peer_connection, session_description,
+                    wait_open)
 from .mux import Mux
 
 HEARTBEAT   = 15.0
@@ -30,6 +33,8 @@ DUP_LIMIT   = 3          # 같은 ID 로 이 횟수 밀려나면 ID 가 겹친 �
 DUP_WINDOW  = 300.0
 CODE_FAILS  = 5          # 이 횟수 연속 실패하면
 CODE_LOCK   = 60.0       # 이 시간 동안 모든 접속 거부
+DIRECT_RETRY = 30.0      # 주소 접속용 포트를 못 잡았을 때 다시 시도하는 간격
+DIRECT_HELLO_WAIT = 10.0 # 주소로 들어온 접속이 인사(코드)를 보내기를 기다리는 시간
 
 
 class FileLog:
@@ -60,6 +65,7 @@ class WanAgent:
         self.direct_mode, self.on_bytes = direct_mode, on_bytes
         self.bridge = Bridge(bridge_port, key_getter, Policy(cfg), log=log)
         self.online = False
+        self.direct_state = "off"     # 주소 접속 수신: off · listening · busy(포트를 다른 프로그램이 씀)
         self.sessions: dict = {}      # sid(16자 hex) → Mux
         self._ws = None
         self._links: dict = {}        # sid 8바이트 → RelayLink
@@ -70,8 +76,21 @@ class WanAgent:
 
     # ── 접속 유지 ──
     async def run(self):
+        """안내 서버 접속 유지와 주소 접속 수신을 함께 돌린다 (한쪽이 안 돼도 다른 쪽은 계속)"""
+        direct = asyncio.ensure_future(self.run_direct())
+        try:
+            await self._run_relay()
+        finally:
+            direct.cancel()
+            await asyncio.gather(direct, return_exceptions=True)      # 열린 접속까지 정리된 뒤에 끝낸다
+
+    async def _run_relay(self):
         attempt = 0
         while not self._stop.is_set():
+            self._reload_cfg()
+            if not self.cfg.get("relay_url"):                # 안내 서버 없이 주소 접속만 쓰는 PC — 조용히 기다림
+                await self._sleep(2.0)
+                continue
             started = time.monotonic()
             try:
                 await self._connected_session()
@@ -90,12 +109,17 @@ class WanAgent:
     def stop(self):
         self._stop.set()
 
+    def _reload_cfg(self) -> bool:
+        """화면(다른 프로세스)이 설정 파일을 고쳤으면 다시 읽음 (설정 객체가 이를 지원할 때)"""
+        fn = getattr(self.cfg, "reload_if_changed", None)
+        return bool(fn()) if fn else False
+
     async def _connected_session(self):
         from websockets.asyncio.client import connect
+        self._reload_cfg()                         # 화면에서 안내 서버 주소를 바꿨으면 다음 접속부터 따라감
         url = self.cfg.get("relay_url")
-        if not url:
-            self.log("안내 서버 주소가 설정되지 않았습니다")
-            await asyncio.sleep(10)
+        if not url:                                          # 안내 서버 없이 주소 접속만 쓰는 PC — 조용히 기다림
+            await asyncio.sleep(3)
             return
         async with connect(url, max_size=2 ** 20, compression=None, ping_interval=20, ping_timeout=20,
                            open_timeout=10) as ws:
@@ -177,6 +201,7 @@ class WanAgent:
     # ── 접속 코드 (현장 PC 가 직접 확인) ──
     def check_code(self, code: str) -> str | None:
         """통과면 None, 거부면 이유(no_code · bad_code · locked)"""
+        self._reload_cfg()                         # 화면에서 접근 코드를 바꿨으면 바로 반영
         now = time.monotonic()
         self._fails = [t for t in self._fails if now - t < CODE_LOCK]
         if len(self._fails) >= CODE_FAILS:
@@ -186,7 +211,7 @@ class WanAgent:
             return "no_code"
         if not hmac.compare_digest(str(code).encode("utf-8"), real.encode("utf-8")):
             self._fails.append(now)
-            self.log("접속 코드가 맞지 않는 접속 시도")
+            self.log("접근 코드가 맞지 않는 접속 시도")
             return "bad_code"
         self._fails.clear()
         return None
@@ -226,6 +251,64 @@ class WanAgent:
             await pc.close()
             return
         self._attach(sid, DirectLink(ch, pc), "직접")
+
+    # ── 주소로 바로 들어오는 접속 (안내 서버 없이) ──
+    async def run_direct(self):
+        """direct_port 로 들어오는 접속을 받는다.  설정(켬/끔 · 포트)이 바뀌면 다시 열고, 포트가 막히면 간격을 두고 재시도"""
+        from websockets.asyncio.server import serve
+        while not self._stop.is_set():
+            self._reload_cfg()
+            want = (bool(self.cfg.get("direct_listen")), self._direct_port())
+            if not want[0]:
+                self.direct_state = "off"
+                await self._sleep(2.0)
+                continue
+            try:
+                async with serve(self._on_direct, "0.0.0.0", want[1], max_size=2 ** 20, compression=None,
+                                 ping_interval=20, ping_timeout=20, close_timeout=2):
+                    self.direct_state = "listening"
+                    self.log(f"주소 접속 대기 중 (포트 {want[1]})")
+                    while not self._stop.is_set() and self._want_direct() == want:
+                        await self._sleep(1.0)
+                self.direct_state = "off"
+            except OSError as e:
+                self.direct_state = "busy"
+                self.log(f"주소 접속 포트 {want[1]} 를 열지 못했습니다: {e}")
+                await self._sleep(DIRECT_RETRY)
+
+    def _direct_port(self) -> int:
+        try:
+            return int(self.cfg.get("direct_port"))
+        except (TypeError, ValueError):
+            return DIRECT_PORT
+
+    def _want_direct(self) -> tuple:
+        self._reload_cfg()
+        return bool(self.cfg.get("direct_listen")), self._direct_port()
+
+    async def _sleep(self, seconds: float):
+        try:
+            await asyncio.wait_for(self._stop.wait(), seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    async def _on_direct(self, ws):
+        """주소로 들어온 접속: 인사(접근 코드)를 이 PC 가 직접 확인한 뒤 같은 연결을 세션으로 쓴다"""
+        sid = secrets.token_hex(8)
+        try:
+            hello = json.loads(await asyncio.wait_for(ws.recv(), DIRECT_HELLO_WAIT))
+            if not isinstance(hello, dict) or hello.get("t") != "hello":
+                return
+            denied = self.check_code(hello.get("code", ""))
+        except Exception:
+            return
+        if denied:
+            await self._reply(ws, t="deny", sid=sid, reason=denied)
+            return
+        await self._reply(ws, t="ok", sid=sid, name=self.cfg.get("name") or socket.gethostname(), ver=self.version)
+        link = WsLink(ws)
+        self._attach(sid, link, "주소")
+        await link.pump()
 
     # ── 비상 중계 ──
     async def _on_relay(self, ws, m: dict):
@@ -270,12 +353,13 @@ def _watch_parent(parent_pid: int):
     threading.Thread(target=_loop, daemon=True).start()
 
 
-async def _alive_marker(path: str):
-    """감독자가 멈춘 에이전트를 알아채도록 5초마다 파일 시각을 갱신"""
+async def _alive_marker(path: str, agent=None):
+    """감독자가 멈춘 에이전트를 알아채도록 5초마다 파일 시각을 갱신. 화면이 읽을 상태(JSON)도 함께 적는다"""
     while True:
         try:
             with open(path, "w") as f:
-                f.write(str(time.time()))
+                json.dump({"t": time.time(), "direct": getattr(agent, "direct_state", "off"),
+                           "online": bool(getattr(agent, "online", False))}, f)
         except OSError:
             pass
         await asyncio.sleep(5)
@@ -292,7 +376,7 @@ def run_agent(cfg_dir: str | None, bridge_port: int, key_getter, version: str = 
 
     async def main():
         agent = WanAgent(cfg, bridge_port, key_getter, version, log)
-        marker = asyncio.create_task(_alive_marker(alive_path))
+        marker = asyncio.create_task(_alive_marker(alive_path, agent))
         try:
             await agent.run()
         finally:

@@ -22,9 +22,9 @@ from .links import DirectLink, RelayLink, direct_available, make_peer_connection
 from .mux import Mux
 
 DENY_TEXT = {
-    "bad_code": "접속 코드가 맞지 않습니다",
-    "no_code":  "이 현장 PC 에 접속할 코드도 공용 키도 없습니다 (안내 서버에 연결해 공용 키를 받으세요)",
-    "locked":   "접속 코드를 여러 번 틀려 잠시 막혔습니다 (1분 뒤 다시 시도)",
+    "bad_code": "접근 코드가 맞지 않습니다",
+    "no_code":  "이 현장 PC 에 접근 코드가 없습니다 (현장 PC 에서 접근 코드를 정하거나 중계 PC 의 공용 키를 받아야 합니다)",
+    "locked":   "접근 코드를 여러 번 틀려 잠시 막혔습니다 (1분 뒤 다시 시도)",
     "offline":  "현장 PC 가 꺼져 있거나 안내 서버에 연결되어 있지 않습니다",
     "bad_sid":  "잘못된 요청입니다",
 }

@@ -74,7 +74,7 @@ def test_auto_setup_uses_default_key_starts_relay_and_builds_code(monkeypatch):
     ctx["set_relay_host"].assert_called_once_with(True)
     urls, k = cc.decode(ui.last("set_relay_code")[0])
     assert urls == ["ws://192.168.0.140:9100"] and k == key
-    assert ui.last("set_server_fields") == ("", key)
+    assert ctx["cfg"].get("relay_url") == ""                              # 이 PC 는 중계 PC 라 접속할 안내 서버가 없음
     assert ui.last("set_relay_enabled") == (True,)
     ctx["client"].stop.assert_called_once()                              # 다른 안내 서버에 붙어 있었다면 끊음
 
@@ -145,7 +145,6 @@ def test_import_as_user_sets_address_key_and_connects(monkeypatch):
     code = cc.encode(["ws://203.0.113.5:9100", "ws://192.168.0.140:9100"], "k1")
     assert ctl.import_connection(code) is True
     assert ctx["cfg"].get("relay_url") == "ws://192.168.0.140:9100" and ctx["cfg"].get("relay_key") == "k1"
-    assert ui.last("set_server_fields") == ("ws://192.168.0.140:9100", "k1")
     ctx["client"].start.assert_called_once()
 
 
@@ -289,11 +288,12 @@ def test_no_key_and_no_saved_code_asks_directly(monkeypatch):
 
 def test_field_info_text_for_key_based_access(monkeypatch):
     ctl, ctx, _ = conn_ctl(monkeypatch)
-    assert ctl.field_info()[2] == "접속 코드 없음 — 공용 키로 접속"
+    assert ctl.field_info()[2] == ""                                       # 공용 키로 접속 가능 — 경고 없음
+    assert ctl.field_code() == "공용키"
     ctx["cfg"].d["access_code"] = "x"
-    assert ctl.field_info()[2] == "접속 코드 설정됨"
+    assert ctl.field_info()[2] == "" and ctl.field_code() == "x"
     ctx["cfg"].d.update(access_code="", relay_key="")
-    assert "모두 거부" in ctl.field_info()[2]
+    assert "거부" in ctl.field_info()[2]
 
 
 # ── 같은 망 자동 찾기 ──
@@ -340,7 +340,7 @@ def test_find_on_lan_fills_dialog_or_reports(monkeypatch):
     monkeypatch.setattr(discover, "find_relay", lambda *a, **k: None)
     ui.calls.clear()
     ctl.find_on_lan()
-    assert not [c for c in ui.calls if c[0] == "set_found_code"]
+    assert ui.last("set_found_code") == ("",)                              # 못 찾았다고 창에 알림
 
 
 def test_firewall_commands_include_discovery_udp():

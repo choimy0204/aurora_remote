@@ -7,6 +7,7 @@ import asyncio, json, os, sys, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from wan import runtime, ui, viewer, supervisor, update, agent, client, server, bridge, mux, links, config, usage, protocol  # noqa
+from wan import direct, connfile, connect_code, netutil  # noqa
 from wan.agent import WanAgent
 from wan.client import WanClient
 from wan.config import WanConfig
@@ -56,6 +57,21 @@ def main():
     print("연결 방식:", s.mode, "|", s.request("GET", "/info").json())
     assert s.mode == "relay"
     s.close(); cl.stop()
+    # 안내 서버 없이 주소 + 접근 코드로 바로 접속
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0)); port = probe.getsockname()[1]
+    dcfg = WanConfig(os.path.join(tmp, "field2")); dcfg.update(relay_url="", name="F2", access_code="88", stun="", enabled=True,
+                                                               direct_listen=True, direct_port=port)
+    dloop = loop_thread()
+    dagent = WanAgent(dcfg, local.server_address[1], lambda: "k", "2.16.0", lambda m: None)
+    asyncio.run_coroutine_threadsafe(dagent.run(), dloop)
+    wait(lambda: dagent.direct_state == "listening")
+    dc = direct.DirectClient(WanConfig(os.path.join(tmp, "user2")), None, "2.16.0", log=lambda m: None)
+    s = dc.open_session(f"127.0.0.1:{port}", "88")
+    print("주소 접속:", s.mode, "|", s.request("GET", "/info").json())
+    assert s.request("GET", "/info").json()["hostname"] == "FROZEN-FIELD"
+    s.close(); dc.stop()
     print("FROZEN SELFTEST OK")
 
 if __name__ == "__main__":

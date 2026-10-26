@@ -27,6 +27,8 @@ DISCOVER_PORT = 9101        # 같은 망에서 중계 PC 를 자동으로 찾는
 
 DEFAULT_RELAY_KEY = "aurora-wan"    # 공용 키 기본값 — 따로 정하지 않아도 모든 PC 가 같은 키로 시작한다 (믿는 망에서 쓰는 편의 값)
 
+DIRECT_PORT = 9102          # 현장 PC 가 주소로 바로 들어오는 접속을 받는 포트 (안내 서버 없이 쓰는 직접 접속)
+
 DEFAULT_STUN = "stun:stun.l.google.com:19302"
 
 
@@ -57,6 +59,10 @@ DEFAULTS = {
     "relay_port":   9100,     # 안내 서버가 받을 포트
     "saved_codes":  {},       # 사용자 PC: 현장 PC 별로 한 번 입력해 둔 접속 코드 {agent_id: code} (따로 정한 코드가 있는 현장만)
     "relay_external": "",     # 다른 망에서 이 안내 서버에 닿는 주소(공인 IP · 도메인) — 접속 정보에 넣음
+    "direct_listen": True,    # 현장 모드일 때 주소로 바로 들어오는 접속도 받을지 (안내 서버 없이 접근 코드로 접속)
+    "direct_port":  DIRECT_PORT,
+    "direct_targets": {},     # 사용자 PC: 주소로 접속했던 현장 {"주소:포트": {"name", "code", "last"}}
+    "conn_hash":    "",       # 마지막으로 적용한 설정 파일(.conn) 내용의 지문 — 같은 파일을 매번 다시 적용하지 않으려고
 }
 
 # 안내 서버가 원격으로 바꿀 수 있는 항목
@@ -95,25 +101,47 @@ class WanConfig:
         self.path = os.path.join(self.dir, "wan_config.json")
         self._lock = threading.RLock()
         self._data = dict(DEFAULTS)
+        self._mtime = None
         self.load()
 
     # ── 읽기/쓰기 ──
+    def _stamp(self):
+        try:
+            self._mtime = os.path.getmtime(self.path)
+        except OSError:
+            self._mtime = None
+
+    def reload_if_changed(self) -> bool:
+        """다른 프로세스(화면)가 파일을 고쳤으면 다시 읽음 — 에이전트가 접근 코드 · 포트 변경을 바로 따라가게"""
+        with self._lock:
+            before = self._mtime
+            self._stamp()
+            if self._mtime == before:
+                return False
+            self.load()
+            return True
+
     def load(self):
         with self._lock:
-            self._data = dict(DEFAULTS)
+            self._stamp()
             try:
                 with open(self.path, "r", encoding="utf-8-sig") as f:
                     saved = json.load(f)
                 if not isinstance(saved, dict):
                     raise ValueError("객체가 아님")
-                self._data.update({k: v for k, v in saved.items() if k in DEFAULTS})
             except FileNotFoundError:
-                pass
+                saved = {}
+            except OSError:
+                self._mtime = None     # 다른 프로세스가 쓰는 순간 등 일시적으로 못 읽음 — 있던 값을 그대로 두고 다음에 다시 읽는다
+                return
             except Exception:
+                saved = {}
                 try:   # 깨진 파일은 보관하고 기본값으로 시작 (LAN 설정에는 영향 없음)
                     os.replace(self.path, self.path + ".bad")
                 except OSError:
                     pass
+            self._data = dict(DEFAULTS)
+            self._data.update({k: v for k, v in saved.items() if k in DEFAULTS})
 
     def save(self):
         with self._lock:
@@ -122,6 +150,7 @@ class WanConfig:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.path)
+            self._stamp()
 
     def get(self, key, default=None):
         with self._lock:

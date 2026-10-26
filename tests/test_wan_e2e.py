@@ -64,7 +64,7 @@ def test_no_code_configured_denies_everything(world):
     world.client.set_config(world.agent_id, {"access_code": ""})
     # 빈 코드는 sanitize 를 통과하지만 현장은 코드가 비어 있으면 모두 거부해야 함
     eventually(lambda: world.agent.cfg.get("access_code") == "")
-    with pytest.raises(P.WanDenied, match="공용 키도 없"):
+    with pytest.raises(P.WanDenied, match="접근 코드가 없"):
         world.client.open_session(world.agent_id, "")
 
 

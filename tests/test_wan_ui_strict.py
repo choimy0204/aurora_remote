@@ -71,7 +71,7 @@ def test_strict_fake_rejects_unknown_option(strict):
 def test_tab_builds_without_geometry_errors(strict):
     tab, app, parent = build(strict)
     assert len(strict_tk.Widget.all_widgets) > 20
-    assert {"적용 후 연결", "원격 연결", "설정 보내기"} <= set(app.buttons)
+    assert {"+ 연결 추가", "원격 연결", "설정 보내기"} <= set(app.buttons)
 
 
 def test_tab_builds_for_empty_config(strict):
@@ -83,10 +83,38 @@ def test_tab_buttons_do_not_crash_without_selection(strict):
     tab, app, _ = build(strict)
     app.buttons["원격 연결"]()
     app.buttons["설정 보내기"]()
-    app.buttons["적용 후 연결"]()
 
 
 def test_tab_log_and_stop(strict):
     tab, app, _ = build(strict)
     tab.log("테스트 메시지")
     tab.stop()
+
+
+RELAY_CTX = dict(relay_available=True, relay_state=lambda: {"state": "running", "pid": 5},
+                 set_relay_host=MagicMock(), restart_relay=MagicMock())
+
+
+def test_tab_builds_with_relay_card_and_dialogs(strict):
+    tab, app, _ = build(strict, **RELAY_CTX)
+    assert {"자동 설정", "복사", "파일 저장", "방화벽 열기", "관리자로 다시 시작"} <= set(app.buttons)
+    tab._relay_expand(False)
+    tab._relay_expand(True)
+    tab.set_admin(False)
+    tab.set_admin(True)
+    tab._connect_dialog()                                   # 연결 추가 창의 pack/before 가 엄격한 가짜에서도 통과
+    tab._connect_win.text.set("192.168.0.5")
+    tab._connect_win.text.set("AW1-abc")
+    tab._connect_win.text.set("")
+    tab._config_dialog()                                    # 선택이 없으면 안내만
+
+
+def test_tab_field_card_toggles_without_errors(strict):
+    tab, app, _ = build(strict, cfg=FakeCfg(relay_url="", relay_key="k", enabled=False))
+    tab.enabled_var.set(True)
+    tab._field_layout()
+    tab.set_field_address("192.168.0.5:9102")
+    tab.set_field_code("abc")
+    tab.set_field_info("A1B2", "PC", "")
+    tab.set_field_enabled(False)
+    tab.set_rows([("a1", ("PC", "중계", "켜짐", "지금")), ("d:1.2.3.4:9102", ("현장", "주소", "꺼짐", "어제"))])
