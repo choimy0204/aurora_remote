@@ -161,7 +161,7 @@ class NullUI:
     def ask_code(self, row_id, label, prefill, on_answer): pass   # 접근 코드를 물어 on_answer(코드 또는 None) 을 부름
     def ask_save_path(self, directory, filename, on_answer): pass  # 저장할 파일 위치를 물어 on_answer(경로 또는 None)
     def copy_text(self, text, done_msg): pass                 # 클립보드에 복사
-    def set_wan_enabled(self, enabled): pass                  # WAN 전체 스위치 (꺼지면 나머지 칸을 숨김)
+    def set_wan_enabled(self, enabled): pass                  # WAN 전체 스위치 (꺼지면 나머지 칸을 숨기고 '접속 코드로 시작' 칸을 보임)
     def set_usage(self, day_text, month_text): pass
     def set_log(self, lines): pass
     def set_busy(self, what, busy): pass                      # what: server / connect / config
@@ -246,6 +246,31 @@ class WanTabController:
                 self._ui("show_error", "WAN", f"변경하지 못했습니다.\n{e}")
             self._ui("set_wan_enabled", self.wan_on())
             if self.wan_on():
+                self.refresh_all()
+        self._spawn(work)
+        return True
+
+    def quick_setup(self, text, as_field=True) -> bool:
+        """처음 설정 한 번에: 접속 코드(또는 Git 저장소 주소)만 넣으면 WAN 켜기 → 중계 PC 접속 → (현장이면) 이 PC 를 원격 대상으로 켜고
+        방화벽까지 시도한다.  WAN 이 꺼져 있을 때의 첫 화면에서 쓴다"""
+        kind = classify_target(text)
+        if kind in ("", "address"):
+            self._ui("show_error", "시작", "중계 PC 의 접속 코드(AW1-…)나 Git 저장소 주소를 붙여넣으세요")
+            return False
+        if not self.wan_switch_available():
+            self._ui("show_error", "시작", "이 프로그램에서는 사용할 수 없습니다")
+            return False
+        self._note("접속 코드로 WAN 을 설정합니다" + (" (이 PC 를 현장 PC 로 사용)" if as_field else ""))
+
+        def work():
+            try:
+                self.ctx["set_wan_enabled"](True)
+            except Exception as e:
+                self._note(f"WAN 켜기 실패: {type(e).__name__}: {e}")
+                self._ui("show_error", "WAN", f"WAN 을 켜지 못했습니다.\n{e}")
+                return
+            self._ui("set_wan_enabled", True)
+            if self.add_connection(text, "", as_field):
                 self.refresh_all()
         self._spawn(work)
         return True
@@ -683,7 +708,10 @@ class WanTabController:
         if not self._need_wan():
             return False
         if kind == "git":
-            return self.set_git_source(text)
+            ok = self.set_git_source(text)
+            if ok and as_field:
+                self.field_toggled(True)
+            return ok
         if kind == "relay_code":
             return self.import_connection(text, as_field)
         if kind == "relay_url":
@@ -1407,6 +1435,33 @@ class WanTab(NullUI):
         self.wan_off_lbl = tk.Label(row, text="꺼져 있음 — 인터넷으로 아무것도 하지 않습니다", font=app.FONT, fg=app.TEXT_DIM, bg=app.BG)
         if not self.ctx.get("set_wan_enabled"):
             row.pack_forget()                                           # 스위치가 없는 구성은 항상 켜짐
+        # 꺼져 있을 때만 보이는 '접속 코드로 시작' — 코드만 넣으면 켜기 · 접속 · 현장 설정까지 알아서 한다
+        card = app._card(self.parent)
+        self.setup_box = card
+        inner = tk.Frame(card, bg=app.PANEL)
+        inner.pack(fill="x", padx=px(16), pady=px(12))
+        tk.Label(inner, text="접속 코드로 시작", font=app.FONT_BOLD, fg=app.TEXT, bg=app.PANEL, anchor="w").pack(fill="x")
+        self.setup_var = tk.StringVar()
+        self.setup_field_var = tk.BooleanVar(value=True)
+        line = tk.Frame(inner, bg=app.PANEL)
+        line.pack(fill="x", pady=(px(6), 0))
+        self.setup_entry = app._entry(line, self.setup_var, 40)
+        self.setup_entry.pack(side="left", fill="x", expand=True, ipady=px(2))
+        self.setup_entry.bind("<Return>", lambda e: self._setup_start())
+        self.setup_btn = app._button(line, "시작", "primary", self._setup_start)
+        self.setup_btn.pack(side="left", padx=(px(8), 0))
+        app._tip(self.setup_btn, "WAN 을 켜고 중계 PC 에 접속합니다. 현장 PC 로 쓰는 경우 이 PC 를 원격 대상으로 켜고 방화벽도 열어 봅니다")
+        self._check(inner, "이 PC 를 현장 PC 로 사용 (원격으로 접속 받음)", self.setup_field_var, lambda: None
+                    ).pack(anchor="w", pady=(px(4), 0))
+        try:
+            clip = self.root.clipboard_get()
+            if connect_code.kind_of(clip):
+                self.setup_var.set(clip.strip())
+        except Exception:
+            pass
+
+    def _setup_start(self):
+        self.controller.quick_setup(self.setup_var.get(), self.setup_field_var.get())
 
     def _wan_toggled(self):
         self.set_wan_enabled(self.wan_var.get())
@@ -1949,10 +2004,12 @@ class WanTab(NullUI):
         self.wan_var.set(bool(enabled))
         if enabled:
             self.wan_off_lbl.pack_forget()
+            self.setup_box.pack_forget()
             self.body.pack(fill="both", expand=True)
         else:
             self.body.pack_forget()
             self.wan_off_lbl.pack(side="left", padx=(self.px(10), 0))
+            self.setup_box.pack(fill="x", pady=(0, self.px(8)))
 
     def set_usage(self, day_text, month_text):
         self.day_lbl.configure(text=day_text)

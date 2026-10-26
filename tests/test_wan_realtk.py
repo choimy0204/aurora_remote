@@ -391,3 +391,41 @@ def test_connect_dialog_offers_git_off_button_only_when_git_is_set(app, monkeypa
     d.win.update()
     assert "Git" in d.hint.cget("text")
     d.win.destroy()
+
+
+def test_off_screen_shows_only_code_box_and_start_runs_full_setup(tmp_path, monkeypatch):
+    import time
+    import winshim
+    from wan import connect_code
+    winshim.sandbox(monkeypatch, tmp_path)
+    monkeypatch.setenv("AURORA_WAN_DIR", str(tmp_path / "fresh"))
+    root = winshim.make_root()
+    mod = winshim.load_client(real_remote=True)
+    monkeypatch.setattr(mod.AuroraClientApp, "_start_threads", lambda self: None)
+    mod._init_scale(root)
+    mod.AuroraClientApp.setup_styles()
+    application = mod.AuroraClientApp(root)
+    try:
+        tab = application._wan_tab
+        application._select_tab(4)
+        root.update()
+        assert tab.setup_box.winfo_ismapped() and not tab.body.winfo_ismapped()      # 꺼져 있으면 코드 입력칸만
+        assert tab.setup_field_var.get() is True
+        started = []
+        monkeypatch.setattr(application._wan, "set_wan_enabled", lambda on: started.append(on))
+        tab.ctx["set_wan_enabled"] = application._wan.set_wan_enabled
+        monkeypatch.setattr(tab.controller, "add_connection", lambda *a, **k: started.append(("add", a)) or False)
+        code = connect_code.encode(["wss://10.0.0.1:9100"], "k")
+        tab.setup_var.set(code)
+        tab._setup_start()
+        end = time.time() + 5
+        while len(started) < 2 and time.time() < end:                # 작업 스레드가 Tk 호출을 하려면 화면 스레드가 돌아야 함
+            root.update()
+            time.sleep(0.02)
+        assert started[0] is True and started[1] == ("add", (code, "", True))
+        tab.set_wan_enabled(True)
+        root.update()
+        assert tab.body.winfo_ismapped() and not tab.setup_box.winfo_ismapped()      # 켜지면 보통 화면으로
+    finally:
+        application._wan_shutdown()
+        winshim.destroy_root(root)

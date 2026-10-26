@@ -743,3 +743,55 @@ def test_no_git_alert_when_wan_off_or_git_not_used_or_healthy():
     ctx3["wan_enabled"] = lambda: False
     ctl3.check_git_alert()
     assert not (ui.all("show_error") or ui2.all("show_error") or ui3.all("show_error"))
+
+
+# ── 접속 코드 하나로 시작 (WAN 켜기 + 접속 + 현장 설정) ──
+def setup_ctl(monkeypatch):
+    ctl, ctx, ui, direct, state = off_ctl()
+    ctx["client"] = MagicMock()
+    ctl.client = ctx["client"]
+    monkeypatch.setattr(cc, "pick_reachable", lambda urls, timeout=2.0: urls[0])
+    return ctl, ctx, ui, state
+
+
+def test_quick_setup_turns_wan_on_connects_and_enables_field_mode(monkeypatch):
+    ctl, ctx, ui, state = setup_ctl(monkeypatch)
+    code = cc.encode(["wss://10.0.0.1:9100"], "k9", fp="ef" * 32)
+    assert ctl.quick_setup(code, as_field=True) is True
+    assert state["on"] is True and ui.last("set_wan_enabled") == (True,)
+    assert ctx["cfg"].d["relay_url"] == "wss://10.0.0.1:9100" and ctx["cfg"].d["relay_key"] == "k9"
+    assert ctx["cfg"].d["relay_fp"] == "ef" * 32
+    assert ctx["cfg"].d["enabled"] is True and ctx["cfg"].d["access_code"]       # 현장 PC 로 켜지고 접근 코드도 자동 생성
+    ctx["set_field_mode"].assert_called_with(True)
+    assert not ui.all("show_error")
+
+
+def test_quick_setup_as_user_only_does_not_enable_field_mode(monkeypatch):
+    ctl, ctx, ui, state = setup_ctl(monkeypatch)
+    ctl.quick_setup(cc.encode(["wss://10.0.0.1:9100"], "k9"), as_field=False)
+    assert state["on"] is True and ctx["cfg"].d["relay_url"] == "wss://10.0.0.1:9100"
+    assert not ctx["cfg"].d.get("enabled")
+    ctx["set_field_mode"].assert_not_called()
+
+
+def test_quick_setup_with_git_address_also_sets_field_mode(monkeypatch):
+    ctl, ctx, ui, state = setup_ctl(monkeypatch)
+    ctx.update(set_git_source=MagicMock(), git_sync=MagicMock(return_value={"state": "ok", "msg": ""}))
+    ctl.quick_setup("https://git.corp/aurora/wan.git", as_field=True)
+    assert state["on"] is True
+    ctx["set_git_source"].assert_called_once_with("https://git.corp/aurora/wan.git")
+    ctx["set_field_mode"].assert_called_with(True)
+
+
+@pytest.mark.parametrize("text", ["", "   ", "192.168.0.5", "10.0.0.7:9102"])
+def test_quick_setup_rejects_things_that_are_not_connection_codes(monkeypatch, text):
+    ctl, ctx, ui, state = setup_ctl(monkeypatch)
+    assert ctl.quick_setup(text) is False
+    assert state["on"] is False and "붙여넣으세요" in ui.last("show_error")[1]       # 아무것도 켜지 않음
+
+
+def test_quick_setup_reports_when_wan_cannot_start(monkeypatch):
+    ctl, ctx, ui, state = setup_ctl(monkeypatch)
+    ctx["set_wan_enabled"].side_effect = OSError("시작 실패")
+    ctl.quick_setup(cc.encode(["wss://10.0.0.1:9100"], "k"))
+    assert "시작 실패" in ui.last("show_error")[1] and not ctx["cfg"].d.get("relay_url")
