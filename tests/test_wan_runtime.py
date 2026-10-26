@@ -159,7 +159,52 @@ def test_update_thread_waits_then_checks(make, monkeypatch):
     calls = []
     monkeypatch.setattr(rt, "UPDATE_FIRST_DELAY", 0.1)
     r = make()
+    r.cfg.update(wan_enabled=True)
     monkeypatch.setattr(r, "check_update", lambda: calls.append(1) or {})
     r.start()
     eventually(lambda: calls, msg="첫 확인")
     r.shutdown()
+
+
+# ── WAN 켜기/끄기 ──
+def test_new_install_has_wan_off_and_does_nothing_on_start(make, monkeypatch):
+    r = make()
+    assert r.wan_on() is False
+    started = []
+    monkeypatch.setattr(r, "apply_conn_file", lambda: started.append("conn"))
+    monkeypatch.setattr(r, "_start_client", lambda: started.append("client"))
+    r.start()
+    assert started == [] and r._update_thread is None and r.supervisor is None and r.relay_supervisor is None
+
+
+@pytest.mark.parametrize("field", [{"enabled": True}, {"relay_url": "ws://h:1"}, {"relay_host": True},
+                                   {"direct_targets": {"1.2.3.4:9102": {}}}])
+def test_existing_wan_users_stay_on_after_upgrade(make, field):
+    r = make()
+    r.cfg.update(**field)
+    assert r.wan_on() is True                                         # 예전에 쓰던 흔적이 있으면 켜진 것으로 본다
+    r.cfg.update(wan_enabled=False)
+    assert r.wan_on() is False                                        # 사용자가 끈 뒤에는 흔적과 상관없이 꺼짐
+
+
+def test_turning_on_starts_everything_saved_and_off_stops_it(make, monkeypatch):
+    r = make()
+    monkeypatch.setattr(r, "apply_conn_file", lambda: None)
+    r.cfg.update(enabled=True, relay_url="ws://h:1", wan_enabled=False)
+    r.set_wan_enabled(True)
+    assert r.cfg.get("wan_enabled") is True and r.supervisor is not None and r._update_thread.is_alive()
+    r.set_wan_enabled(True)                                           # 한 번 더 눌러도 중복 시작 없음
+    sup = r.supervisor
+    r.set_wan_enabled(False)
+    assert r.supervisor is None and not r._running
+    assert r.cfg.get("enabled") is True and r.cfg.get("relay_url") == "ws://h:1"   # 개별 설정은 그대로 — 다시 켜면 돌아옴
+    r.set_wan_enabled(True)
+    assert r.supervisor is not None and r.supervisor is not sup
+    r.set_wan_enabled(False)
+
+
+def test_update_check_is_skipped_while_wan_is_off(make, monkeypatch):
+    r = make()
+    r.cfg.update(relay_url="ws://h:1", wan_enabled=False)
+    monkeypatch.setattr(rt.wan_update, "check_and_download", lambda *a: pytest.fail("꺼져 있는데 서버에 물어봄"))
+    assert r.check_update() == {"status": "off"}

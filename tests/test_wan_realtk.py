@@ -16,6 +16,8 @@ def app(tmp_path, monkeypatch):
     import winshim
     winshim.sandbox(monkeypatch, tmp_path)
     monkeypatch.setenv("AURORA_WAN_DIR", str(tmp_path / "wan"))
+    (tmp_path / "wan").mkdir(exist_ok=True)
+    (tmp_path / "wan" / "wan_config.json").write_text('{"wan_enabled": true}')      # 화면 시험은 WAN 을 켠 상태로 시작
     import winshim
     root = winshim.make_root()
     mod = winshim.load_client(real_remote=True)
@@ -300,3 +302,94 @@ def test_save_path_and_copy_helpers(app, monkeypatch, tmp_path):
     assert got[-1] is None                                                # 취소
     tab.copy_text("hello", "복사됨")
     assert app.root.clipboard_get() == "hello"
+
+
+def test_wan_switch_off_hides_everything_and_on_shows_it_again(app):
+    tab = app._wan_tab
+    app._select_tab(4)
+    app.root.update()
+    assert tab.body.winfo_ismapped() and tab.wan_var.get() is True
+    tab.set_wan_enabled(False)
+    app.root.update()
+    assert not tab.body.winfo_ismapped() and tab.wan_off_lbl.winfo_ismapped() and tab.wan_var.get() is False
+    tab.set_wan_enabled(True)
+    app.root.update()
+    assert tab.body.winfo_ismapped() and not tab.wan_off_lbl.winfo_ismapped()
+
+
+def test_switch_click_reaches_runtime_and_stops_background_work(app, monkeypatch):
+    import time
+    tab = app._wan_tab
+    calls = []
+    monkeypatch.setattr(app._wan, "set_wan_enabled", lambda on: calls.append(on))
+    tab.ctx["set_wan_enabled"] = app._wan.set_wan_enabled
+    app._select_tab(4)
+    tab.wan_var.set(False)
+    tab._wan_toggled()
+    for _ in range(20):
+        app.root.update()
+        time.sleep(0.02)
+    assert calls == [False]
+
+
+def test_new_install_starts_with_wan_off(tmp_path, monkeypatch):
+    import winshim
+    winshim.sandbox(monkeypatch, tmp_path)
+    monkeypatch.setenv("AURORA_WAN_DIR", str(tmp_path / "fresh"))
+    root = winshim.make_root()
+    mod = winshim.load_client(real_remote=True)
+    monkeypatch.setattr(mod.AuroraClientApp, "_start_threads", lambda self: None)
+    mod._init_scale(root)
+    mod.AuroraClientApp.setup_styles()
+    application = mod.AuroraClientApp(root)
+    try:
+        application._select_tab(4)
+        root.update()
+        assert application._wan.wan_on() is False and not application._wan_tab.body.winfo_ismapped()
+        assert application._wan_tab.wan_var.get() is False
+    finally:
+        application._wan_shutdown()
+        winshim.destroy_root(root)
+
+
+def test_relay_card_has_refresh_git_and_midnight_rotation_controls(app, monkeypatch):
+    tab = app._wan_tab
+    for name in ("git_var", "git_entry", "rotate_var", "git_status_lbl", "relay_code_var"):
+        assert hasattr(tab, name), name
+    app._select_tab(4)
+    tab._relay_expand(True)
+    tab.set_relay_git("https://git.corp/a.git", True, "Git 연결됨", "ok")
+    app.root.update()
+    assert tab.git_var.get() == "https://git.corp/a.git" and tab.rotate_var.get() is True
+    assert tab.git_status_lbl.cget("text") == "Git 연결됨"
+    calls = []
+    monkeypatch.setattr(tab.controller, "relay_refresh_code", lambda: calls.append("refresh"))
+    monkeypatch.setattr(tab.controller, "publish_git", lambda s: calls.append(("publish", s)))
+    monkeypatch.setattr(tab.controller, "set_relay_rotate", lambda on: calls.append(("rotate", on)))
+    from wan import ui as wan_ui
+    buttons = {w.cget("text"): w for w in _all_children(tab.relay_more) if w.winfo_class() == "Button"}
+    assert {"새로고침", "올리기", "복사", "파일 저장"} <= set(buttons)
+    buttons["새로고침"].invoke()
+    buttons["올리기"].invoke()
+    tab.rotate_var.set(False)
+    tab.git_entry.event_generate("<Return>")
+    app.root.update()
+    assert "refresh" in calls and ("publish", "https://git.corp/a.git") in calls
+
+
+def test_connect_dialog_offers_git_off_button_only_when_git_is_set(app, monkeypatch):
+    tab = app._wan_tab
+    app._wan.cfg.update(relay_url="ws://h:1", git_source="")
+    app._select_tab(4)
+    tab._connect_dialog()
+    d = tab._connect_win
+    assert "Git 연동 끄기" not in [w.cget("text") for w in _all_children(d.btns) if w.winfo_class() == "Button"]
+    d.win.destroy()
+    app._wan.cfg.update(git_source="https://git.corp/a.git")
+    tab._connect_dialog()
+    d = tab._connect_win
+    assert "Git 연동 끄기" in [w.cget("text") for w in _all_children(d.btns) if w.winfo_class() == "Button"]
+    d.text.set("https://git.corp/b.git")
+    d.win.update()
+    assert "Git" in d.hint.cget("text")
+    d.win.destroy()

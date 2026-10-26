@@ -10,14 +10,16 @@ aurora_client.py 에는 이 객체를 만들고 start/shutdown 을 부르는 몇
 모든 단계의 오류는 여기서 잡아 로그로만 남기고 밖(LAN 쪽)으로 던지지 않는다.
 """
 
+import datetime
 import json
 import os
 import threading
 import time
 
-from . import connect_code, connfile, tls
+from . import connect_code, connfile, gitsync, tls
 from . import update as wan_update
 from .client import WanClient
+from .netutil import lan_addresses
 from .config import WanConfig
 from .direct import DirectClient
 from .server import parse_ver
@@ -25,6 +27,11 @@ from .usage import UsageStore
 
 UPDATE_FIRST_DELAY = 60.0          # 시작 후 첫 확인까지 (화면이 뜨고 안정된 뒤)
 UPDATE_EVERY       = 6 * 3600.0
+GIT_FIRST_DELAY    = 3.0           # 시작 후 첫 Git 확인까지
+GIT_EVERY          = 600.0         # 그 뒤 10분마다
+GIT_RETRY          = 30.0          # 키가 안 맞아 접속이 막혀 있으면 30초마다 (중계 PC 가 키를 새로 만든 직후 빨리 따라오게)
+GIT_TICK           = 5.0
+ROTATE_TICK        = 30.0          # 자정이 지났는지 확인하는 간격
 
 
 class WanRuntime:
@@ -43,17 +50,55 @@ class WanRuntime:
         self.supervisor = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        self._bg_stop = threading.Event()     # 켜기 때마다 새로 만드는 '주기 작업 멈춤' 신호
+        self._running = False
         self._update_thread = None
+        self.git_state = {"state": "off", "msg": "", "at": 0}
+        self._rot_lock = threading.Lock()
+        self._publish_pending = False
 
     # ── 시작/종료 ──
+    def wan_on(self) -> bool:
+        return self.cfg.wan_on()
+
     def start(self):
+        """WAN 이 켜져 있을 때만 시작 (꺼져 있으면 아무것도 가져오거나 접속하지 않는다)"""
+        if self.wan_on():
+            self._start_features()
+
+    def set_wan_enabled(self, enabled: bool):
+        """WAN 전체 켜기/끄기.  끄면 에이전트 · 안내 서버 운영 · 접속 · 주기 확인을 모두 멈춘다 (개별 설정은 그대로 두어 다시 켜면 돌아옴)"""
+        with self._lock:
+            self.cfg.update(wan_enabled=bool(enabled))
+            if enabled:
+                self._start_features()
+            else:
+                self._stop_features()
+
+    def _start_features(self):
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            self._bg_stop = threading.Event()
         self._safely("접속 설정 파일 적용", self.apply_conn_file)
         self._safely("안내 서버 운영 시작", lambda: self.cfg.get("relay_host") and self.set_relay_host(True))
         self._safely("현장 모드 시작", lambda: self.cfg.get("enabled") and self.set_field_mode(True))
         if self.cfg.get("relay_url") and not self.cfg.get("enabled"):
             self._safely("안내 서버 연결", self._start_client)
-        self._update_thread = threading.Thread(target=self._update_loop, name="wan-update", daemon=True)
+        self._update_thread = threading.Thread(target=self._update_loop, args=(self._bg_stop,), name="wan-update", daemon=True)
         self._update_thread.start()
+        threading.Thread(target=self._git_loop, args=(self._bg_stop,), name="wan-git", daemon=True).start()
+        threading.Thread(target=self._rotate_loop, args=(self._bg_stop,), name="wan-rotate", daemon=True).start()
+
+    def _stop_features(self):
+        with self._lock:
+            self._running = False
+            self._bg_stop.set()
+        self.stop_agent()
+        self.stop_relay()
+        self._safely("클라이언트 종료", self.client.stop)
+        self._safely("직접 접속 종료", self.direct.stop)
 
     def _start_client(self):
         with self._lock:                     # 접속 설정 파일을 적용하는 스레드와 겹쳐 시작·중지되지 않게
@@ -61,10 +106,7 @@ class WanRuntime:
 
     def shutdown(self):
         self._stop.set()
-        self.stop_agent()
-        self.stop_relay()
-        self._safely("클라이언트 종료", self.client.stop)
-        self._safely("직접 접속 종료", self.direct.stop)
+        self._stop_features()
         self._safely("사용량 저장", self.usage.flush)
 
     def _safely(self, what: str, fn):
@@ -84,28 +126,145 @@ class WanRuntime:
         except ValueError as e:
             self.log(f"[WAN] 설정 파일 {path}: {e}")
             return
-        if connfile.fingerprint(text) == self.cfg.get("conn_hash"):
-            return
-        if connect_code.kind_of(text) == "relay" and self.cfg.get("relay_host"):
-            self.log("[WAN] 이 PC 는 중계 PC 라 다른 중계 PC 의 설정 파일은 적용하지 않습니다")
-            return
-        threading.Thread(target=self._apply_conn_text, args=(text, path), name="wan-conn-file", daemon=True).start()
+        if self._is_new_conn(text):
+            threading.Thread(target=self._apply_conn_text, args=(text, path), name="wan-conn-file", daemon=True).start()
 
-    def _apply_conn_text(self, text: str, path: str):
+    def _is_new_conn(self, text: str) -> bool:
+        """이미 적용한 내용이거나(중계 PC 자신이 올린 것 포함) 중계 PC 가 다른 중계 PC 의 정보를 받으려는 경우는 건너뜀"""
+        if connfile.fingerprint(text) == self.cfg.get("conn_hash"):
+            return False
+        if connect_code.kind_of(text) == "relay" and self.cfg.get("relay_host"):
+            self.log("[WAN] 이 PC 는 중계 PC 라 다른 중계 PC 의 접속 정보는 적용하지 않습니다")
+            return False
+        return True
+
+    def _apply_conn_text(self, text: str, origin: str):
         def work():
             if connect_code.kind_of(text) == "relay":
                 url = connect_code.apply_relay_code(self.cfg, text)
-                self.log(f"[WAN] 설정 파일 적용: 안내 서버 {url}")
+                self.log(f"[WAN] 접속 정보 적용({origin}): 안내 서버 {url}")
                 if not self.cfg.get("enabled"):
                     with self._lock:
                         self.client.stop()
                         self.client.start()
             else:
                 address = connect_code.remember_direct(self.cfg, text)
-                self.log(f"[WAN] 설정 파일 적용: 현장 PC {address}")
+                self.log(f"[WAN] 접속 정보 적용({origin}): 현장 PC {address}")
             self.cfg.update(conn_hash=connfile.fingerprint(text))
-            self._conn_applied = path
-        self._safely("접속 설정 파일 적용", work)
+            self._conn_applied = origin
+        self._safely("접속 정보 적용", work)
+
+    # ── 사내 Git 에서 접속 정보 가져오기 · 올리기 ──
+    def _git_dir(self) -> str:
+        return os.path.join(self.cfg.dir, "git_conn")
+
+    def git_sync_now(self) -> dict:
+        """Git 저장소에서 접속 정보를 가져와 새 내용이면 적용.  WAN 이 꺼져 있거나 저장소가 없으면 아무것도 하지 않는다.
+        → {"state": off · ok · error, "msg", "at"}  (예외를 내지 않는다)"""
+        source = (self.cfg.get("git_source") or "").strip()
+        if not self.wan_on() or not source:
+            return self._set_git("off", "")
+        try:
+            text = gitsync.fetch_conn(source, self._git_dir(), self.cfg.get("git_file") or gitsync.DEFAULT_FILE,
+                                      self.cfg.get("git_branch") or "")
+            if self._is_new_conn(text):
+                self._apply_conn_text(text, "Git")
+            return self._set_git("ok", "접속 정보를 확인했습니다")
+        except gitsync.GitError as e:
+            return self._set_git("error", str(e))
+        except Exception as e:
+            return self._set_git("error", f"{type(e).__name__}: {e}")
+
+    def _set_git(self, state: str, msg: str) -> dict:
+        if state == "error" and msg != self.git_state.get("msg"):
+            self.log(f"[WAN] Git 접속 정보 가져오기 실패: {msg}")
+        self.git_state = {"state": state, "msg": msg, "at": time.time()}
+        return self.git_state
+
+    def git_publish(self, source: str, code: str) -> bool:
+        """접속 정보를 Git 저장소에 올린다 (이 PC 의 저장소 주소도 기억).  → 실제로 올렸으면 True, 이미 같으면 False.  실패하면 GitError"""
+        source = (source or "").strip()
+        if not source:
+            raise gitsync.GitError("Git 저장소 주소를 입력하세요")
+        pushed = gitsync.publish(source, self._git_dir(), code, self.cfg.get("git_file") or gitsync.DEFAULT_FILE,
+                                 self.cfg.get("git_branch") or "")
+        self.cfg.update(git_source=source, conn_hash=connfile.fingerprint(code))      # 올린 이 PC 가 자기 것을 다시 받아 적용하지 않게
+        return pushed
+
+    def set_git_source(self, source: str):
+        self.cfg.update(git_source=(source or "").strip())
+        if not (source or "").strip():
+            self._set_git("off", "")
+
+    def _git_loop(self, stop):
+        """Git 에서 접속 정보를 주기적으로 확인. 접속이 키 · 인증서 불일치로 막혀 있으면(중계 PC 가 키를 새로 만든 직후) 더 자주 확인"""
+        if stop.wait(GIT_FIRST_DELAY):
+            return
+        last = None
+        while not stop.is_set():
+            now = time.monotonic()
+            blocked = self.client.state in ("키 불일치", "인증서 불일치")
+            if (self.cfg.get("git_source") or "").strip() and (
+                    last is None or now - last >= (GIT_RETRY if blocked else GIT_EVERY)):
+                self.git_sync_now()
+                last = time.monotonic()
+            if stop.wait(GIT_TICK):
+                return
+
+    # ── 중계 PC: 접속 코드(공용 키) 새로고침 ──
+    def relay_code(self) -> str:
+        """다른 PC 에 줄 접속 정보 (외부 주소 · 이 PC 의 내부 주소들 · 공용 키 · 인증서 지문)"""
+        fp = self.relay_fp() if self.relay_command is not None else ""
+        urls = connect_code.relay_urls(int(self.cfg.get("relay_port") or 9100), self.cfg.get("relay_external") or "",
+                                       lan_addresses(), bool(fp))
+        return connect_code.encode(urls, self.cfg.get("relay_key") or "", fp=fp) if urls else ""
+
+    def rotate_relay_key(self) -> dict:
+        """공용 키를 무작위로 새로 만들어 안내 서버를 다시 시작하고(기존 키는 즉시 무효 · 연결 중인 세션은 끊김) Git 저장소가 있으면 올린다.
+        → {"key", "code", "published", "error"}  — Git 에 못 올렸으면 error 에 이유가 있고 곧 다시 시도한다"""
+        with self._rot_lock:
+            self.cfg.update(relay_key=connect_code.new_key(), relay_rotated_on=self._today().isoformat())
+            if self.relay_supervisor is not None:
+                self.restart_relay()
+            result = {"key": self.cfg.get("relay_key"), "code": self.relay_code(), "published": False, "error": ""}
+            self._publish_pending = bool((self.cfg.get("git_source") or "").strip())
+            if self._publish_pending:
+                self._publish_pending_try(result)
+            self.log("[WAN] 접속 코드를 새로 만들었습니다" + (" (Git 에 올림)" if result["published"] else ""))
+            return result
+
+    def _publish_pending_try(self, result=None) -> dict:
+        result = result if result is not None else {"published": False, "error": ""}
+        try:
+            self.git_publish(self.cfg.get("git_source"), self.relay_code())
+            result.update(published=True, error="")
+            self._publish_pending = False
+        except gitsync.GitError as e:
+            result.update(published=False, error=str(e))
+            self._set_git("error", f"올리기 실패 — {e}")
+        return result
+
+    def _today(self):
+        return datetime.date.today()
+
+    def _maybe_rotate(self):
+        """매일 0시(자정)가 지난 뒤 처음 확인할 때 한 번 키를 새로 만든다 (그 시각에 꺼져 있었다면 다시 켜질 때).
+        Git 저장소가 없으면 새 키를 나눠 줄 방법이 없으니 하지 않는다"""
+        if not (self.wan_on() and self.cfg.get("relay_host") and self.cfg.get("relay_rotate")
+                and (self.cfg.get("git_source") or "").strip()):
+            return
+        today = self._today().isoformat()
+        done = self.cfg.get("relay_rotated_on")
+        if not done:
+            self.cfg.update(relay_rotated_on=today)          # 처음 켠 날은 건너뛰고 내일 0시부터
+        elif done != today:
+            self.rotate_relay_key()
+        elif self._publish_pending:
+            self._publish_pending_try()                       # 어제 새 키를 못 올렸다면 다시 시도
+
+    def _rotate_loop(self, stop):
+        while not stop.wait(ROTATE_TICK):
+            self._safely("접속 코드 자동 갱신", self._maybe_rotate)
 
     # ── 현장 모드 (에이전트 프로세스) ──
     def set_field_mode(self, enabled: bool):
@@ -204,17 +363,17 @@ class WanRuntime:
         return sup.state
 
     # ── 새 버전 ──
-    def _update_loop(self):
-        if self._stop.wait(UPDATE_FIRST_DELAY):
+    def _update_loop(self, stop):
+        if stop.wait(UPDATE_FIRST_DELAY):
             return
-        while not self._stop.is_set():
+        while not stop.is_set():
             self._safely("업데이트 확인", self.check_update)
-            if self._stop.wait(UPDATE_EVERY):
+            if stop.wait(UPDATE_EVERY):
                 return
 
     def check_update(self) -> dict:
         """안내 서버에서 새 버전을 받아 두고(또는 이미 받아 둔 것을 찾아) apply_update 에 넘김"""
-        if not (self.cfg.get("auto_update") and self.cfg.get("relay_url")):
+        if not (self.wan_on() and self.cfg.get("auto_update") and self.cfg.get("relay_url")):
             return {"status": "off"}
         dest = wan_update.default_dir(self.cfg)
         pending = wan_update.pending_update(dest)
@@ -235,6 +394,9 @@ class WanRuntime:
     def tab_context(self, open_remote, px=lambda v: v, log=None, relaunch_admin=None) -> dict:
         return {"relaunch_admin": relaunch_admin, "cfg": self.cfg, "client": self.client, "usage": self.usage,
                 "supervisor_state": self.supervisor_state, "set_field_mode": self.set_field_mode,
+                "wan_enabled": self.wan_on, "set_wan_enabled": self.set_wan_enabled,
+                "git_sync": self.git_sync_now, "git_publish": self.git_publish, "git_state": lambda: self.git_state,
+                "set_git_source": self.set_git_source, "rotate_relay_key": self.rotate_relay_key,
                 "direct": self.direct, "agent_info": self.agent_info, "relay_fp": self.relay_fp, "direct_fp": self.direct_fp, "conn_dirs": connfile.search_dirs(self.cfg.dir),
                 "relay_state": self.relay_state, "set_relay_host": self.set_relay_host,
                 "restart_relay": self.restart_relay, "relay_available": self.relay_command is not None,

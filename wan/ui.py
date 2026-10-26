@@ -130,6 +130,8 @@ def classify_target(text) -> str:
     kind = connect_code.kind_of(t)
     if kind:
         return f"{kind}_code"
+    if connect_code.is_git_source(t):
+        return "git"
     return "relay_url" if t.lower().startswith(("ws://", "wss://")) else "address"
 
 
@@ -153,11 +155,13 @@ class NullUI:
     def set_relay_enabled(self, enabled): pass
     def set_relay_code(self, code): pass                      # 다른 PC 에 붙여넣을 접속 정보
     def set_admin(self, is_admin): pass                       # 관리자 권한 여부 (아니면 '관리자로 다시 시작' 버튼 표시)
+    def set_relay_git(self, source, rotate, status, level): pass   # 중계 PC 카드의 Git 저장소 주소 · 매일 자동 갱신 · 상태 글자
     def set_found_code(self, code): pass                      # 같은 망에서 찾은 접속 정보를 연결 추가 창에 채움
     def ask_yes_no(self, title, message, on_answer): pass     # 예/아니오 물어보고 on_answer(bool) 을 부름 (화면 스레드)
     def ask_code(self, row_id, label, prefill, on_answer): pass   # 접근 코드를 물어 on_answer(코드 또는 None) 을 부름
     def ask_save_path(self, directory, filename, on_answer): pass  # 저장할 파일 위치를 물어 on_answer(경로 또는 None)
     def copy_text(self, text, done_msg): pass                 # 클립보드에 복사
+    def set_wan_enabled(self, enabled): pass                  # WAN 전체 스위치 (꺼지면 나머지 칸을 숨김)
     def set_usage(self, day_text, month_text): pass
     def set_log(self, lines): pass
     def set_busy(self, what, busy): pass                      # what: server / connect / config
@@ -215,6 +219,41 @@ class WanTabController:
 
     def _copy(self, text: str, done_msg: str):
         self._ui("copy_text", text, done_msg)
+
+    # ── 0. WAN 전체 켜기/끄기 ──
+    def wan_switch_available(self) -> bool:
+        return self.ctx.get("set_wan_enabled") is not None
+
+    def wan_on(self) -> bool:
+        """꺼져 있으면 중계 PC 접속 · 접속 받기 · 목록 확인 · 정보 가져오기를 하나도 하지 않는다 (스위치가 없는 구성은 항상 켜짐)"""
+        fn = self.ctx.get("wan_enabled")
+        try:
+            return bool(fn()) if fn else True
+        except Exception:
+            return True
+
+    def wan_toggled(self, enabled: bool) -> bool:
+        """WAN 스위치 (작업 스레드)"""
+        enabled = bool(enabled)
+        self._note("WAN 을 켭니다" if enabled else "WAN 을 끕니다 — 중계 PC 접속과 접속 받기를 모두 멈춥니다")
+
+        def work():
+            try:
+                self.ctx["set_wan_enabled"](enabled)
+            except Exception as e:
+                self._note(f"WAN {'켜기' if enabled else '끄기'} 실패: {type(e).__name__}: {e}")
+                self._ui("show_error", "WAN", f"변경하지 못했습니다.\n{e}")
+            self._ui("set_wan_enabled", self.wan_on())
+            if self.wan_on():
+                self.refresh_all()
+        self._spawn(work)
+        return True
+
+    def _need_wan(self) -> bool:
+        if self.wan_on():
+            return True
+        self._ui("show_info", "WAN", "WAN 이 꺼져 있습니다 — 위의 'WAN 사용'을 먼저 켜세요")
+        return False
 
     # ── 1. 중계 PC(안내 서버) 연결 ──
     def server_status(self) -> tuple:
@@ -322,6 +361,8 @@ class WanTabController:
         if self.relay_available():
             self._ui("set_relay_status", *self.relay_status())
             self._ui("set_relay_info", *self.relay_info())
+            self._ui("set_relay_code", self.relay_code())
+            self._ui("set_relay_git", self.cfg.get("git_source") or "", bool(self.cfg.get("relay_rotate")), *self.git_status())
             self._ui("set_admin", is_admin() or not self.ctx.get("relaunch_admin"))
 
     def relay_toggled(self, enabled: bool, port_text) -> bool:
@@ -352,14 +393,8 @@ class WanTabController:
 
     def relay_urls(self) -> list:
         """다른 PC 가 접속할 안내 서버 주소 후보: 외부 주소(적었으면) → 이 PC 의 내부 주소들"""
-        port = self.relay_port()
-        scheme = "wss" if self.relay_fp() else "ws"
-        out = []
-        ext = (self.cfg.get("relay_external") or "").strip()
-        if ext:
-            out.append(connect_code.make_url(ext, port, scheme))
-        out += [f"{scheme}://{ip}:{port}" for ip in lan_addresses()[:3]]
-        return out
+        return connect_code.relay_urls(self.relay_port(), self.cfg.get("relay_external") or "", lan_addresses(),
+                                       bool(self.relay_fp()))
 
     def relay_fp(self) -> str:
         """이 PC 가 운영하는 안내 서버의 인증서 지문 (암호화를 쓰지 않으면 '')"""
@@ -377,6 +412,105 @@ class WanTabController:
         code = self.relay_code()
         if code:
             self._copy(code, "접속 정보를 복사했습니다 — 다른 PC 의 '연결 추가'에 붙여넣으세요")
+
+    # ── 접속 코드 새로고침 · Git ──
+    def git_status(self) -> tuple:
+        try:
+            st = (self.ctx["git_state"]() if self.ctx.get("git_state") else {}) or {}
+        except Exception:
+            st = {}
+        if st.get("state") == "ok":
+            return "Git 연결됨", "ok"
+        if st.get("state") == "error":
+            return str(st.get("msg") or "Git 오류"), "bad"
+        return "", "off"
+
+    def relay_refresh_code(self) -> bool:
+        """'새로고침': 공용 키를 무작위로 새로 만들어 Git 에 올린다.  기존 접속 정보는 사라지고 연결 중인 원격 세션은 끊긴다"""
+        if not self.ctx.get("rotate_relay_key"):
+            self._ui("show_error", "접속 코드 새로고침", "이 프로그램에서는 사용할 수 없습니다")
+            return False
+        git = bool((self.cfg.get("git_source") or "").strip())
+        self._ui("ask_yes_no", "접속 코드 새로고침",
+                 "접속 코드(공용 키)를 새로 만들까요?\n\n· 기존 접속 정보는 즉시 사라집니다.\n· 지금 연결 중인 원격 화면은 끊깁니다.\n"
+                 + ("· 새 접속 정보는 Git 저장소에 올라가고, 다른 PC 들이 몇 분 안에 자동으로 따라옵니다."
+                    if git else "· Git 저장소가 없어서 다른 PC 에는 새 접속 정보를 직접 전달해야 합니다."),
+                 lambda yes: self._do_refresh_code() if yes else None)
+        return True
+
+    def _do_refresh_code(self):
+        def work():
+            try:
+                res = self.ctx["rotate_relay_key"]()
+            except Exception as e:
+                self._note(f"접속 코드 새로고침 실패: {type(e).__name__}: {e}")
+                self._ui("show_error", "접속 코드 새로고침", f"새로 만들지 못했습니다.\n{e}")
+                return
+            self._ui("set_relay_code", res.get("code") or self.relay_code())
+            if res.get("error"):
+                self._note(f"새 접속 코드를 만들었지만 Git 에 올리지 못했습니다: {res['error']}")
+                self._ui("show_error", "Git", f"새 접속 코드를 만들었지만 Git 에 올리지 못했습니다 — 곧 다시 시도합니다.\n\n{res['error']}")
+            else:
+                self._note("접속 코드를 새로 만들었습니다" + (" — Git 에 올렸습니다" if res.get("published") else ""))
+            self.refresh_relay()
+        self._spawn(work)
+
+    def set_relay_rotate(self, enabled: bool):
+        """'매일 0시 자동 갱신' 체크 — 켜는 날은 건너뛰고 다음 날 0시부터"""
+        extra = {"relay_rotated_on": datetime.fromtimestamp(self._clock()).date().isoformat()} if enabled else {}
+        self.cfg.update(relay_rotate=bool(enabled), **extra)
+        self.refresh_relay()
+
+    def publish_git(self, source) -> bool:
+        """'올리기': 지금의 접속 정보를 Git 저장소에 올림 (저장소 주소도 기억)"""
+        source = (source or "").strip()
+        if not source:
+            self._ui("show_error", "Git", "Git 저장소 주소를 입력하세요 (예: https://git.회사/aurora/wan-conn.git)")
+            return False
+        code = self.relay_code()
+        if not code or not self.ctx.get("git_publish"):
+            self._ui("show_error", "Git", "올릴 접속 정보가 없습니다 — 먼저 '자동 설정'을 누르세요")
+            return False
+
+        def work():
+            try:
+                pushed = self.ctx["git_publish"](source, code)
+            except Exception as e:
+                text = str(e) or type(e).__name__
+                self._note(f"Git 올리기 실패: {text}")
+                self._ui("show_error", "Git", text)
+            else:
+                self._note("접속 정보를 Git 에 올렸습니다" if pushed else "Git 의 접속 정보가 이미 최신입니다")
+                self._ui("show_info", "Git", "접속 정보를 Git 에 올렸습니다.\n다른 PC 들은 그 저장소 주소를 '+ 연결 추가'에 한 번 넣으면 이후 자동으로 가져옵니다."
+                         if pushed else "Git 의 접속 정보가 이미 최신입니다.")
+            self.refresh_relay()
+        self._spawn(work)
+        return True
+
+    def set_git_source(self, source) -> bool:
+        """사용자·현장 PC: 접속 정보를 가져올 Git 저장소를 정하고 바로 한 번 가져온다 (빈 글자면 연동 해제)"""
+        source = (source or "").strip()
+        if not self.ctx.get("set_git_source"):
+            self._ui("show_error", "Git", "이 프로그램에서는 사용할 수 없습니다")
+            return False
+        self.ctx["set_git_source"](source)
+        if not source:
+            self._note("Git 연동을 끕니다")
+            return True
+        self._note(f"Git 저장소에서 접속 정보를 가져옵니다: {source}")
+        self._ui("set_busy", "server", True)
+
+        def work():
+            res = self.ctx["git_sync"]() if self.ctx.get("git_sync") else {"state": "error", "msg": "동기화를 쓸 수 없습니다"}
+            if res.get("state") == "error":
+                self._note(f"Git 가져오기 실패: {res.get('msg')}")
+                self._ui("show_error", "Git", str(res.get("msg")))
+            else:
+                self._note("Git 에서 접속 정보를 확인했습니다")
+            self._ui("set_busy", "server", False)
+            self.refresh_server()
+        self._spawn(work)
+        return True
 
     def set_relay_external(self, text):
         text = (text or "").strip()
@@ -507,6 +641,9 @@ class WanTabController:
     # ── 1-4. 연결 추가 (중계 PC 접속 정보 · 현장 PC 접속 정보 · 현장 PC 주소) ──
     def find_on_lan(self):
         """같은 망의 중계 PC 를 찾아 연결 추가 창에 채운다 (작업 스레드)"""
+        if not self.wan_on():
+            return
+
         def work():
             code = discover.find_relay()
             if code:
@@ -523,6 +660,10 @@ class WanTabController:
         if kind == "":
             self._ui("show_error", "연결 추가", "접속 정보를 붙여넣거나 현장 PC 의 주소를 입력하세요")
             return False
+        if not self._need_wan():
+            return False
+        if kind == "git":
+            return self.set_git_source(text)
         if kind == "relay_code":
             return self.import_connection(text, as_field)
         if kind == "relay_url":
@@ -641,7 +782,7 @@ class WanTabController:
     def refresh_public(self, force=False):
         """인터넷에서 보이는 공인 IP 를 STUN 으로 알아냄 (작업 스레드, 몇 분에 한 번만)"""
         now = self._clock()
-        if self._public_busy or (not force and now - self._public_at < PUBLIC_RETRY):
+        if not self.wan_on() or self._public_busy or (not force and now - self._public_at < PUBLIC_RETRY):
             return
         self._public_busy, self._public_at = True, now
         lookup = self.ctx.get("public_address") or public_address
@@ -811,7 +952,7 @@ class WanTabController:
     def probe_targets(self):
         """주소로 접속했던 현장이 지금 닿는지 확인해 목록의 켜짐/꺼짐을 갱신 (작업 스레드)"""
         targets = list(self.direct_targets())
-        if not targets or self._probing:
+        if not targets or self._probing or not self.wan_on():
             return
         self._probing = True
         check = self.ctx.get("reachable") or (lambda a: connect_code.reachable(a, PROBE_TIMEOUT))
@@ -919,6 +1060,8 @@ class WanTabController:
 
     def quick_connect(self, row_id: str) -> bool:
         """더블클릭 / '원격 연결': 코드를 묻지 않고 바로 연결. 코드가 안 맞을 때만 한 번 물어본다"""
+        if not self._need_wan():
+            return False
         agent = self.agent(row_id)
         if agent is None:
             self._ui("show_error", "원격 연결", "목록에서 현장 PC 를 먼저 선택하세요")
@@ -1109,6 +1252,7 @@ class WanTabController:
 
     # ── 주기 갱신 ──
     def refresh_all(self):
+        self._ui("set_wan_enabled", self.wan_on())
         self.refresh_server()
         self.refresh_relay()
         self.refresh_agents()
@@ -1207,7 +1351,7 @@ class WanTab(NullUI):
     # ── 위젯 만들기 ──
     def _card_body(self):
         app, tk, px = self.app, self.tk, self.px
-        card = app._card(self.parent)
+        card = app._card(self.body)
         card.pack(fill="x", pady=(0, px(8)))
         inner = tk.Frame(card, bg=app.PANEL)
         inner.pack(fill="x", padx=px(16), pady=px(10))
@@ -1219,11 +1363,33 @@ class WanTab(NullUI):
                               font=app.FONT, activebackground=app.PANEL, selectcolor=app.PANEL, bd=0, anchor="w")
 
     def _build(self):
+        self._build_switch()
+        self.body = self.tk.Frame(self.parent, bg=self.app.BG)         # WAN 이 꺼지면 통째로 숨김
+        self.body.pack(fill="both", expand=True)
         self._build_list()
         self._build_field()
         self._build_relay()
         self._build_footer()
         self._build_log()
+
+    def _build_switch(self):
+        """맨 위 WAN 사용 스위치 — 꺼 두면 아래 칸이 모두 사라지고 WAN 은 아무것도 하지 않는다"""
+        app, tk, px = self.app, self.tk, self.px
+        self.wan_var = tk.BooleanVar(value=True)
+        row = tk.Frame(self.parent, bg=app.BG)
+        row.pack(fill="x", pady=(0, px(8)))
+        self.wan_check = tk.Checkbutton(row, text="WAN 사용", variable=self.wan_var, command=self._wan_toggled,
+                                        bg=app.BG, fg=app.TEXT, font=app.FONT_BOLD, activebackground=app.BG,
+                                        selectcolor=app.PANEL, bd=0, anchor="w")
+        self.wan_check.pack(side="left")
+        app._tip(self.wan_check, "끄면 중계 PC 접속 · 접속 받기 · 목록 확인 · 새 버전 확인 · 접속 정보 가져오기를 모두 하지 않습니다")
+        self.wan_off_lbl = tk.Label(row, text="꺼져 있음 — 인터넷으로 아무것도 하지 않습니다", font=app.FONT, fg=app.TEXT_DIM, bg=app.BG)
+        if not self.ctx.get("set_wan_enabled"):
+            row.pack_forget()                                           # 스위치가 없는 구성은 항상 켜짐
+
+    def _wan_toggled(self):
+        self.set_wan_enabled(self.wan_var.get())
+        self.controller.wan_toggled(self.wan_var.get())
 
     def _build_list(self):
         app, tk, ttk, px = self.app, self.tk, self.ttk, self.px
@@ -1352,7 +1518,27 @@ class WanTab(NullUI):
                     ).pack(side="left", padx=(px(6), 0))
         save = app._button(code, "파일 저장", "secondary", lambda: self.controller.save_connection_dialog(), small=True)
         save.pack(side="left", padx=(px(4), 0))
+        refresh = app._button(code, "새로고침", "danger", lambda: self.controller.relay_refresh_code(), small=True)
+        refresh.pack(side="left", padx=(px(4), 0))
+        app._tip(refresh, "접속 코드(공용 키)를 새로 만들어 Git 에 올립니다. 기존 접속 정보는 사라지고 연결 중인 원격 화면은 끊깁니다")
         app._tip(save, "접속 정보를 aurora_wan.conn 파일로 저장 — AuroraClient.exe 와 같은 폴더에 두면 다른 PC 가 실행할 때 자동으로 연결됩니다")
+        git = tk.Frame(self.relay_more, bg=app.PANEL)
+        git.pack(fill="x", pady=(px(4), 0))
+        app._field_label(git, "Git 저장소", width=8).pack(side="left")
+        self.git_var = tk.StringVar(value=cfg.get("git_source") or "")
+        self.git_entry = app._entry(git, self.git_var, 20)
+        self.git_entry.pack(side="left", fill="x", expand=True, ipady=px(1))
+        self.git_entry.bind("<Return>", lambda e: self.controller.publish_git(self.git_var.get()))
+        up = app._button(git, "올리기", "secondary", lambda: self.controller.publish_git(self.git_var.get()), small=True)
+        up.pack(side="left", padx=(px(6), 0))
+        app._tip(up, "사내 Git 저장소에 접속 정보를 올립니다. 다른 PC 는 이 저장소 주소를 '+ 연결 추가'에 한 번 넣으면 자동으로 가져옵니다 (접근이 제한된 사내 저장소만 쓰세요)")
+        rot = tk.Frame(self.relay_more, bg=app.PANEL)
+        rot.pack(fill="x")
+        self.rotate_var = tk.BooleanVar(value=bool(cfg.get("relay_rotate")))
+        self._check(rot, "매일 0시 자동 갱신", self.rotate_var,
+                    lambda: self.controller.set_relay_rotate(self.rotate_var.get())).pack(side="left")
+        self.git_status_lbl = tk.Label(rot, text="", font=app.FONT_SMALL, fg=app.TEXT_DIM, bg=app.PANEL, anchor="e")
+        self.git_status_lbl.pack(side="right")
         opt = tk.Frame(self.relay_more, bg=app.PANEL)
         opt.pack(fill="x", pady=(px(4), 0))
         app._field_label(opt, "외부 주소", width=8).pack(side="left")
@@ -1381,7 +1567,7 @@ class WanTab(NullUI):
 
     def _build_footer(self):
         app, tk, px = self.app, self.tk, self.px
-        row = tk.Frame(self.parent, bg=app.BG)
+        row = tk.Frame(self.body, bg=app.BG)
         row.pack(fill="x", pady=(0, px(6)))
         self.day_lbl = tk.Label(row, text="오늘 -", font=app.FONT_SMALL, fg=app.TEXT_DIM, bg=app.BG)
         self.day_lbl.pack(side="left")
@@ -1392,7 +1578,7 @@ class WanTab(NullUI):
 
     def _build_log(self):
         app, tk, px = self.app, self.tk, self.px
-        card = app._card(self.parent)
+        card = app._card(self.body)
         card.pack(fill="both", expand=True)
         self.log_text = tk.Text(card, height=LOG_LINES, font=app.FONT_MONO_SMALL, bg=app.LOG_BG, fg="#D5DADD",
                                 relief="flat", bd=px(6), wrap="none", state="disabled", highlightthickness=0)
@@ -1510,6 +1696,8 @@ class WanTab(NullUI):
                 field_chk.pack_forget()
             if kind == "relay_code":
                 hint.configure(text="중계 PC 에 연결합니다")
+            elif kind == "git":
+                hint.configure(text="사내 Git 저장소에서 접속 정보를 가져옵니다 (이후 자동으로 최신 정보를 따라감)")
             elif kind == "direct_code":
                 hint.configure(text="현장 PC 에 바로 접속합니다")
             elif kind == "address":
@@ -1535,6 +1723,10 @@ class WanTab(NullUI):
         app._button(btns, "연결", "primary", ok).pack(side="left")
         app._button(btns, "취소", "secondary", win.destroy).pack(side="left", padx=(px(8), 0))
         app._button(btns, "같은 망에서 찾기", "secondary", find, small=True).pack(side="right")
+        if (cfg.get("git_source") or "").strip():
+            app._button(btns, "Git 연동 끄기", "secondary",
+                        lambda: (self.controller.set_git_source(""), win.destroy()), small=True
+                        ).pack(side="right", padx=(0, px(6)))
         entry.bind("<Return>", lambda e: ok())
         text_var.trace_add("write", refresh)
         self._connect_win = ConnectDialog(win, text_var, code_var, field_var, ok)
@@ -1677,8 +1869,20 @@ class WanTab(NullUI):
             self._show_warn(self.relay_warn_lbl, warn)
 
     def set_relay_code(self, code):
-        if hasattr(self, "relay_code_var"):
+        if hasattr(self, "relay_code_var") and self.relay_code_var.get() != code:
             self.relay_code_var.set(code)
+
+    def set_relay_git(self, source, rotate, status, level):
+        if not hasattr(self, "git_var"):
+            return
+        try:
+            typing = self.root.focus_get() is self.git_entry                 # 입력 중인 칸을 덮어쓰지 않는다
+        except Exception:
+            typing = False
+        if not typing and self.git_var.get() != source:
+            self.git_var.set(source)
+        self.rotate_var.set(bool(rotate))
+        self.git_status_lbl.configure(text=status, fg=self._color(level))
 
     def set_relay_enabled(self, enabled):
         if hasattr(self, "relay_var"):
@@ -1724,6 +1928,15 @@ class WanTab(NullUI):
             self.controller.log(done_msg)
         except Exception:
             pass
+
+    def set_wan_enabled(self, enabled):
+        self.wan_var.set(bool(enabled))
+        if enabled:
+            self.wan_off_lbl.pack_forget()
+            self.body.pack(fill="both", expand=True)
+        else:
+            self.body.pack_forget()
+            self.wan_off_lbl.pack(side="left", padx=(self.px(10), 0))
 
     def set_usage(self, day_text, month_text):
         self.day_lbl.configure(text=day_text)

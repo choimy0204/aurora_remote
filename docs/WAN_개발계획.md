@@ -156,6 +156,13 @@ Linux 에서 Windows 전용 부분을 `tests/winshim.py` 로 흡수해 **실제 
 - **자동 찾기(UDP 9101)**: 외부 주소가 설정되면 시작하지 않음(공용 키를 망에 알리는 기능이라).
 - 시험: `tests/test_wan_tls.py`(지문 고정·불일치·TOFU·평문 클라이언트 거부·업데이트·실제 에이전트 end-to-end·**중간 관찰자가 접근 코드와 응답을 평문으로 볼 수 없음**), `test_wan_security.py`(기본 키·출처별 잠금·자동 설정). 실제 Windows 와 외부 침투 시험은 하지 못했다.
 
+### WAN 스위치 · Git 배포 · 접속 코드 새로고침 (v1.3)
+
+- **WAN 사용 스위치**: `cfg.wan_on()` — 값이 없으면(예전 설정) 쓰던 흔적(`enabled`·`relay_url`·`relay_host`·`direct_targets`)이 있을 때만 켜짐. 런타임 `set_wan_enabled` 가 에이전트 · 안내 서버 운영 · 클라이언트 · 주소 접속 · 주기 작업(업데이트 · Git · 자동 갱신)을 모두 시작/중지하고, 컨트롤러는 꺼져 있으면 주소 도달 확인 · 공인 주소(STUN) 질의 · 같은 망 찾기 · 연결을 하지 않는다. 개별 설정은 지우지 않는다.
+- **Git 배포**: `wan/gitsync.py` — PC 의 `git` 명령(깊이 1 clone/fetch, 터미널 입력 끔)으로 저장소의 `aurora_wan.conn` 을 가져와 파일 설정과 같은 경로(`_apply_conn_text`, 내용 지문 `conn_hash` 로 중복 적용 방지)로 적용. 중계 PC 는 `publish`(commit + push). 시험은 로컬 bare 저장소(`tests/test_wan_git.py`, 진짜 git).
+- **새로고침 · 0시 자동 갱신**: `rotate_relay_key` = 무작위 새 공용 키 → 안내 서버 재시작 → Git 업로드(실패하면 `_publish_pending` 으로 재시도). `_maybe_rotate` 가 30초마다 확인해 날짜가 바뀐 뒤 처음 한 번 실행(꺼져 있었다면 켜질 때). Git 저장소가 없으면 키를 나눠 줄 방법이 없어 자동 갱신하지 않는다. 사용자 PC 는 키/인증서 불일치 상태에서 30초마다 Git 을 확인해 새 키로 다시 붙는다(진짜 안내 서버 프로세스 + 진짜 git 으로 끝에서 끝까지 시험).
+- 현장 삭제(`forget`): 꺼진 현장만 중계 PC 저장소에서 지움. 이름 바꾸기: 중계 현장은 `set_config(name)`, 주소 현장은 로컬.
+
 ## 6. 의도된 설계 (바꾸지 않음)
 
 - 배포 계정 `user`/`1`, 반출 키 `aurora-export` 등 기본값

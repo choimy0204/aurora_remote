@@ -3987,6 +3987,7 @@ class AuroraClientApp:
     def _wan_autosetup(self):
         try:
             tab = self._wan_tab
+            self._wan.set_wan_enabled(True)                     # 자동 설정은 WAN 이 켜져 있어야 의미가 있다
             tab.controller._auto_setup_now(self._wan.cfg.get("relay_external") or "")      # 이미 다시 시작한 뒤라 관리자 확인은 건너뜀
         except Exception as e:
             self.add_log(f"[WAN] 자동 설정 실패: {type(e).__name__}: {e}")

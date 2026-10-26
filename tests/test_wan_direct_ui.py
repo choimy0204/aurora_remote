@@ -547,3 +547,172 @@ def test_rename_rejects_empty_long_or_unknown():
     assert ctl.rename_target("x1", "가" * 41) is False
     assert ctl.rename_target("nope", "이름") is False
     assert len(ui.all("show_error")) == 3
+
+
+# ── WAN 켜기/끄기 ──
+def off_ctl():
+    ctl, ctx, ui, direct = direct_ctl()
+    state = {"on": False}
+    ctx["wan_enabled"] = lambda: state["on"]
+    ctx["set_wan_enabled"] = MagicMock(side_effect=lambda v: state.update(on=v))
+    ctx["public_address"] = MagicMock(return_value="203.0.113.9")
+    ctx["reachable"] = MagicMock(return_value=True)
+    return ctl, ctx, ui, direct, state
+
+
+def test_wan_toggle_goes_to_runtime_and_screen_follows():
+    ctl, ctx, ui, direct, state = off_ctl()
+    ctl.wan_toggled(True)
+    ctx["set_wan_enabled"].assert_called_once_with(True)
+    assert ui.last("set_wan_enabled") == (True,)
+    ctl.wan_toggled(False)
+    assert state["on"] is False and ui.last("set_wan_enabled") == (False,)
+
+
+def test_wan_toggle_failure_reverts_screen_and_reports():
+    ctl, ctx, ui, direct, state = off_ctl()
+    ctx["set_wan_enabled"].side_effect = OSError("시작 실패")
+    ctl.wan_toggled(True)
+    assert ui.last("set_wan_enabled") == (False,) and "시작 실패" in ui.last("show_error")[1]
+
+
+def test_nothing_is_fetched_or_connected_while_wan_is_off():
+    ctl, ctx, ui, direct, state = off_ctl()
+    ctx["cfg"].d["direct_targets"] = {"10.0.0.5:9102": {"name": "a", "code": "c", "last": 0}}
+    ctx["cfg"].d["enabled"] = True
+    ctl.tick_slow(); ctl.tick_fast(); ctl.refresh_all()
+    ctx["reachable"].assert_not_called()                              # 현장 주소에 닿는지 확인도 하지 않음
+    ctx["public_address"].assert_not_called()                         # 공인 주소를 STUN 에 묻지도 않음
+    assert ctl.quick_connect("d:10.0.0.5:9102") is False
+    assert ctl.add_connection("10.0.0.9", "c") is False
+    assert not direct.open_session.called
+    assert "WAN 사용" in ui.last("show_info")[1]
+    state["on"] = True                                                # 켜면 그대로 동작
+    ctl.tick_slow()
+    ctx["reachable"].assert_called()
+
+
+def test_screen_without_switch_is_always_on():
+    ctl, ctx, ui, _ = direct_ctl()
+    assert ctl.wan_switch_available() is False and ctl.wan_on() is True
+
+
+# ── 접속 코드 새로고침 · Git ──
+@pytest.mark.parametrize("text,kind", [("https://git.corp/aurora/wan.git", "git"), ("git@git.corp:aurora/wan.git", "git"),
+                                       ("ssh://git@git.corp/x", "git"), ("\\\\\\\\server\\\\repos\\\\wan.git", "git"),
+                                       ("ws://203.0.113.5:9100", "relay_url"), ("192.168.0.5", "address")])
+def test_classify_git_source(text, kind):
+    assert wui.classify_target(text) == kind
+
+
+def git_ctl(**over):
+    ctl, ctx, ui, direct = direct_ctl()
+    ctx.update(rotate_relay_key=MagicMock(return_value={"key": "k2", "code": "AW1-new", "published": True, "error": ""}),
+               git_publish=MagicMock(return_value=True), set_git_source=MagicMock(),
+               git_sync=MagicMock(return_value={"state": "ok", "msg": ""}), git_state=lambda: {"state": "ok", "msg": ""})
+    ctx.update(over)
+    return ctl, ctx, ui
+
+
+def test_refresh_code_asks_first_and_explains_consequences():
+    ctl, ctx, ui = git_ctl()
+    asked = []
+    ui.ask_yes_no = lambda t, m, cb: (asked.append(m), cb(False))
+    ctl.relay_refresh_code()
+    ctx["rotate_relay_key"].assert_not_called()
+    assert "사라집니다" in asked[0] and "끊깁니다" in asked[0] and "Git" in asked[0]
+
+
+def test_refresh_code_rotates_and_shows_new_code():
+    ctl, ctx, ui = git_ctl()
+    ui.ask_yes_no = lambda t, m, cb: cb(True)
+    ctl.relay_refresh_code()
+    ctx["rotate_relay_key"].assert_called_once()
+    assert ui.last("set_relay_code")[0] == "AW1-new"
+    assert not ui.all("show_error")
+
+
+def test_refresh_code_reports_git_failure_but_keeps_going():
+    ctl, ctx, ui = git_ctl()
+    ctx["rotate_relay_key"].return_value = {"key": "k2", "code": "AW1-new", "published": False, "error": "Git 서버에 닿지 않습니다"}
+    ui.ask_yes_no = lambda t, m, cb: cb(True)
+    ctl.relay_refresh_code()
+    assert "닿지 않습니다" in ui.last("show_error")[1] and "다시 시도" in ui.last("show_error")[1]
+
+
+def test_refresh_code_exception_is_reported():
+    ctl, ctx, ui = git_ctl()
+    ctx["rotate_relay_key"].side_effect = RuntimeError("재시작 실패")
+    ui.ask_yes_no = lambda t, m, cb: cb(True)
+    ctl.relay_refresh_code()
+    assert "재시작 실패" in ui.last("show_error")[1]
+
+
+def test_refresh_code_unavailable_without_runtime_support():
+    ctl, ctx, ui, _ = direct_ctl()
+    assert ctl.relay_refresh_code() is False and ui.all("show_error")
+
+
+def test_publish_git_needs_address_and_code(monkeypatch):
+    monkeypatch.setattr(wui, "lan_addresses", lambda: [])
+    ctl, ctx, ui = git_ctl()
+    assert ctl.publish_git("  ") is False and "주소" in ui.last("show_error")[1]
+    ctx["cfg"].d.update(relay_port=9100)
+    assert ctl.publish_git("https://git.corp/a.git") is False                  # 접속 정보가 아직 없음 (주소 없음)
+    ctl.relay_code = lambda: "AW1-x"
+    assert ctl.publish_git("https://git.corp/a.git") is True
+    ctx["git_publish"].assert_called_once_with("https://git.corp/a.git", "AW1-x")
+    assert "올렸습니다" in ui.last("show_info")[1]
+
+
+def test_publish_git_failure_is_shown():
+    from wan.gitsync import GitError
+    ctl, ctx, ui = git_ctl()
+    ctl.relay_code = lambda: "AW1-x"
+    ctx["git_publish"].side_effect = GitError("Git 서버 로그인에 실패했습니다")
+    ctl.publish_git("https://git.corp/a.git")
+    assert "로그인" in ui.last("show_error")[1]
+
+
+def test_pasting_git_address_sets_source_and_syncs_once():
+    ctl, ctx, ui = git_ctl()
+    assert ctl.add_connection("https://git.corp/aurora/wan.git") is True
+    ctx["set_git_source"].assert_called_once_with("https://git.corp/aurora/wan.git")
+    ctx["git_sync"].assert_called_once()
+    assert not ui.all("show_error")
+
+
+def test_git_sync_error_is_shown_when_pasting_address():
+    ctl, ctx, ui = git_ctl()
+    ctx["git_sync"].return_value = {"state": "error", "msg": "Git 저장소를 찾을 수 없습니다"}
+    ctl.add_connection("https://git.corp/aurora/nope.git")
+    assert "찾을 수 없" in ui.last("show_error")[1]
+
+
+def test_git_off_clears_source():
+    ctl, ctx, ui = git_ctl()
+    assert ctl.set_git_source("") is True
+    ctx["set_git_source"].assert_called_once_with("")
+    ctx["git_sync"].assert_not_called()
+
+
+def test_rotate_checkbox_saves_and_skips_today():
+    ctl, ctx, ui = git_ctl()
+    ctl.set_relay_rotate(True)
+    assert ctx["cfg"].d["relay_rotate"] is True and ctx["cfg"].d["relay_rotated_on"]    # 켠 날은 건너뜀
+    ctl.set_relay_rotate(False)
+    assert ctx["cfg"].d["relay_rotate"] is False
+
+
+@pytest.mark.parametrize("state,text,level", [({"state": "ok"}, "Git 연결됨", "ok"), ({"state": "error", "msg": "로그인 실패"}, "로그인 실패", "bad"),
+                                              ({"state": "off"}, "", "off"), ({}, "", "off")])
+def test_git_status_texts(state, text, level):
+    ctl, ctx, ui = git_ctl(git_state=lambda: state)
+    assert ctl.git_status() == (text, level)
+
+
+def test_relay_refresh_updates_code_and_git_widgets():
+    ctl, ctx, ui = git_ctl(relay_available=True, relay_state=lambda: {"state": "stopped"})
+    ctx["cfg"].d.update(git_source="https://git.corp/a.git", relay_rotate=True, relay_port=9100)
+    ctl.refresh_relay()
+    assert ui.last("set_relay_git") == ("https://git.corp/a.git", True, "Git 연결됨", "ok")

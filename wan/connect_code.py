@@ -62,6 +62,19 @@ def encode_direct(urls, code: str, fp: str = "") -> str:
     return encode(urls, code, PREFIX_DIRECT, fp)
 
 
+def relay_urls(port: int, external: str, lan_ips, secure: bool) -> list:
+    """다른 PC 가 접속할 안내 서버 주소 후보: 외부 주소(적었으면) → 이 PC 의 내부 주소들"""
+    scheme = "wss" if secure else "ws"
+    out = [make_url(external.strip(), port, scheme)] if (external or "").strip() else []
+    return out + [f"{scheme}://{ip}:{port}" for ip in list(lan_ips)[:3]]
+
+
+def is_git_source(text: str) -> bool:
+    """사내 Git 저장소 주소처럼 보이는지 (.git 으로 끝나거나 ssh/git/file 주소)"""
+    t = (text or "").strip().lower()
+    return bool(t) and "\n" not in t and (t.endswith(".git") or t.startswith(("git@", "ssh://", "git://", "file://")))
+
+
 def kind_of(text: str) -> str:
     """붙여넣은 글자의 종류 → relay(중계 PC) · direct(현장 PC 주소) · ''(알 수 없음)"""
     t = "".join((text or "").split())

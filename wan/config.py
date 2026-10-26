@@ -43,6 +43,7 @@ def default_dir() -> str:
 
 
 DEFAULTS = {
+    "wan_enabled":  None,     # WAN 기능 전체 켜기/끄기. None(처음 · 예전 설정) 이면 예전에 WAN 을 쓰던 PC 만 켜진 것으로 본다
     "enabled":      False,    # 이 PC 를 WAN 원격 대상(현장)으로 쓸지
     "relay_url":    "",       # 안내 서버 주소  ws://주소:포트
     "relay_key":    DEFAULT_RELAY_KEY,   # 안내 서버 공용 키 — 현장 접속 코드를 따로 안 정했으면 이 키가 접속 코드
@@ -63,6 +64,11 @@ DEFAULTS = {
     "direct_listen": True,    # 현장 모드일 때 주소로 바로 들어오는 접속도 받을지 (안내 서버 없이 접근 코드로 접속)
     "direct_port":  DIRECT_PORT,
     "direct_targets": {},     # 사용자 PC: 주소로 접속했던 현장 {"주소:포트": {"name", "code", "last"}}
+    "git_source":   "",       # 접속 정보를 주고받는 사내 Git 저장소 주소 (비어 있으면 사용 안 함)
+    "git_file":     "aurora_wan.conn",   # 저장소 안의 접속 정보 파일 경로
+    "git_branch":   "",       # 비워 두면 저장소의 기본 브랜치
+    "relay_rotate": True,     # 중계 PC: 매일 0시(자정)에 공용 키를 새로 만들어 Git 에 올림 (Git 저장소가 있을 때만 동작)
+    "relay_rotated_on": "",   # 마지막으로 키를 새로 만든 날짜(YYYY-MM-DD)
     "conn_hash":    "",       # 마지막으로 적용한 설정 파일(.conn) 내용의 지문 — 같은 파일을 매번 다시 적용하지 않으려고
 }
 
@@ -173,6 +179,16 @@ class WanConfig:
                 self._data["agent_id"] = new_agent_id()
                 self.save()
             return self._data["agent_id"]
+
+    def wan_on(self) -> bool:
+        """WAN 전체 스위치.  끄면 접속 정보를 가져오지도, 중계 PC 에 접속하지도, 접속을 받지도 않는다.
+        한 번도 정하지 않았다면(예전 버전에서 올라온 설정) WAN 을 쓰던 흔적이 있을 때만 켜진 것으로 본다"""
+        with self._lock:
+            v = self._data.get("wan_enabled")
+            if v is None:
+                d = self._data
+                return bool(d.get("enabled") or d.get("relay_url") or d.get("relay_host") or d.get("direct_targets"))
+            return bool(v)
 
     def ensure_access_code(self) -> str:
         """현장 PC 의 접근 코드가 없으면 무작위로 하나 만든다 (중계 PC 가 사용자 PC 에 알려 주므로 사람이 외울 필요 없음)"""
