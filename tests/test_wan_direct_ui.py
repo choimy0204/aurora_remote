@@ -637,7 +637,7 @@ def test_refresh_code_reports_git_failure_but_keeps_going():
     ctx["rotate_relay_key"].return_value = {"key": "k2", "code": "AW1-new", "published": False, "error": "Git 서버에 닿지 않습니다"}
     ui.ask_yes_no = lambda t, m, cb: cb(True)
     ctl.relay_refresh_code()
-    assert "닿지 않습니다" in ui.last("show_error")[1] and "다시 시도" in ui.last("show_error")[1]
+    assert "닿지 않습니다" in ui.last("show_error")[1] and "'올리기'를 눌러" in ui.last("show_error")[1]
 
 
 def test_refresh_code_exception_is_reported():
@@ -696,14 +696,6 @@ def test_git_off_clears_source():
     ctx["git_sync"].assert_not_called()
 
 
-def test_rotate_checkbox_saves_and_skips_today():
-    ctl, ctx, ui = git_ctl()
-    ctl.set_relay_rotate(True)
-    assert ctx["cfg"].d["relay_rotate"] is True and ctx["cfg"].d["relay_rotated_on"]    # 켠 날은 건너뜀
-    ctl.set_relay_rotate(False)
-    assert ctx["cfg"].d["relay_rotate"] is False
-
-
 @pytest.mark.parametrize("state,text,level", [({"state": "ok"}, "Git 연결됨", "ok"), ({"state": "error", "msg": "로그인 실패"}, "로그인 실패", "bad"),
                                               ({"state": "off"}, "", "off"), ({}, "", "off")])
 def test_git_status_texts(state, text, level):
@@ -713,9 +705,9 @@ def test_git_status_texts(state, text, level):
 
 def test_relay_refresh_updates_code_and_git_widgets():
     ctl, ctx, ui = git_ctl(relay_available=True, relay_state=lambda: {"state": "stopped"})
-    ctx["cfg"].d.update(git_source="https://git.corp/a.git", relay_rotate=True, relay_port=9100)
+    ctx["cfg"].d.update(git_source="https://git.corp/a.git", relay_port=9100)
     ctl.refresh_relay()
-    assert ui.last("set_relay_git") == ("https://git.corp/a.git", True, "Git 연결됨", "ok")
+    assert ui.last("set_relay_git") == ("https://git.corp/a.git", "Git 연결됨", "ok")
 
 
 # ── Git 서버 오류 알림 ──

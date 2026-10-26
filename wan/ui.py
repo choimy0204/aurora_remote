@@ -155,7 +155,7 @@ class NullUI:
     def set_relay_enabled(self, enabled): pass
     def set_relay_code(self, code): pass                      # 다른 PC 에 붙여넣을 접속 정보
     def set_admin(self, is_admin): pass                       # 관리자 권한 여부 (아니면 '관리자로 다시 시작' 버튼 표시)
-    def set_relay_git(self, source, rotate, status, level): pass   # 중계 PC 카드의 Git 저장소 주소 · 매일 자동 갱신 · 상태 글자
+    def set_relay_git(self, source, status, level): pass          # 중계 PC 카드의 Git 저장소 주소 · 상태 글자
     def set_found_code(self, code): pass                      # 같은 망에서 찾은 접속 정보를 연결 추가 창에 채움
     def ask_yes_no(self, title, message, on_answer): pass     # 예/아니오 물어보고 on_answer(bool) 을 부름 (화면 스레드)
     def ask_code(self, row_id, label, prefill, on_answer): pass   # 접근 코드를 물어 on_answer(코드 또는 None) 을 부름
@@ -363,7 +363,7 @@ class WanTabController:
             self._ui("set_relay_status", *self.relay_status())
             self._ui("set_relay_info", *self.relay_info())
             self._ui("set_relay_code", self.relay_code())
-            self._ui("set_relay_git", self.cfg.get("git_source") or "", bool(self.cfg.get("relay_rotate")), *self.git_status())
+            self._ui("set_relay_git", self.cfg.get("git_source") or "", *self.git_status())
             self._ui("set_admin", is_admin() or not self.ctx.get("relaunch_admin"))
 
     def relay_toggled(self, enabled: bool, port_text) -> bool:
@@ -459,7 +459,7 @@ class WanTabController:
         git = bool((self.cfg.get("git_source") or "").strip())
         self._ui("ask_yes_no", "접속 코드 새로고침",
                  "접속 코드(공용 키)를 새로 만들까요?\n\n· 기존 접속 정보는 즉시 사라집니다.\n· 지금 연결 중인 원격 화면은 끊깁니다.\n"
-                 + ("· 새 접속 정보는 Git 저장소에 올라가고, 다른 PC 들이 몇 분 안에 자동으로 따라옵니다."
+                 + ("· 새 접속 정보가 지금 Git 저장소에 올라가고, 다른 PC 들이 몇 분 안에 자동으로 따라옵니다."
                     if git else "· Git 저장소가 없어서 다른 PC 에는 새 접속 정보를 직접 전달해야 합니다."),
                  lambda yes: self._do_refresh_code() if yes else None)
         return True
@@ -475,17 +475,11 @@ class WanTabController:
             self._ui("set_relay_code", res.get("code") or self.relay_code())
             if res.get("error"):
                 self._note(f"새 접속 코드를 만들었지만 Git 에 올리지 못했습니다: {res['error']}")
-                self._ui("show_error", "Git", f"새 접속 코드를 만들었지만 Git 에 올리지 못했습니다 — 곧 다시 시도합니다.\n\n{res['error']}")
+                self._ui("show_error", "Git", f"새 접속 코드를 만들었지만 Git 에 올리지 못했습니다.\nGit 서버가 복구되면 '올리기'를 눌러 올려 주세요 (그동안 다른 PC 는 새 코드를 받지 못합니다).\n\n{res['error']}")
             else:
                 self._note("접속 코드를 새로 만들었습니다" + (" — Git 에 올렸습니다" if res.get("published") else ""))
             self.refresh_relay()
         self._spawn(work)
-
-    def set_relay_rotate(self, enabled: bool):
-        """'매일 0시 자동 갱신' 체크 — 켜는 날은 건너뛰고 다음 날 0시부터"""
-        extra = {"relay_rotated_on": datetime.fromtimestamp(self._clock()).date().isoformat()} if enabled else {}
-        self.cfg.update(relay_rotate=bool(enabled), **extra)
-        self.refresh_relay()
 
     def publish_git(self, source) -> bool:
         """'올리기': 지금의 접속 정보를 Git 저장소에 올림 (저장소 주소도 기억)"""
@@ -1559,13 +1553,9 @@ class WanTab(NullUI):
         up = app._button(git, "올리기", "secondary", lambda: self.controller.publish_git(self.git_var.get()), small=True)
         up.pack(side="left", padx=(px(6), 0))
         app._tip(up, "사내 Git 저장소에 접속 정보를 올립니다. 다른 PC 는 이 저장소 주소를 '+ 연결 추가'에 한 번 넣으면 자동으로 가져옵니다 (접근이 제한된 사내 저장소만 쓰세요)")
-        rot = tk.Frame(self.relay_more, bg=app.PANEL)
-        rot.pack(fill="x")
-        self.rotate_var = tk.BooleanVar(value=bool(cfg.get("relay_rotate")))
-        self._check(rot, "매일 0시 자동 갱신", self.rotate_var,
-                    lambda: self.controller.set_relay_rotate(self.rotate_var.get())).pack(side="left")
-        self.git_status_lbl = tk.Label(rot, text="", font=app.FONT_SMALL, fg=app.TEXT_DIM, bg=app.PANEL, anchor="e")
-        self.git_status_lbl.pack(side="right")
+        self.git_status_lbl = tk.Label(self.relay_more, text="", font=app.FONT_SMALL, fg=app.TEXT_DIM, bg=app.PANEL,
+                                       anchor="w")
+        self.git_status_lbl.pack(fill="x")
         opt = tk.Frame(self.relay_more, bg=app.PANEL)
         opt.pack(fill="x", pady=(px(4), 0))
         app._field_label(opt, "외부 주소", width=8).pack(side="left")
@@ -1899,7 +1889,7 @@ class WanTab(NullUI):
         if hasattr(self, "relay_code_var") and self.relay_code_var.get() != code:
             self.relay_code_var.set(code)
 
-    def set_relay_git(self, source, rotate, status, level):
+    def set_relay_git(self, source, status, level):
         if not hasattr(self, "git_var"):
             return
         try:
@@ -1908,7 +1898,6 @@ class WanTab(NullUI):
             typing = False
         if not typing and self.git_var.get() != source:
             self.git_var.set(source)
-        self.rotate_var.set(bool(rotate))
         self.git_status_lbl.configure(text=status, fg=self._color(level))
 
     def set_relay_enabled(self, enabled):

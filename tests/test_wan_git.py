@@ -166,14 +166,10 @@ def test_git_loop_checks_periodically_only_while_on(remote, tmp_path, monkeypatc
     assert not t.is_alive()
 
 
-# ── 접속 코드 새로고침 · 매일 0시 자동 갱신 ──
-import datetime
-
-
-def relay_pc(tmp_path, remote, today=datetime.date(2026, 10, 26), **cfg):
+# ── 접속 코드 새로고침 (사람이 눌렀을 때만 Git 에 올림) ──
+def relay_pc(tmp_path, remote, **cfg):
     r = runtime(tmp_path, "relaypc", wan_enabled=True, relay_host=True, relay_key="옛키", relay_port=9100,
                 git_source=remote, **cfg)
-    r._today = lambda: today
     r.relay_fp = lambda: "ab" * 32
     r.relay_command = lambda: ["x"]
     r.restart_relay = lambda: setattr(r, "restarted", getattr(r, "restarted", 0) + 1)
@@ -192,7 +188,6 @@ def test_refresh_makes_new_random_key_republishes_and_old_code_is_gone(remote, t
     on_git = cc.decode_full(gitsync.fetch_conn(remote, str(tmp_path / "reader")))
     assert on_git == (["wss://192.168.0.140:9100"], new_key, "ab" * 32)       # 저장소에는 새 접속 정보만 남음
     assert cc.decode(res["code"])[1] == new_key
-    assert r.cfg.get("relay_rotated_on") == "2026-10-26"
     assert r.rotate_relay_key()["key"] != new_key                     # 누를 때마다 다른 키
 
 
@@ -204,45 +199,29 @@ def test_refresh_without_git_still_rotates_and_reports_no_error(tmp_path):
     assert res["published"] is False and res["error"] == "" and r.cfg.get("relay_key") != "옛키"
 
 
-def test_refresh_when_git_is_down_keeps_new_key_and_retries_later(remote, tmp_path):
+def test_refresh_when_git_is_down_keeps_new_key_and_does_not_retry_by_itself(remote, tmp_path):
     r = relay_pc(tmp_path, remote)
     r.cfg.update(git_source=str(tmp_path / "gone.git"))
     res = r.rotate_relay_key()
-    assert res["published"] is False and "찾을 수 없" in res["error"] and r._publish_pending
+    assert res["published"] is False and "찾을 수 없" in res["error"]
     assert r.git_state["state"] == "error"
     subprocess.run(["git", "init", "--bare", "-q", str(tmp_path / "gone.git")], check=True)    # 서버가 살아남
-    r._maybe_rotate()
-    assert r._publish_pending is False
+    assert not hasattr(r, "_maybe_rotate") and not hasattr(r, "_rotate_loop")                   # 자동으로 올리는 일은 없다
+    assert r.git_publish(str(tmp_path / "gone.git"), r.relay_code()) is True                    # 사람이 '올리기'를 누르면 올라간다
     assert cc.decode(gitsync.fetch_conn(str(tmp_path / "gone.git"), str(tmp_path / "rd")))[1] == r.cfg.get("relay_key")
 
 
-def test_midnight_rotation_once_per_day(remote, tmp_path):
-    day1 = datetime.date(2026, 10, 26)
-    r = relay_pc(tmp_path, remote, today=day1)
-    r._maybe_rotate()
-    assert r.cfg.get("relay_rotated_on") == "2026-10-26" and r.cfg.get("relay_key") == "옛키"   # 처음 켠 날은 건너뜀
-    r._today = lambda: day1
-    r._maybe_rotate()
-    assert r.cfg.get("relay_key") == "옛키"                            # 같은 날에는 다시 만들지 않음
-    r._today = lambda: day1 + datetime.timedelta(days=1)             # 자정이 지남
-    r._maybe_rotate()
-    key2 = r.cfg.get("relay_key")
-    assert key2 != "옛키" and r.cfg.get("relay_rotated_on") == "2026-10-27"
-    assert cc.decode(gitsync.fetch_conn(remote, str(tmp_path / "rd")))[1] == key2
-    r._maybe_rotate()
-    assert r.cfg.get("relay_key") == key2                             # 그날 두 번째 확인은 아무 일 없음
-    r._today = lambda: day1 + datetime.timedelta(days=5)             # 며칠 꺼져 있다 켜져도 한 번만
-    r._maybe_rotate()
-    assert r.cfg.get("relay_key") != key2 and r.cfg.get("relay_rotated_on") == "2026-10-31"
-
-
-@pytest.mark.parametrize("cfg", [dict(wan_enabled=False), dict(relay_rotate=False), dict(git_source=""),
-                                 dict(relay_host=False)])
-def test_no_automatic_rotation_when_off_or_without_git_or_not_relay(remote, tmp_path, cfg):
-    r = relay_pc(tmp_path, remote, relay_rotated_on="2026-10-01")
-    r.cfg.update(**cfg)
-    r._maybe_rotate()
-    assert r.cfg.get("relay_key") == "옛키"
+def test_nothing_is_ever_pushed_automatically(remote, tmp_path, monkeypatch):
+    """백그라운드 반복 작업(주기 확인)은 Git 에서 '가져오기'만 하고 올리지 않는다"""
+    pushed = []
+    monkeypatch.setattr(gitsync, "publish", lambda *a, **k: pushed.append(a))
+    r = relay_pc(tmp_path, remote, relay_rotated_on="2000-01-01")
+    for _ in range(3):
+        r.git_sync_now()
+    assert pushed == []
+    import inspect
+    import wan.runtime as rt
+    assert "publish" not in inspect.getsource(rt.WanRuntime._git_loop)
 
 
 def test_user_pc_polls_faster_when_key_is_rejected(remote, tmp_path, monkeypatch):

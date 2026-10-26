@@ -31,6 +31,7 @@ AGENT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 SID_RE      = re.compile(r"^[0-9a-f]{16}$")
 SIGNAL_TTL  = 120.0          # 직접 연결 신호가 이 시간 안에 끝나지 않으면 정리
 UPDATE_CHUNK = 64 * 1024
+SERVER_CAPS = ["forget", "code"]   # 이 안내 서버가 지원하는 기능 (옛 서버는 이 목록이 없다 — 새 프로그램이 "서버를 업데이트하세요" 라고 알려 주려고)
 KEY_FAILS   = 8              # 같은 곳에서 이 횟수 키를 틀리면
 KEY_LOCK    = 300.0          # 이 시간(초) 동안 그곳의 접속을 모두 거부
 
@@ -240,7 +241,7 @@ class RelayServer:
     # ── 사용자 PC ──
     async def _user(self, ws, hello):
         self.users.add(ws)
-        await ws.send(json.dumps({"t": "welcome", "agents": self.agent_list()}, ensure_ascii=False))
+        await ws.send(json.dumps({"t": "welcome", "agents": self.agent_list(), "caps": SERVER_CAPS}, ensure_ascii=False))
         try:
             async for msg in ws:
                 if isinstance(msg, bytes):

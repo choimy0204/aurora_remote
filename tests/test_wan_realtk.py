@@ -352,26 +352,24 @@ def test_new_install_starts_with_wan_off(tmp_path, monkeypatch):
         winshim.destroy_root(root)
 
 
-def test_relay_card_has_refresh_git_and_midnight_rotation_controls(app, monkeypatch):
+def test_relay_card_has_refresh_and_git_controls(app, monkeypatch):
     tab = app._wan_tab
-    for name in ("git_var", "git_entry", "rotate_var", "git_status_lbl", "relay_code_var"):
+    for name in ("git_var", "git_entry", "git_status_lbl", "relay_code_var"):
         assert hasattr(tab, name), name
     app._select_tab(4)
     tab._relay_expand(True)
-    tab.set_relay_git("https://git.corp/a.git", True, "Git 연결됨", "ok")
+    tab.set_relay_git("https://git.corp/a.git", "Git 연결됨", "ok")
     app.root.update()
-    assert tab.git_var.get() == "https://git.corp/a.git" and tab.rotate_var.get() is True
+    assert tab.git_var.get() == "https://git.corp/a.git" and not hasattr(tab, "rotate_var")      # 자동 갱신 체크는 없다
     assert tab.git_status_lbl.cget("text") == "Git 연결됨"
     calls = []
     monkeypatch.setattr(tab.controller, "relay_refresh_code", lambda: calls.append("refresh"))
     monkeypatch.setattr(tab.controller, "publish_git", lambda s: calls.append(("publish", s)))
-    monkeypatch.setattr(tab.controller, "set_relay_rotate", lambda on: calls.append(("rotate", on)))
     from wan import ui as wan_ui
     buttons = {w.cget("text"): w for w in _all_children(tab.relay_more) if w.winfo_class() == "Button"}
     assert {"새로고침", "올리기", "복사", "파일 저장"} <= set(buttons)
     buttons["새로고침"].invoke()
     buttons["올리기"].invoke()
-    tab.rotate_var.set(False)
     tab.git_entry.event_generate("<Return>")
     app.root.update()
     assert "refresh" in calls and ("publish", "https://git.corp/a.git") in calls

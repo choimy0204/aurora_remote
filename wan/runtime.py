@@ -10,7 +10,6 @@ aurora_client.py 에는 이 객체를 만들고 start/shutdown 을 부르는 몇
 모든 단계의 오류는 여기서 잡아 로그로만 남기고 밖(LAN 쪽)으로 던지지 않는다.
 """
 
-import datetime
 import json
 import os
 import threading
@@ -31,7 +30,6 @@ GIT_FIRST_DELAY    = 3.0           # 시작 후 첫 Git 확인까지
 GIT_EVERY          = 600.0         # 그 뒤 10분마다
 GIT_RETRY          = 30.0          # 키가 안 맞아 접속이 막혀 있으면 30초마다 (중계 PC 가 키를 새로 만든 직후 빨리 따라오게)
 GIT_TICK           = 5.0
-ROTATE_TICK        = 30.0          # 자정이 지났는지 확인하는 간격
 
 
 class WanRuntime:
@@ -55,7 +53,6 @@ class WanRuntime:
         self._update_thread = None
         self.git_state = {"state": "off", "msg": "", "at": 0}
         self._rot_lock = threading.Lock()
-        self._publish_pending = False
 
     # ── 시작/종료 ──
     def wan_on(self) -> bool:
@@ -89,7 +86,6 @@ class WanRuntime:
         self._update_thread = threading.Thread(target=self._update_loop, args=(self._bg_stop,), name="wan-update", daemon=True)
         self._update_thread.start()
         threading.Thread(target=self._git_loop, args=(self._bg_stop,), name="wan-git", daemon=True).start()
-        threading.Thread(target=self._rotate_loop, args=(self._bg_stop,), name="wan-rotate", daemon=True).start()
 
     def _stop_features(self):
         with self._lock:
@@ -220,51 +216,24 @@ class WanRuntime:
         return connect_code.encode(urls, self.cfg.get("relay_key") or "", fp=fp) if urls else ""
 
     def rotate_relay_key(self) -> dict:
-        """공용 키를 무작위로 새로 만들어 안내 서버를 다시 시작하고(기존 키는 즉시 무효 · 연결 중인 세션은 끊김) Git 저장소가 있으면 올린다.
-        → {"key", "code", "published", "error"}  — Git 에 못 올렸으면 error 에 이유가 있고 곧 다시 시도한다"""
+        """'새로고침' 버튼: 공용 키를 무작위로 새로 만들어 안내 서버를 다시 시작하고(기존 키는 즉시 무효 · 연결 중인 세션은 끊김)
+        Git 저장소가 설정되어 있으면 새 접속 정보를 올린다.  Git 에는 **사람이 이 버튼(또는 '올리기')을 눌렀을 때만** 올라간다 — 자동으로는 올리지 않는다.
+        → {"key", "code", "published", "error"}  (Git 에 못 올렸으면 error 에 이유가 있고, 복구된 뒤 '올리기'로 다시 올리면 된다)"""
         with self._rot_lock:
-            self.cfg.update(relay_key=connect_code.new_key(), relay_rotated_on=self._today().isoformat())
+            self.cfg.update(relay_key=connect_code.new_key())
             if self.relay_supervisor is not None:
                 self.restart_relay()
             result = {"key": self.cfg.get("relay_key"), "code": self.relay_code(), "published": False, "error": ""}
-            self._publish_pending = bool((self.cfg.get("git_source") or "").strip())
-            if self._publish_pending:
-                self._publish_pending_try(result)
+            source = (self.cfg.get("git_source") or "").strip()
+            if source:
+                try:
+                    self.git_publish(source, result["code"])
+                    result["published"] = True
+                except gitsync.GitError as e:
+                    result["error"] = str(e)
+                    self._set_git("error", f"올리기 실패 — {e}")
             self.log("[WAN] 접속 코드를 새로 만들었습니다" + (" (Git 에 올림)" if result["published"] else ""))
             return result
-
-    def _publish_pending_try(self, result=None) -> dict:
-        result = result if result is not None else {"published": False, "error": ""}
-        try:
-            self.git_publish(self.cfg.get("git_source"), self.relay_code())
-            result.update(published=True, error="")
-            self._publish_pending = False
-        except gitsync.GitError as e:
-            result.update(published=False, error=str(e))
-            self._set_git("error", f"올리기 실패 — {e}")
-        return result
-
-    def _today(self):
-        return datetime.date.today()
-
-    def _maybe_rotate(self):
-        """매일 0시(자정)가 지난 뒤 처음 확인할 때 한 번 키를 새로 만든다 (그 시각에 꺼져 있었다면 다시 켜질 때).
-        Git 저장소가 없으면 새 키를 나눠 줄 방법이 없으니 하지 않는다"""
-        if not (self.wan_on() and self.cfg.get("relay_host") and self.cfg.get("relay_rotate")
-                and (self.cfg.get("git_source") or "").strip()):
-            return
-        today = self._today().isoformat()
-        done = self.cfg.get("relay_rotated_on")
-        if not done:
-            self.cfg.update(relay_rotated_on=today)          # 처음 켠 날은 건너뛰고 내일 0시부터
-        elif done != today:
-            self.rotate_relay_key()
-        elif self._publish_pending:
-            self._publish_pending_try()                       # 어제 새 키를 못 올렸다면 다시 시도
-
-    def _rotate_loop(self, stop):
-        while not stop.wait(ROTATE_TICK):
-            self._safely("접속 코드 자동 갱신", self._maybe_rotate)
 
     # ── 현장 모드 (에이전트 프로세스) ──
     def set_field_mode(self, enabled: bool):

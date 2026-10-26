@@ -15,6 +15,7 @@ import secrets
 import socket
 import threading
 import time
+from concurrent.futures import TimeoutError as FutureTimeout
 
 from . import protocol as P
 from . import tls
@@ -30,6 +31,9 @@ DENY_TEXT = {
     "bad_sid":  "잘못된 요청입니다",
     "weak_code": "이 현장 PC 는 기본 코드(공용 키 aurora-wan)라 인터넷에서는 접속할 수 없습니다 — 현장 PC 에서 접근 코드를 정하세요",
 }
+
+OLD_RELAY_TEXT = ("중계 PC 가 응답하지 않습니다 — 중계 PC 의 AuroraClient 가 옛 버전이면 이 기능을 모릅니다. "
+                  "중계 PC 의 프로그램을 새 버전으로 업데이트한 뒤 다시 해 보세요")
 
 RELAY_DENY_TEXT = {
     "locked": "공용 키를 여러 번 틀려 이 PC 의 접속이 5분 동안 막혔습니다",
@@ -132,6 +136,7 @@ class WanClient:
         self._q = 0
         self._main_task = None
         self.direct_override = None    # 시험용: False 면 직접 연결을 건너뜀
+        self.relay_caps: set = set()   # 연결된 안내 서버가 지원하는 기능 (옛 서버는 비어 있음)
 
     # ── 시작/종료 ──
     def start(self):
@@ -194,6 +199,7 @@ class WanClient:
                         raise P.WanDenied(RELAY_DENY_TEXT.get(first.get("reason"), "안내 서버 키가 맞지 않습니다"))
                     tls.remember_relay_pin(self.cfg, ws)
                     self._ws = ws
+                    self.relay_caps = set(first.get("caps") or [])
                     self.agents = first.get("agents", [])
                     self._set_state("연결됨")
                     self._changed("agents")
@@ -268,13 +274,22 @@ class WanClient:
 
     def forget_agent(self, agent_id: str, timeout: float = 10) -> None:
         """꺼져 있는 현장을 중계 PC 의 목록에서 지운다.  켜져 있거나 모르는 현장이면 예외"""
+        if self.state == "연결됨" and "forget" not in self.relay_caps:
+            raise P.WanError(OLD_RELAY_TEXT)
+
         async def _go():
             self._q += 1
             q = self._q
             fut = self._replies[q] = self._loop.create_future()
-            await self._send({"t": "forget", "q": q, "id": agent_id})
-            return await asyncio.wait_for(fut, timeout)
-        reply = self._run(_go(), timeout=timeout + 2)
+            try:
+                await self._send({"t": "forget", "q": q, "id": agent_id})
+                return await asyncio.wait_for(fut, timeout)
+            finally:
+                self._replies.pop(q, None)
+        try:
+            reply = self._run(_go(), timeout=timeout + 2)
+        except (asyncio.TimeoutError, TimeoutError, FutureTimeout):
+            raise P.WanError(OLD_RELAY_TEXT) from None
         if reply.get("t") == "err":
             reason = reply.get("reason")
             raise P.WanError("켜져 있는 현장은 지울 수 없습니다 — 현장 PC 를 끈 뒤 지우세요" if reason == "online"

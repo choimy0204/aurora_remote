@@ -432,3 +432,24 @@ def test_offline_agent_can_be_forgotten_and_online_one_cannot(world):
     eventually(lambda: world.entry() is None, msg="목록에서 사라짐")
     with pytest.raises(P.WanError, match="이미 없는"):
         world.client.forget_agent(world.agent_id)
+
+
+def test_forget_against_old_relay_fails_fast_with_clear_message(world):
+    world.agent.stop()
+    eventually(lambda: not world.entry()["online"])
+    world.client.relay_caps = set()                                  # 옛 안내 서버(기능 목록을 안 보냄) 흉내
+    with pytest.raises(P.WanError, match="새 버전으로 업데이트"):
+        world.client.forget_agent(world.agent_id)
+
+
+def test_forget_times_out_with_clear_message_when_relay_never_answers(world, monkeypatch):
+    world.agent.stop()
+    eventually(lambda: not world.entry()["online"])
+
+    async def silent(self, ws, data):
+        return None
+    monkeypatch.setattr(type(world.relay.server), "_forget", silent)
+    world.client.relay_caps = {"forget"}
+    with pytest.raises(P.WanError, match="응답하지 않습니다"):
+        world.client.forget_agent(world.agent_id, timeout=0.5)
+    assert world.client._replies == {}                               # 대기 항목이 남지 않음

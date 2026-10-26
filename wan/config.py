@@ -67,8 +67,6 @@ DEFAULTS = {
     "git_source":   "",       # 접속 정보를 주고받는 사내 Git 저장소 주소 (비어 있으면 사용 안 함)
     "git_file":     "aurora_wan.conn",   # 저장소 안의 접속 정보 파일 경로
     "git_branch":   "",       # 비워 두면 저장소의 기본 브랜치
-    "relay_rotate": True,     # 중계 PC: 매일 0시(자정)에 공용 키를 새로 만들어 Git 에 올림 (Git 저장소가 있을 때만 동작)
-    "relay_rotated_on": "",   # 마지막으로 키를 새로 만든 날짜(YYYY-MM-DD)
     "conn_hash":    "",       # 마지막으로 적용한 설정 파일(.conn) 내용의 지문 — 같은 파일을 매번 다시 적용하지 않으려고
 }
 
