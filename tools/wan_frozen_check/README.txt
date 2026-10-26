@@ -11,5 +11,6 @@ WAN 번들 점검 (Windows 빌드 PC 에서 1회)
      연결 방식: relay  | {'hostname': 'FROZEN-FIELD', ...}
      주소 접속: direct | {'hostname': 'FROZEN-FIELD', ...}
      FROZEN SELFTEST OK
+   (기본 AuroraClient 빌드는 aiortc 를 빼서 직접 연결 없이 중계 · 주소 접속 · 암호화만 쓴다 — 그 구성에서는 첫 줄이 aiortc 사용 가능: False 이고 연결 방식이 relay.)
    direct 가 아니라 실패하면 aiortc/av 번들 문제 — AuroraClient.exe 에서도 직접 연결은 안 되고 비상 중계만 동작한다.
    (Linux 에서 같은 spec 으로 확인한 결과: 정상 동작, 실행 파일 크기 59.9MB, 같은 제외 목록의 빈 프로그램은 7.1MB)

@@ -134,7 +134,7 @@ Linux 에서 Windows 전용 부분을 `tests/winshim.py` 로 흡수해 **실제 
 확인된 것: Python 3.14 용 Windows(win_amd64) 휠이 `aiortc`·`av`·`pylibsrtp`·`cryptography`·`google-crc32c`·`websockets`·`cffi` 등 의존성 전부에 존재한다(조회 결과).
 
 ### 알려진 사항
-- **exe 크기**: WAN 스택(aiortc·`av`(FFmpeg) 등)이 exe에 **약 53MB**를 더한다(같은 제외 목록으로 빈 프로그램 7.1MB → 59.9MB, Linux 빌드 측정; Windows 휠 압축 해제 합계 약 85MB). 기존 `AuroraClient.exe`가 약 64MB이므로 100MB를 넘길 것으로 예상(공정망 업데이트 복사량 증가). aiortc 없이 빌드하면 비상 중계만 동작.
+- **exe 크기(v1.3 이후 기본 빌드는 aiortc 제외 → Wine 빌드 19.5MB, LAN 전용 16.8MB + 약 2.7MB)**. 아래는 aiortc 를 넣었을 때의 옛 측정: WAN 스택(aiortc·`av`(FFmpeg) 등)이 exe에 **약 53MB**를 더한다(같은 제외 목록으로 빈 프로그램 7.1MB → 59.9MB, Linux 빌드 측정; Windows 휠 압축 해제 합계 약 85MB). 기존 `AuroraClient.exe`가 약 64MB이므로 100MB를 넘길 것으로 예상(공정망 업데이트 복사량 증가). aiortc 없이 빌드하면 비상 중계만 동작.
 - **직접 연결 전송 속도**: aiortc의 SCTP가 순수 파이썬이라 이 환경에서 약 3.5MB/s(≈28Mbps)에서 CPU가 병목이다. 같은 조건에서 비상 중계는 26MB/s. 화면 원격에는 충분하지만 큰 파일은 중계가 더 빠를 수 있다.
 - (v1.2 이전) 통신은 `ws://` 평문이었다 → v1.2 에서 TLS(`wss://`) + 인증서 지문 고정으로 바꿨다(아래). 안내 서버가 '설정 보내기'로 받은 접근 코드를 평문으로 보관하는 점은 그대로.
 

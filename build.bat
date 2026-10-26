@@ -14,9 +14,9 @@ rem 패키지가 없을 때만 설치 (매번 pip 확인하던 시간 절약)
 )
 
 rem WAN remote packages (optional) - bundled only when installed; the build works without them
-"%PY%" -c "import aiortc, websockets" >nul 2>&1 || (
+"%PY%" -c "import websockets, cryptography" >nul 2>&1 || (
     echo Installing WAN packages - optional...
-    "%PY%" -m pip install aiortc websockets --quiet
+    "%PY%" -m pip install websockets cryptography --quiet
 )
 
 rem dist 에서 실행 중인 exe 만 종료 + 버전이 바뀌었으면 dist\latest → dist\old\v이전버전 으로 보관

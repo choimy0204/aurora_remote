@@ -11,6 +11,9 @@ EXCLUDES = [
     # PyInstaller 가 이 목록에 '__main__' 을 직접 추가해 캐시에 저장하므로 미리 넣어둔다
     # (없으면 매 빌드마다 'excludes changed' 로 캐시가 무효화되어 전체 재분석)
     '__main__',
+    # 직접 연결(P2P)용 aiortc 묶음 — 기본이 '항상 중계 PC 경유'라 쓰지 않으며, 빼면 exe 가 약 28MB 작아진다 (47MB → 19MB)
+    # 직접 연결이 꼭 필요하면 이 줄을 지우고 hiddenimports 에 aiortc 를 되돌려 빌드 (wan_config 의 force_relay=false)
+    'aiortc', 'av', 'aioice', 'pylibsrtp', 'google_crc32c', 'pyee', 'dns', 'ifaddr',
 ]
 
 
@@ -25,7 +28,7 @@ a = Analysis(
                    'wan.agent', 'wan.server', 'wan.bridge', 'wan.mux', 'wan.links', 'wan.config', 'wan.usage',
                    'wan.protocol', 'wan.relay_run', 'wan.netutil', 'wan.direct', 'wan.connfile', 'wan.connect_code',
                    'websockets.asyncio.client', 'websockets.asyncio.server',
-                   'aiortc', 'aioice', 'pylibsrtp', 'pyee', 'dns', 'ifaddr', 'google_crc32c'],
+                   'cryptography'],   # cryptography: 암호화(wss) 인증서 만들기
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

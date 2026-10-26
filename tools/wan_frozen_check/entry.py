@@ -50,7 +50,10 @@ def main():
     print("aiortc 사용 가능:", links.direct_available())
     s = cl.open_session(aid, "77")
     print("연결 방식:", s.mode, "|", s.request("GET", "/info").json())
-    assert s.mode == "direct", "frozen 에서 직접 연결이 안 됨 (aiortc 번들 문제)"
+    if links.direct_available():
+        assert s.mode == "direct", "frozen 에서 직접 연결이 안 됨 (aiortc 번들 문제)"
+    else:
+        assert s.mode == "relay", "aiortc 없는 구성은 항상 중계여야 함"
     s.close()
     cl.direct_override = False
     s = cl.open_session(aid, "77")
