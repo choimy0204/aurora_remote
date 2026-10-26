@@ -72,10 +72,6 @@ DEFAULTS = {
     "conn_hash":    "",       # 마지막으로 적용한 설정 파일(.conn) 내용의 지문 — 같은 파일을 매번 다시 적용하지 않으려고
 }
 
-# 안내 서버가 원격으로 바꿀 수 있는 항목
-REMOTE_KEYS = ("name", "access_code", "max_quality", "allow_files")
-
-
 def new_agent_id() -> str:
     return secrets.token_hex(6)
 

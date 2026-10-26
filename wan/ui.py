@@ -18,6 +18,13 @@ ctx (aurora_client 가 넘겨 줌)
                       (선택) 이 PC 에서 안내 서버 운영 — relay_available 이 거짓이면 그 칸을 만들지 않는다
     direct            (선택) wan.direct.DirectClient — 있어야 주소로 접속 가능
     agent_info        (선택) () -> {"direct": off|listening|busy, "online": bool}  에이전트가 적어 둔 상태
+    wan_enabled / set_wan_enabled
+                      (선택) WAN 전체 스위치 — 없으면 항상 켜짐으로 보고 스위치를 만들지 않는다
+    relay_fp / direct_fp   (선택) 이 PC 의 안내 서버 · 주소 접속 인증서 지문 (있으면 접속 정보에 넣고 wss:// 로 안내)
+    git_sync / git_publish / git_state / set_git_source / rotate_relay_key
+                      (선택) 사내 Git 로 접속 정보 주고받기 · 접속 코드 새로고침
+    conn_dirs         (선택) 접속 설정 파일(aurora_wan.conn)을 찾는 폴더들 (첫 번째가 저장 기본 위치)
+    public_address / reachable   (선택, 시험용) 공인 주소 질의 · 현장 주소 도달 확인 대체
     open_remote       (session, agent_dict) -> None   원격 창 열기 (화면 스레드에서 불림)
     px                (int) -> int               (선택, 기본: 그대로)
     log               (str) -> None              (선택) 앱 로그
