@@ -453,3 +453,48 @@ def test_forget_times_out_with_clear_message_when_relay_never_answers(world, mon
     with pytest.raises(P.WanError, match="응답하지 않습니다"):
         world.client.forget_agent(world.agent_id, timeout=0.5)
     assert world.client._replies == {}                               # 대기 항목이 남지 않음
+
+
+# ── 항상 중계 PC 를 거친다 (기본) ──
+def test_default_is_always_through_the_relay_without_trying_direct(tmp_path):
+    from wan_helpers import World
+    w = World(tmp_path, force_relay=True)
+    try:
+        import time
+        t0 = time.monotonic()
+        s = w.client.open_session(w.agent_id, "1234")
+        assert s.mode == "relay" and time.monotonic() - t0 < 3                     # 직접 연결을 기다리지 않아 빠르다
+        assert s.request("GET", "/info").json()["hostname"] == "FAKE-PC"
+        s.close()
+    finally:
+        w.close()
+
+
+def test_new_user_config_defaults_to_relay_only(tmp_path):
+    from wan.config import WanConfig
+    assert WanConfig(str(tmp_path)).get("force_relay") is True
+
+
+# ── 중계 PC 도 원격 대상이 되려면 자기 안내 서버 목록에 올라야 한다 ──
+def test_relay_pc_registers_itself_as_a_field_pc_without_any_address(tmp_path):
+    from wan_helpers import RelayRunner, AgentRunner, FakeLocal, World
+    relay = RelayRunner(str(tmp_path / "relay"), "k")
+    local = FakeLocal()
+    ag = AgentRunner(str(tmp_path / "relaypc"), "", local.port, name="중계PC", code="자기-코드", key="k")
+    ag.cfg.update(relay_url="", relay_host=True, relay_port=relay.port)        # 이 PC 가 중계 PC (접속할 주소는 비어 있음)
+    try:
+        from wan.client import WanClient
+        from wan.config import WanConfig
+        ucfg = WanConfig(str(tmp_path / "user"))
+        ucfg.update(relay_url=relay.url, relay_key="k", stun="", force_relay=True)
+        client = WanClient(ucfg, None, "2.16.0", log=lambda m: None)
+        client.start()
+        eventually(lambda: any(a["id"] == ag.agent_id and a["online"] for a in client.agents), 15,
+                   msg="중계 PC 가 자기 목록에 현장으로 나타남")
+        entry = next(a for a in client.agents if a["id"] == ag.agent_id)
+        s = client.open_session(ag.agent_id, entry["code"])
+        assert s.mode == "relay" and s.request("GET", "/info").status_code == 200
+        s.close()
+        client.stop()
+    finally:
+        ag.stop(); local.stop(); relay.close()

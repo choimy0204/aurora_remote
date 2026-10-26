@@ -61,7 +61,7 @@ def run_agent(a):
 
 def run_user(a):
     cfg = WanConfig(a.dir)
-    cfg.update(relay_url=a.relay, stun=a.stun, direct_timeout=a.direct_timeout)
+    cfg.update(relay_url=a.relay, stun=a.stun, direct_timeout=a.direct_timeout, force_relay=False)
     client = WanClient(cfg, None, "2.16.0", log=lambda m: print(f"[user {time.strftime('%H:%M:%S')}] {m}", flush=True))
     client.start()
     out = {"scenario": a.name}

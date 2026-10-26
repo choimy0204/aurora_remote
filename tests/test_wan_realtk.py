@@ -447,3 +447,33 @@ def test_checking_field_box_without_relay_info_asks_for_it_right_away(app, monke
     tab._connect_win = None
     tab._field_toggled()                                                              # 이미 중계 PC 정보가 있으면 묻지 않음
     assert tab._connect_win is None
+
+
+def test_target_pc_hides_the_list_of_pcs_to_connect_to(app):
+    """이 PC 를 원격 대상으로 쓰면 '현장 PC' 접속 목록 칸은 사라지고, 끄면 다시 보인다 (헷갈리지 않게)"""
+    tab = app._wan_tab
+    app._select_tab(4)
+    tab.set_field_enabled(False)
+    app.root.update()
+    assert tab.list_card.winfo_ismapped() and not tab.field_box.winfo_ismapped()
+    tab.set_field_enabled(True)
+    app.root.update()
+    assert not tab.list_card.winfo_ismapped() and tab.field_box.winfo_ismapped()
+    assert tab.list_card.winfo_y() < 10000 and tab.field_card.winfo_ismapped()
+    tab.set_field_enabled(False)
+    app.root.update()
+    assert tab.list_card.winfo_ismapped()
+    assert tab.list_card.winfo_y() < tab.field_card.winfo_y()                     # 목록이 다시 위쪽 제자리에
+
+
+def test_target_pc_can_still_change_its_relay_pc(app, monkeypatch):
+    tab = app._wan_tab
+    app._select_tab(4)
+    tab.set_field_enabled(True)
+    app.root.update()
+    shown = []
+    monkeypatch.setattr(tab, "_connect_dialog", lambda prefill="": shown.append(prefill))
+    app._wan.cfg.update(relay_url="ws://h:1")
+    btn = [w for w in _all_children(tab.field_box) if w.winfo_class() == "Button" and w.cget("text") == "중계 PC 변경"][0]
+    btn.invoke()
+    assert shown == ["ws://h:1"]

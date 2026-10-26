@@ -27,7 +27,7 @@ from .usage import fmt_bytes
 SAVER_NAME = "절약"          # 이 화질일 때만 화면 크기를 제한
 REFRESH_MS = 1000            # 정보 줄 갱신 간격
 
-KIND_TEXT = {"direct": "직접 연결", "relay": "비상 중계"}
+KIND_TEXT = {"direct": "직접 연결", "relay": "중계 PC 경유"}
 RECONNECTING = "다시 연결 중…"
 
 

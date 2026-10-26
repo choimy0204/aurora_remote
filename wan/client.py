@@ -5,7 +5,7 @@
     WanClient.agents            켜져 있는 현장 목록
     WanClient.set_config(...)   현장 설정 보내기
     WanClient.open_session(...) 현장에 연결 → Session (request() 로 RemoteViewer · 반입/반출이 쓴다)
-- 연결은 직접 연결을 먼저 시도하고, direct_timeout 안에 안 되면 비상 중계로 넘어간다.
+- 연결은 기본으로 중계 PC 를 거친다 (force_relay).  force_relay 를 끄면 직접 연결을 먼저 시도하고, direct_timeout 안에 안 되면 중계로 넘어간다.
 - 중간에 끊기면 Session 이 스스로 다시 연결한다 (직접 → 중계 순).
 """
 
@@ -310,7 +310,10 @@ class WanClient:
 
     async def _establish(self, s: Session) -> Mux:
         """직접 연결을 먼저, 안 되면 비상 중계. 접속 코드가 틀리거나 현장이 꺼져 있으면 바로 실패"""
-        direct_ok = direct_available() if self.direct_override is None else self.direct_override
+        if self.direct_override is not None:
+            direct_ok = self.direct_override
+        else:
+            direct_ok = direct_available() and not self.cfg.get("force_relay")      # 기본: 항상 중계 PC 를 거친다
         if direct_ok:
             try:
                 return await self._direct(s)

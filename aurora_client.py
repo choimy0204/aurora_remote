@@ -4271,7 +4271,7 @@ class _WanTransferPane(_TransferPane):
                                      data=kw.pop("data", None), stream=kw.pop("stream", False), timeout=timeout)
 
     def _export_route_text(self) -> str:
-        kind = {"direct": "직접 연결", "relay": "비상 중계"}.get(self._session.mode, "연결 중")
+        kind = {"direct": "직접 연결", "relay": "중계 PC 경유"}.get(self._session.mode, "연결 중")
         return f"내 PC → 인터넷({kind}) → {self._dev['label']}"
 
 

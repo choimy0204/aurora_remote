@@ -91,7 +91,7 @@ class WanAgent:
         attempt = 0
         while not self._stop.is_set():
             self._reload_cfg()
-            if not self.cfg.get("relay_url"):                # 안내 서버 없이 주소 접속만 쓰는 PC — 조용히 기다림
+            if not self._relay_target()[0]:                  # 안내 서버 없이 주소 접속만 쓰는 PC — 조용히 기다림
                 await self._sleep(2.0)
                 continue
             started = time.monotonic()
@@ -117,15 +117,31 @@ class WanAgent:
         fn = getattr(self.cfg, "reload_if_changed", None)
         return bool(fn()) if fn else False
 
+    def _relay_target(self) -> tuple:
+        """접속할 안내 서버 → (주소, 인증서 지문).  정해 둔 주소가 없어도 이 PC 가 직접 안내 서버를 운영하는 중계 PC 라면
+        자기 안내 서버(127.0.0.1)에 붙는다 — 중계 PC 도 원격 대상이 되려면 자기 목록에 올라 있어야 한다"""
+        url = (self.cfg.get("relay_url") or "").strip()
+        if url:
+            return url, self.cfg.get("relay_fp") or ""
+        if self.cfg.get("relay_host"):
+            try:
+                port = int(self.cfg.get("relay_port") or 9100)
+            except (TypeError, ValueError):
+                port = 9100
+            fp = tls.cert_fingerprint(os.path.join(self.cfg.dir, "relay_data", "relay_cert.pem"))
+            return f"{'wss' if fp else 'ws'}://127.0.0.1:{port}", fp
+        return "", ""
+
     async def _connected_session(self):
         self._reload_cfg()                         # 화면에서 안내 서버 주소를 바꿨으면 다음 접속부터 따라감
-        url = self.cfg.get("relay_url")
+        url, pin = self._relay_target()
         if not url:                                          # 안내 서버 없이 주소 접속만 쓰는 PC — 조용히 기다림
             await asyncio.sleep(3)
             return
-        async with tls.open_ws(url, self.cfg.get("relay_fp"), max_size=2 ** 20, compression=None, ping_interval=20,
+        async with tls.open_ws(url, pin, max_size=2 ** 20, compression=None, ping_interval=20,
                                ping_timeout=20, open_timeout=10) as ws:
-            tls.remember_relay_pin(self.cfg, ws)
+            if self.cfg.get("relay_url"):
+                tls.remember_relay_pin(self.cfg, ws)
             self._ws = ws
             await ws.send(json.dumps({
                 "t": "hello", "role": "agent", "key": self.cfg.get("relay_key"), "id": self.cfg.ensure_id(),

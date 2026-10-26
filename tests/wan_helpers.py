@@ -344,7 +344,8 @@ class AgentRunner:
 class World:
     """서버 + 현장 + 가짜 로컬 서버 + 사용자 클라이언트"""
 
-    def __init__(self, tmp, code="1234", key="", direct_mode="normal", direct_timeout=4.0, update_dir=None):
+    def __init__(self, tmp, code="1234", key="", direct_mode="normal", direct_timeout=4.0, update_dir=None,
+                 force_relay=False):
         from wan.client import WanClient
         from wan.config import WanConfig
         from wan.usage import UsageStore
@@ -354,7 +355,8 @@ class World:
         self.agent = AgentRunner(os.path.join(self.tmp, "field"), self.relay.url, self.local.port,
                                  code=code, key=key, direct_mode=direct_mode)
         self.user_cfg = WanConfig(os.path.join(self.tmp, "user"))
-        self.user_cfg.update(relay_url=self.relay.url, relay_key=key, stun="", direct_timeout=direct_timeout)
+        self.user_cfg.update(relay_url=self.relay.url, relay_key=key, stun="", direct_timeout=direct_timeout,
+                             force_relay=force_relay)
         self.usage = UsageStore(os.path.join(self.tmp, "user", "wan_usage.json"))
         self.client = WanClient(self.user_cfg, self.usage, "2.16.0", log=lambda m: None)
         self.client.start()

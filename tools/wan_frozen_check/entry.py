@@ -43,7 +43,7 @@ def main():
     aloop = loop_thread()
     agent_ = WanAgent(fcfg, local.server_address[1], lambda: "k", "2.16.0", lambda m: None)
     asyncio.run_coroutine_threadsafe(agent_.run(), aloop)
-    ucfg = WanConfig(os.path.join(tmp, "user")); ucfg.update(relay_url=url, stun="", direct_timeout=5)
+    ucfg = WanConfig(os.path.join(tmp, "user")); ucfg.update(relay_url=url, stun="", direct_timeout=5, force_relay=False)
     cl = WanClient(ucfg, None, "2.16.0", log=lambda m: None); cl.start()
     wait(lambda: cl.state == "연결됨"); wait(lambda: any(a["online"] for a in cl.agents))
     aid = cl.agents[0]["id"]

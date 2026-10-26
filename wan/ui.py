@@ -893,7 +893,7 @@ class WanTabController:
         parts = [text]
         if info.get("direct") == "listening":
             parts.append("주소 접속 대기")
-        if (self.cfg.get("relay_url") or "").strip():
+        if (self.cfg.get("relay_url") or "").strip() or self.cfg.get("relay_host"):
             parts.append("중계 연결됨" if info.get("online") else "중계 연결 중")
         return " · ".join(parts), "ok"
 
@@ -917,7 +917,8 @@ class WanTabController:
 
     def needs_relay_info(self) -> bool:
         """중계 PC 에 붙을 방법(주소 · Git 저장소)이 아직 하나도 없는지"""
-        return not ((self.cfg.get("relay_url") or "").strip() or (self.cfg.get("git_source") or "").strip())
+        return not ((self.cfg.get("relay_url") or "").strip() or (self.cfg.get("git_source") or "").strip()
+                    or self.cfg.get("relay_host"))
 
     def field_toggled(self, enabled: bool):
         """'이 PC를 원격 대상으로 사용' 체크가 바뀜 → 설정 저장 + 에이전트 시작/중지 (작업 스레드)"""
@@ -1474,6 +1475,7 @@ class WanTab(NullUI):
     def _build_list(self):
         app, tk, ttk, px = self.app, self.tk, self.ttk, self.px
         box = self._card_body()
+        self.list_card = box.master                # 원격 대상 PC 로 쓸 때는 이 칸(접속할 PC 목록)을 숨긴다
         head = tk.Frame(box, bg=app.PANEL)
         head.pack(fill="x", pady=(0, px(6)))
         app._section_title(head, "현장 PC").pack(side="left")
@@ -1524,6 +1526,7 @@ class WanTab(NullUI):
     def _build_field(self):
         app, tk, px = self.app, self.tk, self.px
         box = self._card_body()
+        self.field_card = box.master
         top = tk.Frame(box, bg=app.PANEL)
         top.pack(fill="x")
         self.enabled_var = tk.BooleanVar(value=bool(self.ctx["cfg"].get("enabled")))
@@ -1548,9 +1551,15 @@ class WanTab(NullUI):
         self.code_entry.bind("<Return>", lambda e: self._apply_code())
         self.code_entry.bind("<FocusOut>", lambda e: self._apply_code())
         app._tip(self.code_entry, "이 PC 에 접속하려면 입력해야 하는 코드. 따로 정하지 않으면 중계 PC 의 공용 키가 쓰입니다")
-        self.id_lbl = tk.Label(self.field_box, text="", font=app.FONT_SMALL, fg=app.TEXT_DIM, bg=app.PANEL, anchor="w",
+        info = tk.Frame(self.field_box, bg=app.PANEL)
+        info.pack(fill="x", pady=(px(4), 0))
+        self.id_lbl = tk.Label(info, text="", font=app.FONT_SMALL, fg=app.TEXT_DIM, bg=app.PANEL, anchor="w",
                                cursor="hand2")
-        self.id_lbl.pack(fill="x", pady=(px(4), 0))
+        self.id_lbl.pack(side="left")
+        relay_btn = app._button(info, "중계 PC 변경", "secondary", lambda: self._connect_dialog(self._current_relay()),
+                                small=True)
+        relay_btn.pack(side="right")
+        app._tip(relay_btn, "이 PC 가 접속할 중계 PC 의 접속 정보를 바꿉니다")
         self.id_lbl.bind("<Button-1>", lambda e: self._copy_id())
         app._tip(self.id_lbl, "클릭하면 이 PC 의 ID 를 복사합니다")
         self.field_warn_lbl = tk.Label(self.field_box, text="", font=app.FONT_SMALL, fg=app.RED, bg=app.PANEL,
@@ -1558,10 +1567,13 @@ class WanTab(NullUI):
         self._field_layout()
 
     def _field_layout(self):
+        """이 PC 를 원격 대상으로 쓰면 '접속할 PC 목록' 칸은 필요 없으니 숨기고(헷갈리지 않게), 주소 · 접근 코드 칸을 보인다"""
         if self.enabled_var.get():
+            self.list_card.pack_forget()
             self.field_box.pack(fill="x")
         else:
             self.field_box.pack_forget()
+            self.list_card.pack(fill="x", pady=(0, self.px(8)), before=self.field_card)
 
     def _build_relay(self):
         """이 PC 가 중계 PC 일 때 — 평소에는 접어 두고, 버튼 한 번으로 안내 서버를 세팅하고 다른 PC 에 줄 접속 정보를 만든다"""

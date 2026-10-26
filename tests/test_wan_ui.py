@@ -172,14 +172,14 @@ def test_fmt_speed_and_kind_text():
     assert wv.fmt_speed(2048) == "2 KB/s"
     assert wv.fmt_speed(0) == "0 KB/s"
     assert wv.kind_text("direct") == "직접 연결"
-    assert wv.kind_text("relay") == "비상 중계"
+    assert wv.kind_text("relay") == "중계 PC 경유"
     assert wv.kind_text("") == "다시 연결 중…"
     assert wv.kind_text("direct", closed=True) == "연결 닫힘"
 
 
 def test_info_line():
     line = wv.info_line("relay", 3 * 1024 * 1024 + 104858, 85 * 1024, "절약")
-    assert line == "비상 중계 · 이번 연결 3.1 MB · 85 KB/s · 절약"
+    assert line == "중계 PC 경유 · 이번 연결 3.1 MB · 85 KB/s · 절약"
 
 
 def test_cap_frame_params_caps_without_mutating():

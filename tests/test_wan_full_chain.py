@@ -65,7 +65,7 @@ def make_chain(tmp_path, monkeypatch, real_host=False):
     from wan.client import WanClient
     from wan.config import WanConfig
     ucfg = WanConfig(str(tmp_path / "user"))
-    ucfg.update(relay_url=relay.url, stun="", direct_timeout=4.0)
+    ucfg.update(relay_url=relay.url, stun="", direct_timeout=4.0, force_relay=False)
     client = WanClient(ucfg, None, "2.16.0", log=lambda m: None)
     client.start()
     eventually(lambda: client.state == "연결됨")

@@ -54,7 +54,8 @@ DEFAULTS = {
     "allow_files":  True,     # 파일 반입/반출 허용
     "config_rev":   0,        # 안내 서버에서 받아 적용한 설정 번호
     "stun":         DEFAULT_STUN,
-    "direct_timeout": 6.0,    # 직접 연결을 기다리는 시간(초) — 넘으면 비상 중계로
+    "force_relay":  True,     # 항상 중계 PC 를 거쳐 원격 (직접 연결 시도 안 함). False 면 직접 연결(P2P)을 먼저 시도하고 안 되면 중계
+    "direct_timeout": 6.0,    # (force_relay 가 꺼져 있을 때) 직접 연결을 기다리는 시간(초) — 넘으면 중계로
     "auto_update":  True,
     "relay_host":   False,    # 이 PC 에서 안내 서버(중계)도 운영할지 — 공용 키는 relay_key 를 그대로 씀
     "relay_port":   9100,     # 안내 서버가 받을 포트
