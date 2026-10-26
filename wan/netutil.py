@@ -74,6 +74,15 @@ def _parse_stun(data: bytes, tid: bytes) -> str | None:
     return None
 
 
+def is_public_ip(text) -> bool:
+    """인터넷(공인) 주소인지.  사설망 · 루프백 · 링크 로컬 · 공유 주소(100.64/10) 이거나 알 수 없으면 False"""
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(text).split("%")[0]).is_global
+    except ValueError:
+        return False
+
+
 def firewall_command(port: int) -> str:
     return (f'netsh advfirewall firewall add rule name="{FIREWALL_RULE} {port}" dir=in action=allow '
             f"protocol=TCP localport={port}")

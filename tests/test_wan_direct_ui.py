@@ -35,7 +35,7 @@ def test_classify_target(text, kind):
 def test_add_address_connects_with_shared_key_default_and_remembers_target():
     ctl, ctx, ui, direct = direct_ctl()
     assert ctl.add_connection("192.168.0.5") is True
-    direct.open_session.assert_called_once_with("192.168.0.5:9102", "공용키", "")
+    direct.open_session.assert_called_once_with("192.168.0.5:9102", "공용키", "", "")
     saved = ctx["cfg"].get("direct_targets")["192.168.0.5:9102"]
     assert saved["code"] == "공용키" and saved["name"] == "현장이름"            # 현장이 알려 준 이름 저장
     ctx["open_remote"].assert_called_once()
@@ -49,7 +49,7 @@ def test_add_address_connects_with_shared_key_default_and_remembers_target():
 def test_add_address_uses_typed_code_and_port():
     ctl, ctx, ui, direct = direct_ctl()
     ctl.add_connection("10.0.0.9:7000", "내코드")
-    direct.open_session.assert_called_once_with("10.0.0.9:7000", "내코드", "")
+    direct.open_session.assert_called_once_with("10.0.0.9:7000", "내코드", "", "")
     assert ctx["cfg"].get("direct_targets")["10.0.0.9:7000"]["code"] == "내코드"
 
 
@@ -86,7 +86,7 @@ def test_add_direct_code_picks_reachable_address_and_connects(monkeypatch):
     monkeypatch.setattr(cc, "pick_reachable", lambda urls, timeout=2.0: urls[1])
     code = cc.encode_direct(["ws://203.0.113.5:9102", "ws://192.168.0.5:9102"], "현장코드")
     assert ctl.add_connection(code) is True
-    direct.open_session.assert_called_once_with("192.168.0.5:9102", "현장코드", "")
+    direct.open_session.assert_called_once_with("192.168.0.5:9102", "현장코드", "", "")
 
 
 def test_add_direct_code_broken_shows_error():
@@ -100,7 +100,7 @@ def test_quick_connect_saved_target_uses_saved_code_without_asking():
     ctl, ctx, ui, direct = direct_ctl()
     ctx["cfg"].d["direct_targets"] = {"10.0.0.5:9102": {"name": "사무실", "code": "저장코드", "last": 0}}
     assert ctl.quick_connect("d:10.0.0.5:9102") is True
-    direct.open_session.assert_called_once_with("10.0.0.5:9102", "저장코드", "사무실")
+    direct.open_session.assert_called_once_with("10.0.0.5:9102", "저장코드", "사무실", "")
     assert not ui.all("ask_code")
 
 
@@ -109,7 +109,7 @@ def test_quick_connect_saved_target_wrong_code_asks_once_and_saves_new():
     ctx["cfg"].d["direct_targets"] = {"10.0.0.5:9102": {"name": "사무실", "code": "옛코드", "last": 0}}
     calls = []
 
-    def open_session(address, code, name):
+    def open_session(address, code, name, pin=""):
         calls.append(code)
         if code != "새코드":
             raise WanDenied("접근 코드가 맞지 않습니다")
@@ -192,7 +192,7 @@ def test_field_address_text_and_direct_code(monkeypatch):
     ctl._public = "211.1.2.3"
     assert ctl.field_address_text() == "192.168.0.5:9555  ·  공인 211.1.2.3:9555"
     urls, code = cc.decode_direct(ctl.field_direct_code())
-    assert urls == ["ws://192.168.0.5:9555", "ws://10.1.1.1:9555", "ws://211.1.2.3:9555"] and code == "공용키"
+    assert urls == ["wss://192.168.0.5:9555", "wss://10.1.1.1:9555", "wss://211.1.2.3:9555"] and code == "공용키"
     ctx["cfg"].d["access_code"] = "내코드"
     assert cc.decode_direct(ctl.field_direct_code())[1] == "내코드"
 
@@ -383,3 +383,64 @@ def test_field_on_does_not_touch_firewall_off_windows(monkeypatch):
     ctl, ctx, ui, _ = direct_ctl()
     monkeypatch.setattr(wui, "open_firewall", MagicMock(side_effect=AssertionError("부르면 안 됨")))
     ctl.field_toggled(True)
+
+
+# ── 인증서 지문 ──
+def test_relay_code_uses_wss_and_fingerprint_when_encryption_is_available(monkeypatch):
+    ctl, ctx, ui, _ = direct_ctl(relay_port=9100, relay_external="203.0.113.5")
+    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.140"])
+    assert cc.decode_full(ctl.relay_code()) == (["ws://203.0.113.5:9100", "ws://192.168.0.140:9100"], "공용키", "")
+    ctx["relay_fp"] = lambda: "ab" * 32
+    urls, key, fp = cc.decode_full(ctl.relay_code())
+    assert urls == ["wss://203.0.113.5:9100", "wss://192.168.0.140:9100"] and fp == "ab" * 32
+
+
+def test_address_connection_pins_saved_fingerprint_and_remembers_new_one():
+    ctl, ctx, ui, direct = direct_ctl()
+    ctx["cfg"].d["direct_targets"] = {"10.0.0.5:9102": {"name": "a", "code": "c", "last": 0, "fp": "aa" * 32}}
+    direct.open_session.return_value = SimpleNamespace(mode="direct", name="a", fp="aa" * 32)
+    ctl.quick_connect("d:10.0.0.5:9102")
+    assert direct.open_session.call_args.args[3] == "aa" * 32            # 저장해 둔 지문으로 고정해서 접속
+    ctl.add_connection("10.0.0.9", "c")                                   # 처음 보는 주소 — 지문 없이 접속하고 알려 준 지문을 기억
+    direct.open_session.return_value = SimpleNamespace(mode="direct", name="", fp="bb" * 32)
+    ctl.add_connection("10.0.0.7", "c")
+    assert ctx["cfg"].get("direct_targets")["10.0.0.7:9102"]["fp"] == "bb" * 32
+
+
+def test_direct_code_fingerprint_is_used_as_pin(monkeypatch):
+    ctl, ctx, ui, direct = direct_ctl()
+    monkeypatch.setattr(cc, "pick_reachable", lambda urls, timeout=2.0: urls[0])
+    ctl.add_connection(cc.encode_direct(["wss://192.168.0.5:9102"], "c", "cd" * 32))
+    assert direct.open_session.call_args.args[3] == "cd" * 32
+
+
+def test_pin_mismatch_is_shown_as_error_and_not_saved():
+    from wan.tls import PinMismatch, PIN_MISMATCH_TEXT
+    ctl, ctx, ui, direct = direct_ctl()
+    direct.open_session.side_effect = PinMismatch(PIN_MISMATCH_TEXT)
+    ctl.add_connection("10.0.0.9", "c")
+    assert "인증서" in ui.last("show_error")[1] and ctx["cfg"].get("direct_targets") == {}
+    assert not ctx["open_remote"].called
+
+
+def test_apply_server_forgets_old_fingerprint_only_when_address_changes():
+    ctl, ctx, ui, _ = direct_ctl(relay_url="wss://a:1", relay_fp="ab" * 32)
+    ctl.apply_server("wss://a:1", "k")
+    assert ctx["cfg"].d["relay_fp"] == "ab" * 32
+    ctl.apply_server("wss://b:1", "k")
+    assert ctx["cfg"].d["relay_fp"] == ""
+
+
+def test_import_relay_code_stores_fingerprint(monkeypatch):
+    ctl, ctx, ui, _ = direct_ctl()
+    monkeypatch.setattr(cc, "pick_reachable", lambda urls, timeout=2.0: urls[0])
+    ctx["client"] = MagicMock()
+    ctl.client = ctx["client"]
+    ctl.import_connection(cc.encode(["wss://10.0.0.1:9100"], "k9", fp="ef" * 32))
+    assert ctx["cfg"].d["relay_fp"] == "ef" * 32 and ctx["cfg"].d["relay_url"] == "wss://10.0.0.1:9100"
+
+
+def test_server_status_for_certificate_mismatch_is_bad():
+    ctl, ctx, ui, _ = direct_ctl(relay_url="wss://a:1")
+    ctx["client"].state = "인증서 불일치"
+    assert ctl.server_status() == ("● 인증서 불일치", "bad")

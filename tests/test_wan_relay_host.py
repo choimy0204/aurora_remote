@@ -26,8 +26,12 @@ def free_port() -> int:
 
 
 def health(port: int) -> bool:
+    """앱이 띄우는 안내 서버는 암호화(https)가 기본 — 자체 서명 인증서라 검사는 생략하고 응답만 본다"""
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as r:
+        with urllib.request.urlopen(f"https://127.0.0.1:{port}/health", timeout=1, context=ctx) as r:
             return r.read().strip() == b"ok"
     except Exception:
         return False
@@ -73,10 +77,12 @@ def test_clients_can_use_the_hosted_relay_with_key_only(host, tmp_path):
     r.set_relay_host(True)
     port = r.cfg.get("relay_port")
     eventually(lambda: health(port), 15)
+    fp = r.relay_fp()                                                   # 접속 정보에 들어갈 인증서 지문
+    assert len(fp) == 64
     good = WanConfig(str(tmp_path / "u1"))
-    good.update(relay_url=f"ws://127.0.0.1:{port}", relay_key=KEY, stun="")
+    good.update(relay_url=f"wss://127.0.0.1:{port}", relay_key=KEY, relay_fp=fp, stun="")
     bad = WanConfig(str(tmp_path / "u2"))
-    bad.update(relay_url=f"ws://127.0.0.1:{port}", relay_key="틀린키", stun="")
+    bad.update(relay_url=f"wss://127.0.0.1:{port}", relay_key="틀린키", relay_fp=fp, stun="")
     c1 = WanClient(good, None, "2.16.0", log=lambda m: None)
     c2 = WanClient(bad, None, "2.16.0", log=lambda m: None)
     c1.start(); c2.start()

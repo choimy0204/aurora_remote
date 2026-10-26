@@ -17,6 +17,7 @@ import threading
 import time
 
 from . import protocol as P
+from . import tls
 from .config import WanConfig
 from .links import DirectLink, RelayLink, direct_available, make_peer_connection, session_description, wait_open
 from .mux import Mux
@@ -27,6 +28,12 @@ DENY_TEXT = {
     "locked":   "접근 코드를 여러 번 틀려 잠시 막혔습니다 (1분 뒤 다시 시도)",
     "offline":  "현장 PC 가 꺼져 있거나 안내 서버에 연결되어 있지 않습니다",
     "bad_sid":  "잘못된 요청입니다",
+    "weak_code": "이 현장 PC 는 기본 코드(공용 키 aurora-wan)라 인터넷에서는 접속할 수 없습니다 — 현장 PC 에서 접근 코드를 정하세요",
+}
+
+RELAY_DENY_TEXT = {
+    "locked": "공용 키를 여러 번 틀려 이 PC 의 접속이 5분 동안 막혔습니다",
+    "default_key": "공용 키가 기본값(aurora-wan)이라 인터넷에서는 접속할 수 없습니다 — 중계 PC 에서 공용 키를 바꾸고 새 접속 정보를 받으세요",
 }
 
 
@@ -36,6 +43,7 @@ class Session:
     def __init__(self, client: "WanClient", agent_id: str, code: str, name: str = ""):
         self.client, self.agent_id, self.code, self.name = client, agent_id, code, name
         self.mux = None
+        self.pin = self.fp = ""        # 주소 접속: 고정해 둔 인증서 지문 / 이번에 확인한 지문
         self.mode = ""                 # direct | relay
         self.state = "연결 중"
         self.closed = False
@@ -166,7 +174,6 @@ class WanClient:
 
     # ── 안내 서버 연결 유지 ──
     async def _main(self):
-        from websockets.asyncio.client import connect
         attempt = 0
         while True:
             url = self.cfg.get("relay_url")
@@ -177,14 +184,15 @@ class WanClient:
                 continue
             try:
                 self._set_state("연결 중")
-                async with connect(url, max_size=2 ** 20, compression=None, ping_interval=20, ping_timeout=20,
-                                   open_timeout=10) as ws:
+                async with tls.open_ws(url, self.cfg.get("relay_fp"), max_size=2 ** 20, compression=None,
+                                       ping_interval=20, ping_timeout=20, open_timeout=10) as ws:
                     await ws.send(json.dumps({"t": "hello", "role": "user", "key": self.cfg.get("relay_key"),
                                               "who": socket.gethostname(), "ver": self.version}))
                     first = json.loads(await asyncio.wait_for(ws.recv(), 10))
                     if first.get("t") == "error":
                         self._set_state("키 불일치")
-                        raise P.WanDenied("안내 서버 키가 맞지 않습니다")
+                        raise P.WanDenied(RELAY_DENY_TEXT.get(first.get("reason"), "안내 서버 키가 맞지 않습니다"))
+                    tls.remember_relay_pin(self.cfg, ws)
                     self._ws = ws
                     self.agents = first.get("agents", [])
                     self._set_state("연결됨")
@@ -193,6 +201,9 @@ class WanClient:
                     await self._read(ws)
             except asyncio.CancelledError:
                 raise
+            except tls.PinMismatch as e:
+                self._set_state("인증서 불일치")
+                self.log(f"안내 서버: {e}")
             except Exception as e:
                 if self.state != "키 불일치":
                     self._set_state(f"끊김")

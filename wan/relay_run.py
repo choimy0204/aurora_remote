@@ -15,7 +15,7 @@ import threading
 import time
 
 from .agent import FileLog, _watch_parent
-from . import connect_code, discover
+from . import connect_code, discover, tls
 from .config import DISCOVER_PORT, RELAY_EXIT_PORT_BUSY as EXIT_PORT_BUSY, WanConfig, default_dir
 from .netutil import lan_addresses
 from .server import RelayServer, run_server
@@ -49,6 +49,7 @@ def main(argv=None) -> int:
     ap.add_argument("--update-dir", default="")
     ap.add_argument("--parent-pid", type=int, default=0)
     ap.add_argument("--discover-port", type=int, default=DISCOVER_PORT)
+    ap.add_argument("--no-tls", action="store_true", help="암호화 없이 ws:// 로 (시험용)")
     args, _ = ap.parse_known_args(argv)          # --wan-relay 같은 진입 표시는 무시
     base = default_dir()
     log = FileLog(os.path.join(base, "wan_relay.log"))
@@ -59,14 +60,23 @@ def main(argv=None) -> int:
     threading.Thread(target=_alive_loop, args=(os.path.join(base, "wan_relay.alive"),), daemon=True).start()
     key = os.environ.get("AURORA_RELAY_KEY", "")
 
+    ssl_ctx, fp = None, ""
+    if not args.no_tls:
+        pem = tls.ensure_cert(args.data)
+        ssl_ctx, fp = tls.server_context(pem), tls.cert_fingerprint(pem)
+    scheme = "wss" if ssl_ctx else "ws"
+
     def code() -> str:
         ext = (WanConfig(base).get("relay_external") or "").strip()
-        urls = ([connect_code.make_url(ext, args.port)] if ext else []) + [f"ws://{ip}:{args.port}" for ip in lan_addresses()[:3]]
-        return connect_code.encode(urls, key)
-    threading.Thread(target=discover.serve, args=(code, threading.Event(), args.discover_port, log), daemon=True).start()
+        urls = ([connect_code.make_url(ext, args.port, scheme)] if ext else []) + [f"{scheme}://{ip}:{args.port}" for ip in lan_addresses()[:3]]
+        return connect_code.encode(urls, key, fp=fp)
+    if (WanConfig(base).get("relay_external") or "").strip():
+        log("인터넷용 설정(외부 주소)이라 같은 망 자동 찾기는 끕니다 — 접속 정보를 직접 전달하세요")
+    else:
+        threading.Thread(target=discover.serve, args=(code, threading.Event(), args.discover_port, log), daemon=True).start()
     server = RelayServer(args.data, key, args.update_dir or None)
     try:
-        asyncio.run(run_server(server, args.host, args.port))
+        asyncio.run(run_server(server, args.host, args.port, ssl_ctx))
     except OSError as e:
         log(f"안내 서버를 시작하지 못했습니다 (포트 {args.port}): {e}")
         return EXIT_PORT_BUSY

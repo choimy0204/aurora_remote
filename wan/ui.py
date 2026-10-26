@@ -237,7 +237,8 @@ class WanTabController:
             self._ui("show_error", "안내 서버", err)
             return False
         key = (key or "").strip()
-        self.cfg.update(relay_url=url, relay_key=key)
+        changed = {"relay_fp": ""} if url != (self.cfg.get("relay_url") or "") else {}      # 다른 서버면 옛 인증서 지문을 버림
+        self.cfg.update(relay_url=url, relay_key=key, **changed)
         self._note(f"안내 서버 적용: {url}")
         self._ui("set_busy", "server", True)
         self._spawn(self._restart_client)
@@ -312,7 +313,7 @@ class WanTabController:
         if not key:
             warn = "공용 키가 비어 있어 누구나 접속을 시도할 수 있습니다"
         elif key == DEFAULT_RELAY_KEY and (self.cfg.get("relay_external") or "").strip():
-            warn = "기본 공용 키입니다 — 인터넷에 열면 키를 아는 누구나 현장 PC 에 접속할 수 있습니다"
+            warn = "기본 공용 키라 인터넷에서 오는 접속은 거부됩니다 — '자동 설정'을 다시 누르면 새 키가 만들어집니다"
         else:
             warn = ""
         return str(port), hint, warn
@@ -352,16 +353,25 @@ class WanTabController:
     def relay_urls(self) -> list:
         """다른 PC 가 접속할 안내 서버 주소 후보: 외부 주소(적었으면) → 이 PC 의 내부 주소들"""
         port = self.relay_port()
+        scheme = "wss" if self.relay_fp() else "ws"
         out = []
         ext = (self.cfg.get("relay_external") or "").strip()
         if ext:
-            out.append(connect_code.make_url(ext, port))
-        out += [f"ws://{ip}:{port}" for ip in lan_addresses()[:3]]
+            out.append(connect_code.make_url(ext, port, scheme))
+        out += [f"{scheme}://{ip}:{port}" for ip in lan_addresses()[:3]]
         return out
+
+    def relay_fp(self) -> str:
+        """이 PC 가 운영하는 안내 서버의 인증서 지문 (암호화를 쓰지 않으면 '')"""
+        fn = self.ctx.get("relay_fp")
+        try:
+            return (fn() if fn else "") or ""
+        except Exception:
+            return ""
 
     def relay_code(self) -> str:
         urls = self.relay_urls()
-        return connect_code.encode(urls, self.cfg.get("relay_key") or "") if urls else ""
+        return connect_code.encode(urls, self.cfg.get("relay_key") or "", fp=self.relay_fp()) if urls else ""
 
     def copy_relay_code(self):
         code = self.relay_code()
@@ -369,8 +379,13 @@ class WanTabController:
             self._copy(code, "접속 정보를 복사했습니다 — 다른 PC 의 '연결 추가'에 붙여넣으세요")
 
     def set_relay_external(self, text):
-        self.cfg.update(relay_external=(text or "").strip())
+        text = (text or "").strip()
+        changed = text != (self.cfg.get("relay_external") or "")
+        self.cfg.update(relay_external=text)
         self._ui("set_relay_code", self.relay_code())
+        self._ui("set_relay_info", str(self.relay_port()), *self.relay_info()[1:])
+        if changed and self.cfg.get("relay_host") and self.ctx.get("restart_relay"):
+            self._spawn(self._restart_relay)               # 같은 망 자동 찾기는 인터넷용 설정이면 꺼진다 — 반영하려고 다시 시작
 
     def relay_auto_setup(self, external=""):
         """버튼 한 번: 공용 키 만들기(없으면) · 포트 정하기 · 안내 서버 시작 · 방화벽 열기 · 접속 정보 만들기 (작업 스레드)"""
@@ -398,15 +413,22 @@ class WanTabController:
         return ok
 
     def _auto_setup_now(self, external=""):
-        key = (self.cfg.get("relay_key") or "").strip() or DEFAULT_RELAY_KEY
+        old_key = (self.cfg.get("relay_key") or "").strip()
+        external = (external or "").strip()
+        key = old_key or DEFAULT_RELAY_KEY
+        if external and key == DEFAULT_RELAY_KEY:             # 인터넷에 여는데 누구나 아는 기본 키면 새 키를 만든다
+            key = connect_code.new_key()
+            self._note("인터넷용이라 공용 키를 새로 만들었습니다 — 다른 PC 에는 새 접속 정보를 전달하세요")
         port = self.relay_port()
-        self.cfg.update(relay_key=key, relay_port=port, relay_external=(external or "").strip(), relay_url="")
+        self.cfg.update(relay_key=key, relay_port=port, relay_external=external, relay_url="")
         self._ui("set_relay_info", str(port), *self.relay_info()[1:])
         self._note(f"중계 PC 자동 설정: 공용 키 준비, 포트 {port}")
 
         def work():
             try:
                 self.ctx["set_relay_host"](True)
+                if key != old_key:
+                    self.ctx["restart_relay"]()                # 이미 돌고 있었다면 새 키로 다시 시작
                 self._ui("set_relay_enabled", True)
             except Exception as e:
                 self.cfg.update(relay_host=False)
@@ -520,7 +542,7 @@ class WanTabController:
 
     def _add_direct_code(self, text) -> bool:
         try:
-            urls, code = connect_code.decode_direct(text)
+            urls, code, fp = connect_code.decode_full(text, connect_code.PREFIX_DIRECT)
         except ValueError as e:
             self._ui("show_error", "연결 추가", str(e))
             return False
@@ -529,14 +551,14 @@ class WanTabController:
         def work():
             address = urlsplit(connect_code.pick_reachable(urls)).netloc
             self._ui("set_busy", "connect", False)
-            self._connect_address(address, code, validate=False)
+            self._connect_address(address, code, validate=False, fp=fp)
         self._spawn(work)
         return True
 
     def import_connection(self, text, as_field=False, name="", code="") -> bool:
         """중계 PC 의 접속 정보를 붙여넣어 주소·공용 키를 채우고 바로 연결 (현장이면 이 PC 도 원격 대상으로 켬)"""
         try:
-            urls, key = connect_code.decode(text)
+            urls, key, fp = connect_code.decode_full(text)
         except ValueError as e:
             self._ui("show_error", "접속 정보", str(e))
             return False
@@ -549,8 +571,8 @@ class WanTabController:
         def work():
             try:
                 url = connect_code.pick_reachable(urls)
-                self.cfg.update(relay_url=url, relay_key=key)
-                self._note(f"접속 정보 적용: {url}")
+                self.cfg.update(relay_url=url, relay_key=key, relay_fp=fp)
+                self._note(f"접속 정보 적용: {url}" + (" (암호화)" if fp else ""))
                 if as_field:
                     name_ = (name or "").strip() or (self.cfg.get("name") or "").strip() or socket.gethostname()
                     self.cfg.update(name=name_[:NAME_MAX], **({"access_code": code} if code else {}))   # 코드를 비우면 공용 키로 접속
@@ -598,10 +620,18 @@ class WanTabController:
     def field_direct_code(self) -> str:
         """이 PC 하나에 바로 접속하는 정보 한 줄 (주소들 + 접근 코드)"""
         port = self.direct_port()
-        urls = [f"ws://{ip}:{port}" for ip in lan_addresses()[:3]]
+        urls = [f"wss://{ip}:{port}" for ip in lan_addresses()[:3]]
         if self._public:
-            urls.append(f"ws://{self._public}:{port}")
-        return connect_code.encode_direct(urls, self.field_code()) if urls else ""
+            urls.append(f"wss://{self._public}:{port}")
+        return connect_code.encode_direct(urls, self.field_code(), self.direct_fp()) if urls else ""
+
+    def direct_fp(self) -> str:
+        """이 PC 의 주소 접속용 인증서 지문"""
+        fn = self.ctx.get("direct_fp")
+        try:
+            return (fn() if fn else "") or ""
+        except Exception:
+            return ""
 
     def copy_field_code(self):
         code = self.field_direct_code()
@@ -632,7 +662,13 @@ class WanTabController:
         """→ (ID 글자, 이름 글자, 경고 글자)"""
         agent_id = self.cfg.ensure_id()
         name = self.cfg.get("name") or ""
-        warn = "" if self.field_code() else "접근 코드도 공용 키도 없어 모든 접속을 거부합니다"
+        code = self.field_code()
+        if not code:
+            warn = "접근 코드도 공용 키도 없어 모든 접속을 거부합니다"
+        elif code == DEFAULT_RELAY_KEY and self._public:
+            warn = "기본 코드라 인터넷에서는 접속할 수 없습니다 — 인터넷에서 쓰려면 접근 코드를 바꾸세요"
+        else:
+            warn = ""
         return (format_id(agent_id), name.strip() or "(이름 없음)", warn)
 
     def field_status(self) -> tuple:
@@ -870,7 +906,7 @@ class WanTabController:
         return self._run_connect(agent_id, agent, name, code, lambda c: self.client.open_session(agent_id, c, name),
                                  ask_on_deny, validate, on_ok=lambda c, s: self._save_code(agent_id, c))
 
-    def _connect_address(self, address: str, code, ask_on_deny=False, validate=True) -> bool:
+    def _connect_address(self, address: str, code, ask_on_deny=False, validate=True, fp="") -> bool:
         """현장 PC 의 주소로 바로 접속 (안내 서버 없이)"""
         direct = self.ctx.get("direct")
         if direct is None:
@@ -879,15 +915,17 @@ class WanTabController:
         row_id = DIRECT_ID + address
         agent = self.agent(row_id) or {"id": row_id, "name": address, "address": address, "direct": True}
         known = "" if agent["name"] == address else agent["name"]              # 이름을 모르면 현장이 알려 주는 이름을 쓴다
+        pin = fp or (self.direct_targets().get(address) or {}).get("fp", "")      # 알고 있는 인증서 지문으로 고정
         return self._run_connect(row_id, agent, agent["name"], code,
-                                 lambda c: direct.open_session(address, c, known),
+                                 lambda c: direct.open_session(address, c, known, pin),
                                  ask_on_deny, validate, on_ok=lambda c, s: self._remember_target(address, c, s))
 
     def _remember_target(self, address, code, session):
         targets = self.direct_targets()
         old = targets.get(address) or {}
         name = (getattr(session, "name", "") or old.get("name") or "").strip()
-        targets[address] = {"name": name if name != address else "", "code": code, "last": self._clock()}
+        targets[address] = {"name": name if name != address else "", "code": code, "last": self._clock(),
+                            "fp": getattr(session, "fp", "") or old.get("fp", "")}
         self.cfg.update(direct_targets=targets)
         self._reach[address] = True
         self.refresh_agents()

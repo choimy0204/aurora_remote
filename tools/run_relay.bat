@@ -16,8 +16,9 @@ rem       - General: "Run whether user is logged on or not"
 rem       - Triggers: New > "At startup"
 rem       - Actions: New > Start a program > this .bat file
 rem       - Settings: "If the task fails, restart every" 1 minute
-rem  4. Check it works: open http://<relay PC IP>:9100/health in a
-rem     browser. The page should show "ok".
+rem  4. Check it works: open https://<relay PC IP>:9100/health in a
+rem     browser (the certificate is self-signed, so the browser warns;
+rem     continue anyway). The page should show "ok".
 rem  5. To keep a log file, add  >> D:\AuroraRelay\relay.log 2>&1
 rem     at the end of the AuroraRelay.exe line below.
 rem ============================================================
@@ -36,7 +37,9 @@ if not exist "%RELAY_EXE%" (
 )
 
 rem --update-dir: put AuroraClient.exe and version.json (from dist\latest) here
-"%RELAY_EXE%" --port %RELAY_PORT% --data %RELAY_DATA% --key %RELAY_KEY% --update-dir %RELAY_UPDATE%
+rem --tls: encrypt everything (wss://). The certificate is created in RELAY_DATA on the first run and its
+rem        fingerprint is printed; clients remember it on first connection.
+"%RELAY_EXE%" --port %RELAY_PORT% --data %RELAY_DATA% --key %RELAY_KEY% --update-dir %RELAY_UPDATE% --tls
 if errorlevel 1 (
     echo AuroraRelay stopped with an error.
     pause

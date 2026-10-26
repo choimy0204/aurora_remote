@@ -146,7 +146,7 @@ def _parse_info(info: dict) -> tuple:
     return version, size, sha
 
 
-async def download(url, key, current_ver, dest_dir, kind="client", progress=None, timeout=60.0) -> dict:
+async def download(url, key, current_ver, dest_dir, kind="client", progress=None, timeout=60.0, pin="") -> dict:
     """안내 서버에서 새 버전이 있으면 dest_dir 로 받아 검증한다. 예외는 내지 않고 결과 dict 로 돌려준다.
 
     progress(done, total) : 받는 동안 가끔 불린다 (done 은 늘기만 한다).
@@ -166,18 +166,19 @@ async def download(url, key, current_ver, dest_dir, kind="client", progress=None
         final = os.path.join(dest_dir, EXE_NAMES[kind])
         part = final + ".part"
 
-        from websockets.asyncio.client import connect
+        from . import tls
         try:
-            ws_cm = connect(url, max_size=2 ** 20, compression=None, ping_interval=20, ping_timeout=20,
-                            open_timeout=timeout)
-            ws = await ws_cm.__aenter__()
+            ws = await tls.connect_ws(url, pin, max_size=2 ** 20, compression=None, ping_interval=20, ping_timeout=20,
+                                      open_timeout=timeout)
+        except tls.PinMismatch as e:
+            raise _Fail(str(e)) from None
         except Exception as e:
             raise _Fail(f"안내 서버에 연결하지 못했습니다 ({url}) — {type(e).__name__}") from None
         try:
             return await _fetch(ws, key, current_ver, kind, dest_dir, final, part, progress, timeout)
         finally:
             try:
-                await ws_cm.__aexit__(None, None, None)
+                await ws.close()
             except Exception:
                 pass
     except _Fail as e:
@@ -276,7 +277,8 @@ def check_and_download(cfg, current_ver, kind="client", dest_dir=None, progress=
     """
     try:
         dest_dir = dest_dir or default_dir(cfg)
-        args = (cfg.get("relay_url"), cfg.get("relay_key"), current_ver, dest_dir, kind, progress)
+        args = (cfg.get("relay_url"), cfg.get("relay_key"), current_ver, dest_dir, kind, progress, 60.0,
+                cfg.get("relay_fp") or "")
         try:
             asyncio.get_running_loop()
         except RuntimeError:

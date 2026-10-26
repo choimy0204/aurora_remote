@@ -7,7 +7,7 @@ import asyncio, json, os, sys, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from wan import runtime, ui, viewer, supervisor, update, agent, client, server, bridge, mux, links, config, usage, protocol  # noqa
-from wan import direct, connfile, connect_code, netutil  # noqa
+from wan import direct, connfile, connect_code, netutil, tls  # noqa
 from wan.agent import WanAgent
 from wan.client import WanClient
 from wan.config import WanConfig
@@ -71,7 +71,9 @@ def main():
     s = dc.open_session(f"127.0.0.1:{port}", "88")
     print("주소 접속:", s.mode, "|", s.request("GET", "/info").json())
     assert s.request("GET", "/info").json()["hostname"] == "FROZEN-FIELD"
+    assert s.fp == tls.cert_fingerprint(os.path.join(tmp, "field2", "direct_cert.pem")), "주소 접속 인증서 지문이 다름"
     s.close(); dc.stop()
+    print("암호화(wss) + 지문 확인: OK", s.fp[:12])
     print("FROZEN SELFTEST OK")
 
 if __name__ == "__main__":

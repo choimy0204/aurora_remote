@@ -15,7 +15,7 @@ import os
 import threading
 import time
 
-from . import connect_code, connfile
+from . import connect_code, connfile, tls
 from . import update as wan_update
 from .client import WanClient
 from .config import WanConfig
@@ -132,6 +132,13 @@ class WanRuntime:
         if sup is not None:
             self._safely("에이전트 종료", sup.stop)
 
+    def relay_fp(self) -> str:
+        """이 PC 에서 운영할 안내 서버의 인증서 지문 (인증서가 없으면 지금 만든다 — 안내 서버 프로세스가 같은 파일을 쓴다)"""
+        return tls.cert_fingerprint(tls.ensure_cert(os.path.join(self.cfg.dir, "relay_data"), "relay"))
+
+    def direct_fp(self) -> str:
+        return tls.cert_fingerprint(tls.ensure_cert(self.cfg.dir, "direct"))
+
     def agent_info(self) -> dict:
         """에이전트가 5초마다 적는 상태 파일 → {"direct": off · listening · busy, "online": 안내 서버 접속 여부}.  오래됐으면 빈 값"""
         try:
@@ -227,7 +234,7 @@ class WanRuntime:
     def tab_context(self, open_remote, px=lambda v: v, log=None, relaunch_admin=None) -> dict:
         return {"relaunch_admin": relaunch_admin, "cfg": self.cfg, "client": self.client, "usage": self.usage,
                 "supervisor_state": self.supervisor_state, "set_field_mode": self.set_field_mode,
-                "direct": self.direct, "agent_info": self.agent_info, "conn_dirs": connfile.search_dirs(self.cfg.dir),
+                "direct": self.direct, "agent_info": self.agent_info, "relay_fp": self.relay_fp, "direct_fp": self.direct_fp, "conn_dirs": connfile.search_dirs(self.cfg.dir),
                 "relay_state": self.relay_state, "set_relay_host": self.set_relay_host,
                 "restart_relay": self.restart_relay, "relay_available": self.relay_command is not None,
                 "open_remote": open_remote, "px": px, "log": log or self.log}

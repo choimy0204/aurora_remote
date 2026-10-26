@@ -13,8 +13,8 @@ import socket
 import threading
 
 from . import protocol as P
+from . import tls
 from .client import Session, WanClient
-from .connect_code import make_url
 from .links import WsLink
 from .mux import Mux
 
@@ -66,9 +66,11 @@ class DirectClient:
             thread.join(3)
 
     # ── 접속 ──
-    def open_session(self, address: str, code: str, name: str = "") -> Session:
-        """address: '주소:포트'.  접근 코드가 틀리거나 닿지 않으면 예외 (WanDenied · WanError)"""
+    def open_session(self, address: str, code: str, name: str = "", pin: str = "") -> Session:
+        """address: '주소:포트'.  pin: 알고 있는 현장 PC 인증서 지문 (없으면 처음 접속에서 알아내 session.fp 에 담는다).
+        접근 코드가 틀리거나 닿지 않으면 예외 (WanDenied · WanError)"""
         s = Session(self, address, code, name)
+        s.pin = pin
 
         async def _go():
             mux = await self._establish(s)
@@ -79,11 +81,11 @@ class DirectClient:
         return s
 
     async def _establish(self, s: Session) -> Mux:
-        from websockets.asyncio.client import connect
-        url = make_url(s.agent_id, 0)
         try:
-            ws = await connect(url, max_size=2 ** 20, compression=None, ping_interval=20, ping_timeout=20,
-                               open_timeout=OPEN_TIMEOUT)
+            ws = await tls.connect_ws(f"wss://{s.agent_id}", s.pin, max_size=2 ** 20, compression=None,
+                                      ping_interval=20, ping_timeout=20, open_timeout=OPEN_TIMEOUT)
+        except tls.PinMismatch:
+            raise
         except (asyncio.TimeoutError, TimeoutError):
             raise P.WanTimeout("응답이 없습니다 — 주소와 포트, 현장 PC 의 방화벽(공유기 포트포워딩)을 확인하세요") from None
         except ConnectionRefusedError:
@@ -102,6 +104,7 @@ class DirectClient:
         if reply.get("t") != "ok":
             await ws.close()
             raise WanClient._denied(reply)
+        s.fp = ws.peer_fp
         if not s.name and reply.get("name"):
             s.name = str(reply["name"])
         link = WsLink(ws)

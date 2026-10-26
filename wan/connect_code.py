@@ -23,12 +23,12 @@ def new_key() -> str:
     return secrets.token_urlsafe(KEY_BYTES)
 
 
-def make_url(host: str, port: int) -> str:
-    """'공인IP' · '공인IP:포트' · 'ws://...' 어느 모양으로 적어도 ws://호스트:포트 로 만든다"""
+def make_url(host: str, port: int, scheme: str = "ws") -> str:
+    """'공인IP' · '공인IP:포트' · 'ws://...' 어느 모양으로 적어도 scheme://호스트:포트 로 만든다"""
     host = (host or "").strip()
     if host.lower().startswith(("ws://", "wss://")):
         return host
-    return f"ws://{host}" if ":" in host else f"ws://{host}:{port}"
+    return f"{scheme}://{host}" if ":" in host else f"{scheme}://{host}:{port}"
 
 
 def parse_address(text: str, default_port: int = DIRECT_PORT) -> str:
@@ -49,13 +49,17 @@ def parse_address(text: str, default_port: int = DIRECT_PORT) -> str:
     return f"{host}:{port or default_port}"
 
 
-def encode(urls, key: str, prefix: str = PREFIX) -> str:
-    raw = json.dumps({"u": list(urls), "k": key or ""}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+def encode(urls, key: str, prefix: str = PREFIX, fp: str = "") -> str:
+    """fp: 상대 인증서 지문 — 있으면 받는 쪽이 그 인증서만 믿는다 (wss:// 주소일 때)"""
+    data = {"u": list(urls), "k": key or ""}
+    if fp:
+        data["f"] = fp
+    raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return prefix + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def encode_direct(urls, code: str) -> str:
-    return encode(urls, code, PREFIX_DIRECT)
+def encode_direct(urls, code: str, fp: str = "") -> str:
+    return encode(urls, code, PREFIX_DIRECT, fp)
 
 
 def kind_of(text: str) -> str:
@@ -75,6 +79,11 @@ def decode_direct(text: str) -> tuple:
 
 def decode(text: str, prefix: str = PREFIX) -> tuple:
     """→ (주소 목록, 공용 키 또는 접근 코드).  형식이 맞지 않으면 ValueError (화면에 보여 줄 글자)"""
+    return decode_full(text, prefix)[:2]
+
+
+def decode_full(text: str, prefix: str = PREFIX) -> tuple:
+    """→ (주소 목록, 공용 키 또는 접근 코드, 인증서 지문 또는 '')"""
     t = "".join((text or "").split())                    # 줄바꿈·공백이 끼어 붙여넣어져도 허용
     if prefix in t:
         t = t[t.index(prefix):]
@@ -84,12 +93,12 @@ def decode(text: str, prefix: str = PREFIX) -> tuple:
     try:
         data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode("utf-8"))
         urls = [u for u in data["u"] if isinstance(u, str) and u.lower().startswith(("ws://", "wss://"))]
-        key = data.get("k", "")
-        if not urls or not isinstance(key, str):
+        key, fp = data.get("k", ""), data.get("f", "")
+        if not urls or not isinstance(key, str) or not isinstance(fp, str):
             raise ValueError
     except Exception:
         raise ValueError("접속 정보가 깨져 있습니다 — 처음부터 다시 복사해 보세요") from None
-    return urls, key
+    return urls, key, fp.lower()
 
 
 def pick_reachable(urls, timeout: float = 2.0) -> str:
@@ -107,19 +116,20 @@ def pick_reachable(urls, timeout: float = 2.0) -> str:
 
 def apply_relay_code(cfg, text: str) -> str:
     """중계 PC 의 접속 정보를 설정에 적용 → 고른 안내 서버 주소 (닿는 주소를 찾느라 몇 초 걸릴 수 있음)"""
-    urls, key = decode(text)
+    urls, key, fp = decode_full(text)
     url = pick_reachable(urls)
-    cfg.update(relay_url=url, relay_key=key)
+    cfg.update(relay_url=url, relay_key=key, relay_fp=fp)           # 지문이 없으면 비워 두고 처음 접속 때 기억한다
     return url
 
 
 def remember_direct(cfg, text: str, name: str = "") -> str:
     """현장 PC 주소 접속 정보를 '접속했던 현장' 목록에 저장 → '주소:포트'"""
-    urls, code = decode_direct(text)
+    urls, code, fp = decode_full(text, PREFIX_DIRECT)
     address = urlsplit(pick_reachable(urls)).netloc
     targets = dict(cfg.get("direct_targets") or {})
     old = targets.get(address, {})
-    targets[address] = {"name": name or old.get("name", ""), "code": code, "last": old.get("last", 0)}
+    targets[address] = {"name": name or old.get("name", ""), "code": code, "last": old.get("last", 0),
+                        "fp": fp or old.get("fp", "")}
     cfg.update(direct_targets=targets)
     return address
 

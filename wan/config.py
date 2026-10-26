@@ -58,6 +58,7 @@ DEFAULTS = {
     "relay_host":   False,    # 이 PC 에서 안내 서버(중계)도 운영할지 — 공용 키는 relay_key 를 그대로 씀
     "relay_port":   9100,     # 안내 서버가 받을 포트
     "saved_codes":  {},       # 사용자 PC: 현장 PC 별로 한 번 입력해 둔 접속 코드 {agent_id: code} (따로 정한 코드가 있는 현장만)
+    "relay_fp":     "",       # 안내 서버 인증서 지문(SHA-256) — 접속 정보에 들어 있거나 처음 접속 때 기억. wss:// 일 때 확인
     "relay_external": "",     # 다른 망에서 이 안내 서버에 닿는 주소(공인 IP · 도메인) — 접속 정보에 넣음
     "direct_listen": True,    # 현장 모드일 때 주소로 바로 들어오는 접속도 받을지 (안내 서버 없이 접근 코드로 접속)
     "direct_port":  DIRECT_PORT,

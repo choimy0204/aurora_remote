@@ -23,6 +23,7 @@ import time
 from http import HTTPStatus
 
 from . import config as wcfg
+from .netutil import is_public_ip
 
 log = logging.getLogger("aurora.relay")
 
@@ -30,6 +31,8 @@ AGENT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 SID_RE      = re.compile(r"^[0-9a-f]{16}$")
 SIGNAL_TTL  = 120.0          # 직접 연결 신호가 이 시간 안에 끝나지 않으면 정리
 UPDATE_CHUNK = 64 * 1024
+KEY_FAILS   = 8              # 같은 곳에서 이 횟수 키를 틀리면
+KEY_LOCK    = 300.0          # 이 시간(초) 동안 그곳의 접속을 모두 거부
 
 
 def parse_ver(s) -> tuple:
@@ -57,6 +60,7 @@ class _Session:
 class RelayServer:
     def __init__(self, data_dir: str, key: str = "", update_dir: str | None = None, now=time.time):
         self.data_dir, self.key, self.update_dir, self._now = data_dir, key, update_dir, now
+        self._key_fails: dict = {}          # 접속 출처(IP) → 키를 틀린 시각들
         self.path = os.path.join(data_dir, "relay_agents.json")
         self.store: dict = {}
         self.agents: dict = {}          # id → _Agent (접속 중)
@@ -116,6 +120,17 @@ class RelayServer:
         except Exception:
             return False
 
+    @staticmethod
+    def _peer(ws) -> str:
+        return str((getattr(ws, "remote_address", None) or ("",))[0])
+
+    def _locked(self, peer: str) -> bool:
+        """같은 곳에서 키를 계속 틀리면 한동안 모든 접속을 막는다 (무작위 대입 방지)"""
+        now = self._now()
+        recent = [t for t in self._key_fails.get(peer, []) if now - t < KEY_LOCK]
+        self._key_fails[peer] = recent
+        return len(recent) >= KEY_FAILS
+
     def _key_ok(self, given: str) -> bool:
         # 한글 키도 쓸 수 있게 바이트로 비교 (str 끼리 비교하면 ASCII 가 아닐 때 오류)
         return not self.key or hmac.compare_digest(str(given).encode("utf-8"), self.key.encode("utf-8"))
@@ -128,7 +143,16 @@ class RelayServer:
                 raise ValueError("hello 가 아님")
         except Exception:
             return await ws.close(4000, "hello 필요")
+        peer = self._peer(ws)
+        if self._locked(peer):
+            await self._send(ws, json.dumps({"t": "error", "reason": "locked"}))
+            return await ws.close(4003, "잠시 막혔습니다")
+        if is_public_ip(peer) and (not self.key or self.key == wcfg.DEFAULT_RELAY_KEY):
+            log.warning("기본(또는 빈) 공용 키라 인터넷(%s)에서 온 접속을 거부했습니다", peer)
+            await self._send(ws, json.dumps({"t": "error", "reason": "default_key"}))
+            return await ws.close(4001, "공용 키를 바꾸세요")
         if not self._key_ok(hello.get("key", "")):
+            self._key_fails.setdefault(peer, []).append(self._now())
             await self._send(ws, json.dumps({"t": "error", "reason": "key"}))
             return await ws.close(4001, "키가 맞지 않습니다")
         role = hello.get("role")
@@ -356,11 +380,12 @@ class RelayServer:
         return None
 
 
-async def run_server(server: RelayServer, host: str, port: int):
+async def run_server(server: RelayServer, host: str, port: int, ssl_context=None):
     from websockets.asyncio.server import serve
     async with serve(server.handle, host, port, max_size=2 ** 20, compression=None, ping_interval=20,
-                     ping_timeout=20, process_request=server.process_request) as s:
-        log.info("안내 서버 시작: %s:%s%s", host, port, " (공용 키 사용)" if server.key else " (공용 키 없음 — 누구나 접속 가능)")
+                     ping_timeout=20, process_request=server.process_request, ssl=ssl_context) as s:
+        log.info("안내 서버 시작: %s:%s%s%s", host, port, " (공용 키 사용)" if server.key else " (공용 키 없음 — 누구나 접속 가능)",
+                 " · 암호화(wss)" if ssl_context else " · 암호화 없음(ws)")
         task = asyncio.create_task(server.housekeeping())
         try:
             await s.serve_forever()
@@ -376,11 +401,18 @@ def main():
     ap.add_argument("--key", default=os.environ.get("AURORA_RELAY_KEY", ""), help="현장·사용자 PC 가 접속할 때 필요한 공용 키")
     ap.add_argument("--update-dir", default=os.environ.get("AURORA_RELAY_UPDATE", ""),
                     help="dist\\latest 내용(AuroraClient.exe, version.json)을 넣어 두는 폴더")
+    ap.add_argument("--tls", action="store_true", help="wss:// 로 암호화 (인증서는 --data 폴더에 자동으로 만듦). 인터넷에 열 때는 켜세요")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     server = RelayServer(args.data, args.key, args.update_dir or None)
+    ctx = None
+    if args.tls:
+        from . import tls
+        pem = tls.ensure_cert(args.data)
+        ctx = tls.server_context(pem)
+        logging.getLogger("aurora.relay").info("인증서 지문(SHA-256): %s", tls.cert_fingerprint(pem))
     try:
-        asyncio.run(run_server(server, args.host, args.port))
+        asyncio.run(run_server(server, args.host, args.port, ctx))
     except KeyboardInterrupt:
         pass
 

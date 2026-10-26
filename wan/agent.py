@@ -21,8 +21,10 @@ import threading
 import time
 
 from . import protocol as P
+from . import tls
 from .bridge import Bridge, Policy
-from .config import DIRECT_PORT, WanConfig, new_agent_id
+from .config import DEFAULT_RELAY_KEY, DIRECT_PORT, WanConfig, new_agent_id
+from .netutil import is_public_ip
 from .links import (DirectLink, RelayLink, WsLink, direct_available, make_peer_connection, session_description,
                     wait_open)
 from .mux import Mux
@@ -69,7 +71,7 @@ class WanAgent:
         self.sessions: dict = {}      # sid(16자 hex) → Mux
         self._ws = None
         self._links: dict = {}        # sid 8바이트 → RelayLink
-        self._fails: list = []
+        self._fails: dict = {}        # 접속 출처(IP) → 최근 틀린 시각들. 안내 서버를 거친 접속은 출처를 몰라 "*" 하나로 묶는다
         self._kicked: list = []
         self._stop = asyncio.Event()
         self._tasks: set = set()
@@ -115,14 +117,14 @@ class WanAgent:
         return bool(fn()) if fn else False
 
     async def _connected_session(self):
-        from websockets.asyncio.client import connect
         self._reload_cfg()                         # 화면에서 안내 서버 주소를 바꿨으면 다음 접속부터 따라감
         url = self.cfg.get("relay_url")
         if not url:                                          # 안내 서버 없이 주소 접속만 쓰는 PC — 조용히 기다림
             await asyncio.sleep(3)
             return
-        async with connect(url, max_size=2 ** 20, compression=None, ping_interval=20, ping_timeout=20,
-                           open_timeout=10) as ws:
+        async with tls.open_ws(url, self.cfg.get("relay_fp"), max_size=2 ** 20, compression=None, ping_interval=20,
+                               ping_timeout=20, open_timeout=10) as ws:
+            tls.remember_relay_pin(self.cfg, ws)
             self._ws = ws
             await ws.send(json.dumps({
                 "t": "hello", "role": "agent", "key": self.cfg.get("relay_key"), "id": self.cfg.ensure_id(),
@@ -199,21 +201,28 @@ class WanAgent:
             await self._ws.send(json.dumps({"t": "config_ack", "rev": int(rev)}))
 
     # ── 접속 코드 (현장 PC 가 직접 확인) ──
-    def check_code(self, code: str) -> str | None:
-        """통과면 None, 거부면 이유(no_code · bad_code · locked)"""
+    def check_code(self, code: str, peer: str = "") -> str | None:
+        """통과면 None, 거부면 이유(no_code · bad_code · locked · weak_code).
+        peer: 주소로 직접 들어온 접속의 IP — 틀린 횟수를 출처별로 세어, 한 곳이 계속 틀려도 다른 사람은 막히지 않는다.
+        기본값(aurora-wan)이 코드인 PC 는 인터넷(공인 IP)에서 오는 접속을 거부한다 (누구나 아는 값이라)"""
         self._reload_cfg()                         # 화면에서 접근 코드를 바꿨으면 바로 반영
         now = time.monotonic()
-        self._fails = [t for t in self._fails if now - t < CODE_LOCK]
-        if len(self._fails) >= CODE_FAILS:
+        who = peer or "*"
+        fails = [t for t in self._fails.get(who, []) if now - t < CODE_LOCK]
+        if len(fails) >= CODE_FAILS:
+            self._fails[who] = fails
             return "locked"
-        real = self.cfg.get("access_code") or self.cfg.get("relay_key")      # 코드를 따로 안 정했으면 공용 키가 접속 코드
+        real = self.cfg.get("access_code") or self.cfg.get("relay_key")      # 코드를 따로 안 정했으면 공용 키가 접근 코드
         if not real:
             return "no_code"
+        if real == DEFAULT_RELAY_KEY and is_public_ip(peer):
+            self.log(f"기본 코드라 인터넷({peer})에서 온 접속을 거부했습니다 — 접근 코드를 정하세요")
+            return "weak_code"
         if not hmac.compare_digest(str(code).encode("utf-8"), real.encode("utf-8")):
-            self._fails.append(now)
-            self.log("접근 코드가 맞지 않는 접속 시도")
+            self._fails[who] = fails + [now]
+            self.log(f"접근 코드가 맞지 않는 접속 시도{f' ({peer})' if peer else ''}")
             return "bad_code"
-        self._fails.clear()
+        self._fails.pop(who, None)
         return None
 
     async def _reply(self, ws, **msg):
@@ -264,8 +273,9 @@ class WanAgent:
                 await self._sleep(2.0)
                 continue
             try:
+                ctx = tls.server_context(tls.ensure_cert(self.cfg.dir, "direct"))
                 async with serve(self._on_direct, "0.0.0.0", want[1], max_size=2 ** 20, compression=None,
-                                 ping_interval=20, ping_timeout=20, close_timeout=2):
+                                 ping_interval=20, ping_timeout=20, close_timeout=2, ssl=ctx):
                     self.direct_state = "listening"
                     self.log(f"주소 접속 대기 중 (포트 {want[1]})")
                     while not self._stop.is_set() and self._want_direct() == want:
@@ -299,7 +309,8 @@ class WanAgent:
             hello = json.loads(await asyncio.wait_for(ws.recv(), DIRECT_HELLO_WAIT))
             if not isinstance(hello, dict) or hello.get("t") != "hello":
                 return
-            denied = self.check_code(hello.get("code", ""))
+            peer = (getattr(ws, "remote_address", None) or ("",))[0]
+            denied = self.check_code(hello.get("code", ""), peer)
         except Exception:
             return
         if denied:
