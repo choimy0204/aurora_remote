@@ -49,6 +49,7 @@ DEFAULTS = {
     "relay_key":    DEFAULT_RELAY_KEY,   # 안내 서버 공용 키 — 현장 접속 코드를 따로 안 정했으면 이 키가 접속 코드
     "agent_id":     "",       # 이 PC 의 고유 ID — 처음 한 번 만들어 계속 씀
     "name":         "",       # 표시 이름 (안내 서버에서 원격으로 바꿀 수 있음)
+    "agent_secret": "",       # 이 현장 PC 만 아는 비밀 값 — 중계 PC 가 키를 바꾼 뒤에도 이 PC 에게만 새 키를 내려 주도록 등록해 둔다
     "access_code":  "",       # 접속 코드 — 비어 있으면 모든 접속을 거부
     "max_quality":  "고화질", # 이 PC 가 내보낼 수 있는 최고 화질
     "allow_files":  True,     # 파일 반입/반출 허용
@@ -188,6 +189,13 @@ class WanConfig:
                 d = self._data
                 return bool(d.get("enabled") or d.get("relay_url") or d.get("relay_host") or d.get("direct_targets"))
             return bool(v)
+
+    def ensure_agent_secret(self) -> str:
+        with self._lock:
+            if not self._data["agent_secret"]:
+                self._data["agent_secret"] = secrets.token_urlsafe(24)
+                self.save()
+            return self._data["agent_secret"]
 
     def ensure_access_code(self) -> str:
         """현장 PC 의 접근 코드가 없으면 무작위로 하나 만든다 (중계 PC 가 사용자 PC 에 알려 주므로 사람이 외울 필요 없음)"""

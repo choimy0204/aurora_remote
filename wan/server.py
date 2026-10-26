@@ -30,6 +30,8 @@ log = logging.getLogger("aurora.relay")
 AGENT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 SID_RE      = re.compile(r"^[0-9a-f]{16}$")
 SIGNAL_TTL  = 120.0          # 직접 연결 신호가 이 시간 안에 끝나지 않으면 정리
+OLD_KEY_DAYS = 90            # 옛 공용 키로도 (비밀 값을 아는) 현장 PC 만 접속해 새 키를 받을 수 있는 기간
+OLD_KEYS_MAX = 8
 UPDATE_CHUNK = 64 * 1024
 SERVER_CAPS = ["forget", "code"]   # 이 안내 서버가 지원하는 기능 (옛 서버는 이 목록이 없다 — 새 프로그램이 "서버를 업데이트하세요" 라고 알려 주려고)
 KEY_FAILS   = 8              # 같은 곳에서 이 횟수 키를 틀리면
@@ -58,10 +60,31 @@ class _Session:
         self.bytes = 0
 
 
+def remember_old_key(data_dir: str, key: str, now=None, days: float = OLD_KEY_DAYS):
+    """공용 키를 바꾸기 직전의 옛 키를 기록한다 — 안내 서버가 다시 시작되면 읽어서, 켜져 있지 않던 현장 PC 도 나중에 새 키를 받게 한다"""
+    if not key:
+        return
+    now = time.time() if now is None else now
+    path = os.path.join(data_dir, "old_keys.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            items = json.load(f)
+    except (OSError, ValueError):
+        items = []
+    items = [i for i in items if isinstance(i, dict) and i.get("until", 0) > now and i.get("key") != key]
+    items.append({"key": key, "until": now + days * 86400})
+    os.makedirs(data_dir, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(items[-OLD_KEYS_MAX:], f)
+    os.replace(tmp, path)
+
+
 class RelayServer:
     def __init__(self, data_dir: str, key: str = "", update_dir: str | None = None, now=time.time):
         self.data_dir, self.key, self.update_dir, self._now = data_dir, key, update_dir, now
         self._key_fails: dict = {}          # 접속 출처(IP) → 키를 틀린 시각들
+        self.old_keys = self._load_old_keys()
         self.path = os.path.join(data_dir, "relay_agents.json")
         self.store: dict = {}
         self.agents: dict = {}          # id → _Agent (접속 중)
@@ -93,6 +116,26 @@ class RelayServer:
             json.dump(self.store, f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
         self._dirty = False
+
+    def _load_old_keys(self) -> list:
+        try:
+            with open(os.path.join(self.data_dir, "old_keys.json"), "r", encoding="utf-8") as f:
+                return [i for i in json.load(f) if isinstance(i, dict) and isinstance(i.get("key"), str)]
+        except (OSError, ValueError):
+            return []
+
+    def _old_key_ok(self, hello: dict) -> bool:
+        """공용 키를 바꾼 뒤 옛 키로 접속한 **현장 PC** 인지 — 옛 키가 기록되어 있고(기간 안), 이 현장이 처음 등록 때 알린 비밀 값을
+        그대로 대면 통과.  비밀 값은 사용자 PC 에도 내려가지 않으므로 옛 키만 새어 나간 사람은 통과하지 못한다"""
+        if hello.get("role") != "agent":
+            return False
+        rec = self.store.get(str(hello.get("id", "")))
+        secret = (rec or {}).get("secret") or ""
+        given = hello.get("secret")
+        if not secret or not isinstance(given, str) or not hmac.compare_digest(secret.encode(), given.encode()):
+            return False
+        now, key = self._now(), str(hello.get("key", ""))
+        return any(i.get("until", 0) > now and hmac.compare_digest(key.encode(), i["key"].encode()) for i in self.old_keys)
 
     @staticmethod
     def _clean_code(code) -> str:
@@ -157,7 +200,10 @@ class RelayServer:
             log.warning("기본(또는 빈) 공용 키라 인터넷(%s)에서 온 접속을 거부했습니다", peer)
             await self._send(ws, json.dumps({"t": "error", "reason": "default_key"}))
             return await ws.close(4001, "공용 키를 바꾸세요")
-        if not self._key_ok(hello.get("key", "")):
+        hello["_old_key"] = False
+        if not self._key_ok(hello.get("key", "")) and self._old_key_ok(hello):
+            hello["_old_key"] = True                           # 옛 키로 온 현장 PC — 접속시키고 새 키를 내려 준다
+        elif not self._key_ok(hello.get("key", "")):
             self._key_fails.setdefault(peer, []).append(self._now())
             await self._send(ws, json.dumps({"t": "error", "reason": "key"}))
             return await ws.close(4001, "키가 맞지 않습니다")
@@ -185,11 +231,16 @@ class RelayServer:
         rec["ver"], rec["last_seen"] = str(hello.get("ver", ""))[:20], self._now()
         rec["applied_rev"] = int(hello.get("rev", 0) or 0)
         rec["code"] = self._clean_code(hello.get("code"))          # 현장이 알려 준 접근 코드 — 인증된 사용자 PC 에 전달
+        secret = hello.get("secret")
+        if isinstance(secret, str) and secret and not rec.get("secret"):
+            rec["secret"] = secret[:128]                             # 처음 등록할 때만 기억 (그 뒤에 바꾸지 못하게)
         old = self.agents.get(aid)
         conn = self.agents[aid] = _Agent(ws, aid)
         if old is not None:
             await old.ws.close(4002, "같은 ID 가 다시 접속했습니다")
         welcome = {"t": "welcome", "rev": rec["rev"]}
+        if hello.get("_old_key"):
+            welcome["rekey"] = self.key                              # 현장 PC 가 새 공용 키를 저장하고 이후에는 새 키로 접속
         if rec["rev"] and rec["rev"] != rec["applied_rev"]:
             welcome["config"] = rec["config"]
         await ws.send(json.dumps(welcome, ensure_ascii=False))

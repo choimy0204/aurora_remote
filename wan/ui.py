@@ -483,7 +483,7 @@ class WanTabController:
             return False
         git = bool((self.cfg.get("git_source") or "").strip())
         self._ui("ask_yes_no", "접속 코드 새로고침",
-                 "접속 코드(공용 키)를 새로 만들까요?\n\n· 기존 접속 정보는 즉시 사라집니다.\n· 지금 연결 중인 원격 화면은 끊깁니다.\n"
+                 "접속 코드(공용 키)를 새로 만들까요?\n\n· 기존 접속 정보는 즉시 사라집니다 (접속하는 PC 는 새 정보를 다시 받아야 합니다).\n· 지금 연결 중인 원격 화면은 끊깁니다.\n· 현장 PC 는 자동으로 새 코드를 받습니다 (꺼져 있던 PC 는 다시 켜질 때).\n"
                  + ("· 새 접속 정보가 지금 Git 저장소에 올라가고, 다른 PC 들이 몇 분 안에 자동으로 따라옵니다."
                     if git else "· Git 저장소가 없어서 다른 PC 에는 새 접속 정보를 직접 전달해야 합니다."),
                  lambda yes: self._do_refresh_code() if yes else None)

@@ -146,11 +146,15 @@ class WanAgent:
             await ws.send(json.dumps({
                 "t": "hello", "role": "agent", "key": self.cfg.get("relay_key"), "id": self.cfg.ensure_id(),
                 "name": self.cfg.get("name") or socket.gethostname(), "ver": self.version,
-                "rev": self.cfg.get("config_rev"), "code": self.cfg.get("access_code") or ""}, ensure_ascii=False))
+                "rev": self.cfg.get("config_rev"), "code": self.cfg.get("access_code") or "",
+                "secret": self.cfg.ensure_agent_secret()}, ensure_ascii=False))
             self._sent_code = self.cfg.get("access_code") or ""
             welcome = json.loads(await asyncio.wait_for(ws.recv(), 10))
             if welcome.get("t") == "error":
                 raise P.WanDenied(f"안내 서버가 거부했습니다 ({welcome.get('reason')})")
+            if isinstance(welcome.get("rekey"), str) and welcome["rekey"]:
+                self.cfg.update(relay_key=welcome["rekey"])           # 중계 PC 가 공용 키를 바꿨다 — 새 키를 받아 저장
+                self.log("중계 PC 의 공용 키가 바뀌어 새 키를 받았습니다")
             await self._apply_config(welcome.get("config"), welcome.get("rev", 0))
             self.online = True
             self.log(f"안내 서버 연결됨 ({url})")

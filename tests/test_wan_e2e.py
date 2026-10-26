@@ -498,3 +498,46 @@ def test_relay_pc_registers_itself_as_a_field_pc_without_any_address(tmp_path):
         client.stop()
     finally:
         ag.stop(); local.stop(); relay.close()
+
+
+# ── 중계 PC 가 공용 키를 바꿔도 켜져 있던 · 꺼져 있던 현장 PC 가 자동으로 새 키를 받는다 ──
+def test_field_pc_follows_a_key_change_by_itself(tmp_path):
+    from wan.server import remember_old_key
+    from wan_helpers import RelayRunner, AgentRunner, FakeLocal
+    relay = RelayRunner(str(tmp_path / "relay"), "옛-공용-키")
+    local = FakeLocal()
+    ag = AgentRunner(str(tmp_path / "field"), relay.url, local.port, code="c1", key="옛-공용-키")
+    try:
+        eventually(lambda: ag.agent.online, 10, msg="처음 접속(비밀 값이 중계 PC 에 등록됨)")
+        # 중계 PC 가 키를 바꾸고 안내 서버를 다시 시작 (현장 PC 는 건드리지 않음)
+        remember_old_key(str(tmp_path / "relay"), "옛-공용-키")
+        relay.key = "새-공용-키"
+        relay.restart()
+        eventually(lambda: ag.agent.online and ag.cfg.get("relay_key") == "새-공용-키", 25,
+                   msg=f"현장 PC 가 자동으로 새 키를 받아 다시 접속: {ag.logs[-3:]}")
+        assert any("새 키를 받았습니다" in m for m in ag.logs)
+        # 사용자 PC 는 새 키로 목록을 받고 접속
+        from wan.client import WanClient
+        from wan.config import WanConfig
+        ucfg = WanConfig(str(tmp_path / "user"))
+        ucfg.update(relay_url=relay.url, relay_key="새-공용-키", stun="", force_relay=True)
+        c = WanClient(ucfg, None, "2.16.0", log=lambda m: None)
+        c.start()
+        try:
+            eventually(lambda: any(a["id"] == ag.agent_id and a["online"] for a in c.agents), 10)
+            s = c.open_session(ag.agent_id, "c1")
+            assert s.request("GET", "/info").status_code == 200
+            s.close()
+        finally:
+            c.stop()
+        # 옛 키를 가진 사용자는 못 들어옴
+        old = WanConfig(str(tmp_path / "old_user"))
+        old.update(relay_url=relay.url, relay_key="옛-공용-키", stun="")
+        oc = WanClient(old, None, "2.16.0", log=lambda m: None)
+        oc.start()
+        try:
+            eventually(lambda: oc.state == "키 불일치", 10)
+        finally:
+            oc.stop()
+    finally:
+        ag.stop(); local.stop(); relay.close()

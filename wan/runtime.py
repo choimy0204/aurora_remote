@@ -19,6 +19,7 @@ from . import connect_code, connfile, gitsync, tls
 from . import update as wan_update
 from .client import WanClient
 from .netutil import lan_addresses
+from .server import remember_old_key as server_remember_old_key
 from .config import WanConfig
 from .direct import DirectClient
 from .server import parse_ver
@@ -220,6 +221,7 @@ class WanRuntime:
         Git 저장소가 설정되어 있으면 새 접속 정보를 올린다.  Git 에는 **사람이 이 버튼(또는 '올리기')을 눌렀을 때만** 올라간다 — 자동으로는 올리지 않는다.
         → {"key", "code", "published", "error"}  (Git 에 못 올렸으면 error 에 이유가 있고, 복구된 뒤 '올리기'로 다시 올리면 된다)"""
         with self._rot_lock:
+            server_remember_old_key(os.path.join(self.cfg.dir, "relay_data"), self.cfg.get("relay_key") or "")
             self.cfg.update(relay_key=connect_code.new_key())
             if self.relay_supervisor is not None:
                 self.restart_relay()

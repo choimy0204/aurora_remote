@@ -175,3 +175,98 @@ def test_field_card_warns_about_default_code_only_when_internet_address_is_known
     assert "접근 코드를 바꾸세요" in ctl.field_info()[2]
     ctx["cfg"].d["access_code"] = "내-코드-9981"
     assert ctl.field_info()[2] == ""
+
+
+# ── 공용 키를 바꿔도 현장 PC 는 자동으로 새 키를 받는다 ──
+from wan.server import OLD_KEY_DAYS, remember_old_key
+
+
+def relay_with_agent(tmp_path, secret="agent-비밀-값", old="옛-키-1111", new="새-키-2222", aid="a1b2c3d4e5f6"):
+    clock = [1000.0]
+    srv = RelayServer(str(tmp_path), new, None, now=lambda: clock[0])
+    srv.store[aid] = {"name": "현장", "config": {}, "rev": 0, "applied_rev": 0, "last_seen": 0, "ver": "", "secret": secret}
+    remember_old_key(str(tmp_path), old, now=clock[0])
+    srv.old_keys = srv._load_old_keys()
+    return srv, clock
+
+
+def agent_hello(key, secret="agent-비밀-값", aid="a1b2c3d4e5f6"):
+    return {"t": "hello", "role": "agent", "key": key, "id": aid, "secret": secret, "name": "현장", "ver": "2", "rev": 0}
+
+
+class AgentWS(FakeWS):
+    """접속 직후 끊기는 현장 PC 연결 (받을 메시지가 더 없음)"""
+    def __init__(self, hello, ip="192.168.0.9"):
+        super().__init__(ip, hello)
+
+    async def __aiter__(self):
+        return
+        yield
+
+
+def _agent_connect(srv, hello, ip="192.168.0.9"):
+    ws = AgentWS(hello, ip)
+    run(srv.handle(ws))
+    return ws
+
+
+def welcome_of(ws):
+    return next((m for m in ws.sent if m.get("t") == "welcome"), None)
+
+
+def test_field_pc_with_old_key_and_its_secret_gets_the_new_key(tmp_path):
+    srv, _ = relay_with_agent(tmp_path)
+    ws = _agent_connect(srv, agent_hello("옛-키-1111"))
+    assert welcome_of(ws)["rekey"] == "새-키-2222"
+
+
+def test_current_key_gets_no_rekey_message(tmp_path):
+    srv, _ = relay_with_agent(tmp_path)
+    assert "rekey" not in welcome_of(_agent_connect(srv, agent_hello("새-키-2222")))
+
+
+def test_old_key_without_the_right_secret_is_refused(tmp_path):
+    srv, _ = relay_with_agent(tmp_path)
+    for secret in ("", "남의-비밀", None):
+        hello = agent_hello("옛-키-1111", secret=secret)
+        ws = _agent_connect(srv, hello)
+        assert welcome_of(ws) is None and ws.sent[-1] == {"t": "error", "reason": "key"}
+
+
+def test_old_key_cannot_be_used_by_users_or_unknown_ids(tmp_path):
+    srv, _ = relay_with_agent(tmp_path)
+    user = {"t": "hello", "role": "user", "key": "옛-키-1111"}
+    assert connect(srv, "192.168.0.9", "옛-키-1111").sent[-1]["reason"] == "key"
+    ws = FakeWS("192.168.0.9", user)
+    run(srv.handle(ws))
+    assert ws.sent[-1] == {"t": "error", "reason": "key"}
+    ws2 = _agent_connect(srv, agent_hello("옛-키-1111", aid="ffffffffffff"))     # 처음 보는 현장 ID 는 안 됨
+    assert welcome_of(ws2) is None
+
+
+def test_old_key_expires(tmp_path):
+    srv, clock = relay_with_agent(tmp_path)
+    clock[0] += (OLD_KEY_DAYS + 1) * 86400
+    assert welcome_of(_agent_connect(srv, agent_hello("옛-키-1111"))) is None
+
+
+def test_agent_that_never_registered_a_secret_cannot_use_old_key(tmp_path):
+    srv, _ = relay_with_agent(tmp_path, secret="")
+    assert welcome_of(_agent_connect(srv, agent_hello("옛-키-1111", secret="아무거나"))) is None
+
+
+def test_secret_is_remembered_only_at_first_registration(tmp_path):
+    srv = RelayServer(str(tmp_path), "k", None)
+    _agent_connect(srv, agent_hello("k", secret="첫-비밀"))
+    assert srv.store["a1b2c3d4e5f6"]["secret"] == "첫-비밀"
+    _agent_connect(srv, agent_hello("k", secret="바꾼-비밀"))                    # 키만 아는 사람이 비밀 값을 덮어쓰지 못함
+    assert srv.store["a1b2c3d4e5f6"]["secret"] == "첫-비밀"
+
+
+def test_old_keys_file_keeps_recent_only(tmp_path):
+    for i in range(12):
+        remember_old_key(str(tmp_path), f"key-{i}", now=1000.0 + i)
+    srv = RelayServer(str(tmp_path), "now", None, now=lambda: 2000.0)
+    keys = [i["key"] for i in srv.old_keys]
+    assert len(keys) == 8 and keys[-1] == "key-11"
+    remember_old_key(str(tmp_path), "", now=1.0)                                  # 빈 키는 기록하지 않음
