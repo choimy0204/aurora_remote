@@ -121,6 +121,7 @@ class WanRuntime:
             return
         from .supervisor import AgentSupervisor
         self.cfg.ensure_id()
+        self.cfg.ensure_access_code()
         alive = os.path.join(self.cfg.dir, "wan_agent.alive")
         self.supervisor = AgentSupervisor(self.agent_command(), alive, log=lambda m: self.log(f"[WAN] {m}"))
         self.supervisor.start()

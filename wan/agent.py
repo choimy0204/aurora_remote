@@ -67,6 +67,7 @@ class WanAgent:
         self.direct_mode, self.on_bytes = direct_mode, on_bytes
         self.bridge = Bridge(bridge_port, key_getter, Policy(cfg), log=log)
         self.online = False
+        self._sent_code = ""          # 안내 서버에 마지막으로 알린 접근 코드
         self.direct_state = "off"     # 주소 접속 수신: off · listening · busy(포트를 다른 프로그램이 씀)
         self.sessions: dict = {}      # sid(16자 hex) → Mux
         self._ws = None
@@ -129,7 +130,8 @@ class WanAgent:
             await ws.send(json.dumps({
                 "t": "hello", "role": "agent", "key": self.cfg.get("relay_key"), "id": self.cfg.ensure_id(),
                 "name": self.cfg.get("name") or socket.gethostname(), "ver": self.version,
-                "rev": self.cfg.get("config_rev")}, ensure_ascii=False))
+                "rev": self.cfg.get("config_rev"), "code": self.cfg.get("access_code") or ""}, ensure_ascii=False))
+            self._sent_code = self.cfg.get("access_code") or ""
             welcome = json.loads(await asyncio.wait_for(ws.recv(), 10))
             if welcome.get("t") == "error":
                 raise P.WanDenied(f"안내 서버가 거부했습니다 ({welcome.get('reason')})")
@@ -168,8 +170,17 @@ class WanAgent:
             while True:
                 await asyncio.sleep(HEARTBEAT)
                 await ws.send('{"t":"hb"}')
+                await self._push_code(ws)
         except Exception:
             pass        # 연결이 끊긴 것 — 바깥 루프가 다시 접속한다
+
+    async def _push_code(self, ws):
+        """화면에서 접근 코드를 바꿨으면 안내 서버에 알린다 (사용자 PC 가 새 코드를 받도록)"""
+        self._reload_cfg()
+        code = self.cfg.get("access_code") or ""
+        if code != self._sent_code:
+            await ws.send(json.dumps({"t": "code", "code": code}, ensure_ascii=False))
+            self._sent_code = code
 
     async def _on_message(self, ws, m: dict):
         t = m.get("t")
@@ -199,6 +210,7 @@ class WanAgent:
             self.log(f"설정 변경 적용 (#{rev}): {shown}")
         if self._ws is not None:
             await self._ws.send(json.dumps({"t": "config_ack", "rev": int(rev)}))
+            await self._push_code(self._ws)
 
     # ── 접속 코드 (현장 PC 가 직접 확인) ──
     def check_code(self, code: str, peer: str = "") -> str | None:
@@ -383,6 +395,7 @@ def run_agent(cfg_dir: str | None, bridge_port: int, key_getter, version: str = 
     alive_path = alive_path or os.path.join(cfg.dir, "wan_agent.alive")
     if parent_pid:
         _watch_parent(parent_pid)
+    cfg.ensure_access_code()
     log(f"WAN 에이전트 시작 (ID {cfg.ensure_id()}, v{version})")
 
     async def main():

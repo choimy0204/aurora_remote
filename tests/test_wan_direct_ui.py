@@ -444,3 +444,46 @@ def test_server_status_for_certificate_mismatch_is_bad():
     ctl, ctx, ui, _ = direct_ctl(relay_url="wss://a:1")
     ctx["client"].state = "인증서 불일치"
     assert ctl.server_status() == ("● 인증서 불일치", "bad")
+
+
+# ── 중계 PC 가 알려 준 현장 코드로 더블클릭 ──
+def relay_agent(code="현장별-코드-77", online=True):
+    return {"id": "x1", "name": "현장A", "online": online, "last_seen": 0, "rev": 0, "applied_rev": 0, "code": code}
+
+
+def test_double_click_uses_code_given_by_relay_before_saved_or_shared_key():
+    ctl, ctx, ui, _ = direct_ctl()
+    ctx["client"].agents = [relay_agent()]
+    ctx["cfg"].d["saved_codes"] = {"x1": "옛날-코드"}
+    ctl.quick_connect("x1")
+    assert ctx["client"].calls[-1] == ("open", "x1", "현장별-코드-77", "현장A")
+    assert not ui.all("ask_code")
+
+
+def test_double_click_falls_back_to_saved_then_shared_key_when_relay_gives_no_code():
+    ctl, ctx, ui, _ = direct_ctl()
+    ctx["client"].agents = [relay_agent(code="")]
+    ctl.quick_connect("x1")
+    assert ctx["client"].calls[-1][2] == "공용키"
+    ctx["cfg"].d["saved_codes"] = {"x1": "내가-입력한-코드"}
+    ctl._codes.clear()
+    ctl.quick_connect("x1")
+    assert ctx["client"].calls[-1][2] == "내가-입력한-코드"
+
+
+def test_field_turned_on_gets_random_access_code_automatically():
+    ctl, ctx, ui, _ = direct_ctl()
+    assert ctx["cfg"].d.get("access_code", "") == ""
+    ctl.field_toggled(True)
+    assert ctx["cfg"].d["access_code"]
+    assert ui.last("set_field_code")[0] == ctx["cfg"].d["access_code"]       # 화면에 바로 보임
+
+
+def test_config_generates_unique_random_codes_once(tmp_path):
+    from wan.config import WanConfig
+    a, b = WanConfig(str(tmp_path / "a")), WanConfig(str(tmp_path / "b"))
+    ca, cb = a.ensure_access_code(), b.ensure_access_code()
+    assert len(ca) >= 12 and ca != cb and a.ensure_access_code() == ca       # 한 번만 만들고 유지
+    assert WanConfig(str(tmp_path / "a")).get("access_code") == ca           # 저장됨
+    a.update(access_code="내가-정한-코드")
+    assert a.ensure_access_code() == "내가-정한-코드"                          # 직접 정한 코드는 덮어쓰지 않음

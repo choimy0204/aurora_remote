@@ -393,6 +393,11 @@ class FakeCfg:
     def ensure_id(self):
         return self.d["agent_id"]
 
+    def ensure_access_code(self):
+        if not self.d.get("access_code"):
+            self.d["access_code"] = "auto-generated-code"
+        return self.d["access_code"]
+
     def load(self):
         self.loads += 1
 
@@ -607,7 +612,7 @@ def test_field_toggled_on_and_off():
     ctl.field_toggled(True)
     assert ctx["cfg"].d["enabled"] is True
     ctx["set_field_mode"].assert_called_with(True)
-    assert any("접근 코드" in line for line in ui.last("set_log")[0])      # 코드 없음 안내
+    assert ctx["cfg"].d["access_code"] == "auto-generated-code"            # 켜면 접근 코드를 자동으로 만든다
     ctl.field_toggled(False)
     assert ctx["cfg"].d["enabled"] is False
     ctx["set_field_mode"].assert_called_with(False)

@@ -93,6 +93,10 @@ class RelayServer:
         os.replace(tmp, self.path)
         self._dirty = False
 
+    @staticmethod
+    def _clean_code(code) -> str:
+        return code.strip()[:64] if isinstance(code, str) else ""
+
     def _record(self, agent_id: str) -> dict:
         return self.store.setdefault(agent_id, {"name": "", "config": {}, "rev": 0, "applied_rev": 0,
                                                 "last_seen": 0, "ver": ""})
@@ -103,7 +107,8 @@ class RelayServer:
         for aid, rec in self.store.items():
             out.append({"id": aid, "name": rec["config"].get("name") or rec.get("name") or aid[:4],
                         "online": aid in self.agents, "last_seen": rec.get("last_seen", 0),
-                        "ver": rec.get("ver", ""), "rev": rec["rev"], "applied_rev": rec["applied_rev"]})
+                        "ver": rec.get("ver", ""), "rev": rec["rev"], "applied_rev": rec["applied_rev"],
+                        "code": rec.get("code", "")})
         out.sort(key=lambda a: (not a["online"], a["name"].lower()))
         return out
 
@@ -178,6 +183,7 @@ class RelayServer:
         rec["name"] = str(hello.get("name", ""))[:40] or rec["name"]
         rec["ver"], rec["last_seen"] = str(hello.get("ver", ""))[:20], self._now()
         rec["applied_rev"] = int(hello.get("rev", 0) or 0)
+        rec["code"] = self._clean_code(hello.get("code"))          # 현장이 알려 준 접근 코드 — 인증된 사용자 PC 에 전달
         old = self.agents.get(aid)
         conn = self.agents[aid] = _Agent(ws, aid)
         if old is not None:
@@ -198,6 +204,12 @@ class RelayServer:
                 t = data.get("t")
                 if t == "hb":
                     rec["last_seen"] = self._now()
+                elif t == "code":
+                    new = self._clean_code(data.get("code"))
+                    if new != rec.get("code"):
+                        rec["code"] = new
+                        self.save()
+                        await self._broadcast_agents()
                 elif t == "config_ack":
                     rec["applied_rev"] = int(data.get("rev", 0))
                     self._dirty = True
@@ -255,6 +267,8 @@ class RelayServer:
         clean = wcfg.sanitize_remote(data.get("config") or {})
         rec = self.store[aid]
         rec["config"].update(clean)
+        if "access_code" in clean:
+            rec["code"] = clean["access_code"]                     # 현장이 꺼져 있어도 사용자 PC 는 새 코드를 바로 받는다
         rec["rev"] += 1
         self.save()
         online = self.agents.get(aid)

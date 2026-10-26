@@ -174,6 +174,14 @@ class WanConfig:
                 self.save()
             return self._data["agent_id"]
 
+    def ensure_access_code(self) -> str:
+        """현장 PC 의 접근 코드가 없으면 무작위로 하나 만든다 (중계 PC 가 사용자 PC 에 알려 주므로 사람이 외울 필요 없음)"""
+        with self._lock:
+            if not self._data["access_code"]:
+                self._data["access_code"] = secrets.token_urlsafe(9)
+                self.save()
+            return self._data["access_code"]
+
     def apply_remote(self, cfg: dict, rev: int) -> dict:
         """안내 서버가 보낸 설정 적용 → 실제로 바뀐 항목"""
         clean = sanitize_remote(cfg)

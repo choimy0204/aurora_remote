@@ -153,6 +153,9 @@ class Cfg:
     def ensure_id(self):
         return self.d["agent_id"]
 
+    def ensure_access_code(self):
+        return self.d.get("access_code", "")
+
 
 class Rec(wui.NullUI):
     def __init__(self):

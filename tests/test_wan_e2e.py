@@ -91,11 +91,11 @@ def test_explicit_access_code_is_not_opened_by_shared_key(tmp_path):
         w.close()
 
 
-def test_code_check_happens_on_field_not_server(world):
-    """서버는 코드를 모른다 — 서버 저장소에 접속 코드가 평문으로 남는 것은 설정 보관용뿐이며 목록으로는 나가지 않음"""
+def test_code_check_happens_on_field_and_relay_hands_code_to_users(world):
+    """코드를 확인하는 곳은 현장 PC 이고, 중계 PC 는 현장이 알려 준(또는 설정 보내기로 정한) 코드를 인증된 사용자 PC 에 알려 준다"""
     world.client.set_config(world.agent_id, {"access_code": "secret-77"})
     eventually(lambda: world.entry()["applied_rev"] == world.entry()["rev"])
-    assert "secret-77" not in str(world.client.agents)
+    assert world.entry()["code"] == "secret-77"                      # 중계 PC 가 공용 키를 가진 사용자 PC 에 현장 코드를 알려 준다
 
 
 def test_brute_force_lockout(world, monkeypatch):
@@ -383,3 +383,41 @@ def test_client_can_be_restarted_with_a_new_server_address(world):
     s = world.client.open_session(world.agent_id, "1234")
     assert s.request("GET", "/info").ok
     s.close()
+
+
+# ── 현장이 등록한 접근 코드를 중계 PC 가 사용자 PC 에 알려 준다 (더블클릭 접속) ──
+def test_field_registers_its_code_on_connect_and_user_sees_it(world):
+    assert world.entry()["code"] == "1234"                           # 현장이 접속하며 알린 코드
+
+
+def test_code_changed_on_field_screen_reaches_users(world):
+    from wan import agent as agent_mod
+    from wan.config import WanConfig
+    old = agent_mod.HEARTBEAT
+    agent_mod.HEARTBEAT = 0.3
+    try:
+        world.agent.stop()
+        from wan_helpers import AgentRunner
+        world.agent = AgentRunner(world.agent.cfg.dir, world.relay.url, world.local.port, code="1234")
+        eventually(lambda: world.entry() and world.entry()["online"] and world.entry()["code"] == "1234")
+        WanConfig(world.agent.cfg.dir).update(access_code="바뀐-코드-5")
+        eventually(lambda: world.entry()["code"] == "바뀐-코드-5", 10, msg="화면에서 바꾼 코드가 사용자 목록에 반영")
+        s = world.client.open_session(world.agent_id, world.entry()["code"])
+        s.close()
+    finally:
+        agent_mod.HEARTBEAT = old
+
+
+def test_set_config_code_is_visible_even_while_field_is_offline(world):
+    world.agent.stop()
+    eventually(lambda: not world.entry()["online"])
+    world.client.set_config(world.agent_id, {"access_code": "예약-코드"})
+    eventually(lambda: world.entry()["code"] == "예약-코드")
+
+
+def test_agents_without_code_show_empty_code(tmp_path):
+    w = World(tmp_path, code="", key="shared")
+    try:
+        assert w.entry()["code"] == ""
+    finally:
+        w.close()

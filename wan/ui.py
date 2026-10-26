@@ -732,8 +732,8 @@ class WanTabController:
         self.cfg.update(enabled=enabled)
         self.cfg.ensure_id()
         self._note("이 PC 를 원격 대상으로 사용합니다" if enabled else "이 PC 의 원격 대상 사용을 끕니다")
-        if enabled and not self.field_code():
-            self.log("접근 코드도 공용 키도 없어 모든 접속이 거부됩니다 — 접근 코드를 입력하세요")
+        if enabled:
+            self.cfg.ensure_access_code()              # 접근 코드가 없으면 무작위로 만든다 (중계 PC 가 접속하는 PC 에 알려 줌)
 
         def work():
             try:
@@ -856,7 +856,11 @@ class WanTabController:
         return self._codes.get(row_id) or (self.cfg.get("saved_codes") or {}).get(row_id, "")
 
     def default_code(self, row_id: str) -> str:
-        """더블클릭 때 쓸 코드: 한 번 입력해 둔 코드 → 없으면 공용 키 (코드를 따로 정하지 않은 현장은 공용 키로 열린다)"""
+        """더블클릭 때 쓸 코드: 중계 PC 가 알려 준 현장의 코드 → 한 번 입력해 둔 코드 → 없으면 공용 키"""
+        if not is_direct_id(row_id):
+            given = ((self.agent(row_id) or {}).get("code") or "").strip()      # 중계 PC 가 현장의 접근 코드를 알려 줌
+            if given:
+                return given
         return self.remembered_code(row_id) or (self.cfg.get("relay_key") or "").strip()
 
     def quick_connect(self, row_id: str) -> bool:
