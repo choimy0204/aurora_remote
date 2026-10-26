@@ -190,6 +190,7 @@ class WanTabController:
         self._public = None                 # 인터넷에서 보이는 이 망의 공인 IP
         self._public_at = -PUBLIC_RETRY
         self._public_busy = False
+        self._git_alerted = False           # Git 오류 알림 창을 이미 띄웠는지 (복구될 때까지 한 번만)
 
     @staticmethod
     def _thread_spawn(fn):
@@ -424,6 +425,31 @@ class WanTabController:
         if st.get("state") == "error":
             return str(st.get("msg") or "Git 오류"), "bad"
         return "", "off"
+
+    def check_git_alert(self):
+        """Git 서버에서 접속 정보를 가져오거나 올리지 못하면 사람이 알 수 있게 알림 창을 한 번 띄운다 (복구되면 다시 알림 가능).
+        WAN 이 꺼져 있거나 Git 저장소를 쓰지 않으면 아무 일도 없다"""
+        if not self.wan_on() or not (self.cfg.get("git_source") or "").strip():
+            self._git_alerted = False
+            return
+        try:
+            st = (self.ctx["git_state"]() if self.ctx.get("git_state") else {}) or {}
+        except Exception:
+            return
+        if st.get("state") != "error":
+            if st.get("state") == "ok" and self._git_alerted:
+                self._note("Git 서버와 다시 연결되었습니다")
+            self._git_alerted = self._git_alerted and st.get("state") not in ("ok", "off")
+            return
+        if self._git_alerted:
+            return
+        self._git_alerted = True
+        self._note(f"Git 서버 오류: {st.get('msg')}")
+        self._ui("show_error", "Git 서버에 연결할 수 없습니다",
+                 f"{st.get('msg')}\n\n접속 정보를 새로 받거나 올리지 못했습니다.\n"
+                 "· 이미 저장된 접속 정보로는 계속 접속됩니다 (중계 PC 의 키가 바뀌지 않았다면).\n"
+                 "· 키가 새로 바뀐 뒤에는 Git 서버가 복구될 때까지 접속이 안 될 수 있습니다.\n"
+                 "서버가 복구되면 자동으로 다시 시도합니다.")
 
     def relay_refresh_code(self) -> bool:
         """'새로고침': 공용 키를 무작위로 새로 만들어 Git 에 올린다.  기존 접속 정보는 사라지고 연결 중인 원격 세션은 끊긴다"""
@@ -1266,6 +1292,7 @@ class WanTabController:
         self.probe_targets()
 
     def tick_fast(self):
+        self.check_git_alert()
         self.refresh_relay()
         self.refresh_usage()
         self.refresh_field(reload=True)

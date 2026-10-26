@@ -716,3 +716,38 @@ def test_relay_refresh_updates_code_and_git_widgets():
     ctx["cfg"].d.update(git_source="https://git.corp/a.git", relay_rotate=True, relay_port=9100)
     ctl.refresh_relay()
     assert ui.last("set_relay_git") == ("https://git.corp/a.git", True, "Git 연결됨", "ok")
+
+
+# ── Git 서버 오류 알림 ──
+def alert_ctl(state, source="https://git.corp/a.git"):
+    box = {"st": state}
+    ctl, ctx, ui = git_ctl(git_state=lambda: box["st"])
+    ctx["cfg"].d["git_source"] = source
+    return ctl, ctx, ui, box
+
+
+def test_git_server_error_pops_up_once_until_recovered():
+    ctl, ctx, ui, box = alert_ctl({"state": "error", "msg": "Git 서버에 닿지 않습니다 — 사내망(VPN)에 연결되어 있는지 확인하세요"})
+    ctl.check_git_alert()
+    assert len(ui.all("show_error")) == 1
+    title, msg = ui.last("show_error")
+    assert "Git 서버" in title and "닿지 않습니다" in msg and "자동으로 다시 시도" in msg
+    ctl.check_git_alert(); ctl.tick_fast()
+    assert len(ui.all("show_error")) == 1                                   # 계속 꺼져 있어도 창은 한 번만
+    box["st"] = {"state": "ok", "msg": ""}
+    ctl.check_git_alert()
+    assert "다시 연결" in ui.last("set_log")[0][-1]
+    box["st"] = {"state": "error", "msg": "또 꺼짐"}
+    ctl.check_git_alert()
+    assert len(ui.all("show_error")) == 2                                   # 복구된 뒤 다시 꺼지면 다시 알림
+
+
+def test_no_git_alert_when_wan_off_or_git_not_used_or_healthy():
+    ctl, ctx, ui, box = alert_ctl({"state": "error", "msg": "x"}, source="")
+    ctl.check_git_alert()
+    ctl2, ctx2, ui2, box2 = alert_ctl({"state": "ok"})
+    ctl2.check_git_alert()
+    ctl3, ctx3, ui3, box3 = alert_ctl({"state": "error", "msg": "x"})
+    ctx3["wan_enabled"] = lambda: False
+    ctl3.check_git_alert()
+    assert not (ui.all("show_error") or ui2.all("show_error") or ui3.all("show_error"))
