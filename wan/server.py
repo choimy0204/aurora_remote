@@ -250,6 +250,8 @@ class RelayServer:
                 t = data.get("t")
                 if t == "set_config":
                     await self._set_config(ws, data)
+                elif t == "forget":
+                    await self._forget(ws, data)
                 elif t in ("connect", "relay"):
                     await self._open_session(ws, data)
                 elif t == "bye":
@@ -259,6 +261,19 @@ class RelayServer:
         finally:
             self.users.discard(ws)
             await self._end_sessions(lambda s: s.user_ws is ws, "user")
+
+    async def _forget(self, ws, data: dict):
+        """꺼져 있는 현장을 목록(저장소)에서 지운다.  켜져 있으면 거부 — 곧 다시 등록되기 때문"""
+        q, aid = data.get("q"), str(data.get("id", ""))
+        if aid not in self.store:
+            return await self._send(ws, json.dumps({"t": "err", "q": q, "reason": "unknown_agent"}))
+        if aid in self.agents:
+            return await self._send(ws, json.dumps({"t": "err", "q": q, "reason": "online"}))
+        del self.store[aid]
+        self.save()
+        log.info("현장 삭제: %s", aid)
+        await self._send(ws, json.dumps({"t": "ok", "q": q}))
+        await self._broadcast_agents()
 
     async def _set_config(self, ws, data: dict):
         q, aid = data.get("q"), str(data.get("id", ""))

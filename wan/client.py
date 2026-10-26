@@ -266,6 +266,20 @@ class WanClient:
             raise P.WanError("알 수 없는 현장 PC 입니다" if reply.get("reason") == "unknown_agent" else str(reply))
         return reply
 
+    def forget_agent(self, agent_id: str, timeout: float = 10) -> None:
+        """꺼져 있는 현장을 중계 PC 의 목록에서 지운다.  켜져 있거나 모르는 현장이면 예외"""
+        async def _go():
+            self._q += 1
+            q = self._q
+            fut = self._replies[q] = self._loop.create_future()
+            await self._send({"t": "forget", "q": q, "id": agent_id})
+            return await asyncio.wait_for(fut, timeout)
+        reply = self._run(_go(), timeout=timeout + 2)
+        if reply.get("t") == "err":
+            reason = reply.get("reason")
+            raise P.WanError("켜져 있는 현장은 지울 수 없습니다 — 현장 PC 를 끈 뒤 지우세요" if reason == "online"
+                             else "이미 없는 현장입니다" if reason == "unknown_agent" else str(reply))
+
     # ── 현장 연결 ──
     def open_session(self, agent_id: str, code: str, name: str = "") -> Session:
         if self.state != "연결됨":

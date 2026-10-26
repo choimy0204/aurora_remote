@@ -94,8 +94,7 @@ def test_explicit_access_code_is_not_opened_by_shared_key(tmp_path):
 def test_code_check_happens_on_field_and_relay_hands_code_to_users(world):
     """코드를 확인하는 곳은 현장 PC 이고, 중계 PC 는 현장이 알려 준(또는 설정 보내기로 정한) 코드를 인증된 사용자 PC 에 알려 준다"""
     world.client.set_config(world.agent_id, {"access_code": "secret-77"})
-    eventually(lambda: world.entry()["applied_rev"] == world.entry()["rev"])
-    assert world.entry()["code"] == "secret-77"                      # 중계 PC 가 공용 키를 가진 사용자 PC 에 현장 코드를 알려 준다
+    eventually(lambda: world.entry()["code"] == "secret-77", msg="중계 PC 가 공용 키를 가진 사용자 PC 에 현장 코드를 알려 준다")
 
 
 def test_brute_force_lockout(world, monkeypatch):
@@ -421,3 +420,15 @@ def test_agents_without_code_show_empty_code(tmp_path):
         assert w.entry()["code"] == ""
     finally:
         w.close()
+
+
+# ── 현장 삭제 ──
+def test_offline_agent_can_be_forgotten_and_online_one_cannot(world):
+    with pytest.raises(P.WanError, match="켜져 있는"):
+        world.client.forget_agent(world.agent_id)
+    world.agent.stop()
+    eventually(lambda: not world.entry()["online"])
+    world.client.forget_agent(world.agent_id)
+    eventually(lambda: world.entry() is None, msg="목록에서 사라짐")
+    with pytest.raises(P.WanError, match="이미 없는"):
+        world.client.forget_agent(world.agent_id)

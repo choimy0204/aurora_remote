@@ -829,10 +829,9 @@ class WanTabController:
         self._spawn(work)
 
     def forget_target(self, row_id: str) -> bool:
-        """주소로 접속했던 현장을 목록에서 지움"""
+        """목록에서 지우기.  주소로 접속했던 현장은 바로 지우고, 중계 PC 의 현장은 (꺼져 있을 때만) 확인을 받아 중계 PC 목록에서 지운다"""
         if not is_direct_id(row_id):
-            self._ui("show_info", "목록에서 지우기", "중계 PC 에 등록된 현장은 목록에서 지울 수 없습니다 (현장 PC 를 끄면 '꺼짐'으로 표시됩니다)")
-            return False
+            return self._forget_relay(row_id)
         targets = self.direct_targets()
         if targets.pop(str(row_id)[len(DIRECT_ID):], None) is None:
             return False
@@ -840,6 +839,61 @@ class WanTabController:
         self._codes.pop(row_id, None)
         self.refresh_agents()
         return True
+
+    def rename_target(self, row_id: str, name) -> bool:
+        """목록의 이름 바꾸기.  주소로 접속했던 현장은 이 PC 에만 저장하고, 중계 PC 의 현장은 '설정 보내기'와 같은 경로로 현장에 보낸다
+        (꺼져 있으면 다음 접속 때 적용되고, 중계 PC 목록에는 바로 바뀐 이름이 보인다)"""
+        name = (name or "").strip()
+        if not name:
+            self._ui("show_error", "이름 바꾸기", "이름을 입력하세요")
+            return False
+        if len(name) > NAME_MAX:
+            self._ui("show_error", "이름 바꾸기", f"이름은 {NAME_MAX}자 이하여야 합니다")
+            return False
+        if not is_direct_id(row_id):
+            if self.agent(row_id) is None:
+                self._ui("show_error", "이름 바꾸기", "목록에서 현장 PC 를 먼저 선택하세요")
+                return False
+            return self.send_config(row_id, name=name)
+        address = str(row_id)[len(DIRECT_ID):]
+        targets = self.direct_targets()
+        if address not in targets:
+            return False
+        targets[address] = dict(targets[address], name=name)
+        self.cfg.update(direct_targets=targets)
+        self.refresh_agents()
+        return True
+
+    def _forget_relay(self, agent_id: str) -> bool:
+        agent = self.agent(agent_id)
+        if agent is None:
+            return False
+        if agent.get("online"):
+            self._ui("show_info", "삭제", "켜져 있는 현장은 지울 수 없습니다 — 현장 PC 를 끈 뒤 지우세요")
+            return False
+        label = self._label(agent_id, agent)
+        self._ui("ask_yes_no", "현장 삭제",
+                 f"'{label}' 을(를) 중계 PC 의 현장 목록에서 지울까요?\n(이 중계 PC 를 쓰는 모든 PC 의 목록에서 사라집니다. 그 PC 가 다시 켜지면 새로 나타납니다)",
+                 lambda yes: self._do_forget_relay(agent_id, label) if yes else None)
+        return True
+
+    def _do_forget_relay(self, agent_id: str, label: str):
+        def work():
+            try:
+                self.client.forget_agent(agent_id)
+            except Exception as e:
+                text = str(e) or type(e).__name__
+                self._note(f"{label} 삭제 실패: {text}")
+                self._ui("show_error", "삭제", text)
+            else:
+                self._saved_forget(agent_id)
+                self._note(f"{label} 을(를) 목록에서 지웠습니다")
+                self.refresh_agents()
+        self._spawn(work)
+
+    def _saved_forget(self, agent_id: str):
+        self._forget_code(agent_id)
+        self._codes.pop(agent_id, None)
 
     def on_client_change(self, what):
         """WanClient.on_change — 클라이언트 스레드에서 불림.  화면 갱신은 화면 스레드로"""
@@ -1203,7 +1257,7 @@ class WanTab(NullUI):
         sb.pack(side="left", fill="y")
         self.tree.bind("<Double-1>", lambda e: self._connect())
         self.tree.bind("<Return>", lambda e: self._connect())
-        self.tree.bind("<Delete>", lambda e: self._forget())
+        self.tree.bind("<Delete>", lambda e: self._forget(quiet=True))
         self.tree.bind("<Button-3>", self._row_menu)
         row = tk.Frame(box, bg=app.PANEL)
         row.pack(fill="x", pady=(px(8), 0))
@@ -1214,6 +1268,11 @@ class WanTab(NullUI):
         app._tip(self.add_btn, "중계 PC 접속 정보 · 현장 PC 접속 정보를 붙여넣거나, 현장 PC 주소와 접근 코드를 입력합니다")
         self.config_btn = app._button(row, "설정 보내기", "secondary", self._config_dialog, small=True)
         self.config_btn.pack(side="right")
+        self.delete_btn = app._button(row, "삭제", "danger", self._forget, small=True)
+        self.delete_btn.pack(side="right", padx=(0, px(6)))
+        self.rename_btn = app._button(row, "이름 바꾸기", "secondary", self._rename, small=True)
+        self.rename_btn.pack(side="right", padx=(0, px(6)))
+        app._tip(self.delete_btn, "선택한 현장을 목록에서 지웁니다 (꺼져 있는 현장 · 주소로 접속했던 현장)")
         app._tip(self.config_btn, "선택한 현장 PC 의 이름·접근 코드·최고 화질·파일 전송을 바꿉니다 (꺼져 있으면 다음 접속 때 적용)")
 
     def _build_field(self):
@@ -1373,9 +1432,20 @@ class WanTab(NullUI):
         if row_id:
             self.controller.quick_connect(row_id)
 
-    def _forget(self):
-        row_id = self._selected(quiet=True)
-        if row_id and is_direct_id(row_id):
+    def _rename(self):
+        row_id = self._selected()
+        if not row_id:
+            return
+        agent = self.controller.agent(row_id) or {}
+        current = (agent.get("name") or "").strip()
+        new = self.sd.askstring("이름 바꾸기", "새 이름을 입력하세요", parent=self.root,
+                                initialvalue="" if current == (agent.get("address") or "") else current)
+        if new is not None:
+            self.controller.rename_target(row_id, new)
+
+    def _forget(self, quiet=False):
+        row_id = self._selected(quiet=quiet)
+        if row_id:
             self.controller.forget_target(row_id)
 
     def _row_menu(self, event):
@@ -1386,10 +1456,10 @@ class WanTab(NullUI):
         self.tree.selection_set(row)
         menu = self.tk.Menu(self.tree, tearoff=0)
         menu.add_command(label="원격 연결", command=self._connect)
-        if is_direct_id(row):
-            menu.add_command(label="목록에서 지우기", command=self._forget)
-        else:
+        if not is_direct_id(row):
             menu.add_command(label="설정 보내기", command=self._config_dialog)
+        menu.add_command(label="이름 바꾸기", command=self._rename)
+        menu.add_command(label="목록에서 삭제", command=self._forget)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:

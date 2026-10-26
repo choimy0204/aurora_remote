@@ -128,14 +128,13 @@ def test_quick_connect_unknown_row_is_error():
 
 
 # ── 목록 관리 ──
-def test_forget_target_removes_only_address_rows():
+def test_forget_address_target_removes_it_immediately():
     ctl, ctx, ui, direct = direct_ctl()
     ctx["cfg"].d["direct_targets"] = {"10.0.0.5:9102": {"name": "a", "code": "c", "last": 0}}
     assert ctl.forget_target("d:10.0.0.5:9102") is True
     assert ctx["cfg"].get("direct_targets") == {}
     assert ctl.forget_target("d:10.0.0.5:9102") is False
-    assert ctl.forget_target("relay-agent-id") is False
-    assert "지울 수 없" in ui.last("show_info")[1]
+    assert ctl.forget_target("unknown-agent") is False
 
 
 def test_send_config_to_address_target_explains():
@@ -487,3 +486,64 @@ def test_config_generates_unique_random_codes_once(tmp_path):
     assert WanConfig(str(tmp_path / "a")).get("access_code") == ca           # 저장됨
     a.update(access_code="내가-정한-코드")
     assert a.ensure_access_code() == "내가-정한-코드"                          # 직접 정한 코드는 덮어쓰지 않음
+
+
+# ── 삭제 · 이름 바꾸기 ──
+def relay_rows(ctl, ctx, online=False):
+    ctx["client"].agents = [{"id": "x1", "name": "main", "online": online, "last_seen": 1, "rev": 0, "applied_rev": 0}]
+    ctx["client"].forget_agent = MagicMock()
+
+
+def test_offline_relay_agent_is_deleted_after_confirmation():
+    ctl, ctx, ui, _ = direct_ctl()
+    relay_rows(ctl, ctx)
+    asked = []
+    ui.ask_yes_no = lambda title, msg, cb: (asked.append(msg), cb(True))
+    assert ctl.forget_target("x1") is True
+    ctx["client"].forget_agent.assert_called_once_with("x1")
+    assert "main" in asked[0] and "모든 PC" in asked[0]
+
+
+def test_delete_cancelled_does_nothing():
+    ctl, ctx, ui, _ = direct_ctl()
+    relay_rows(ctl, ctx)
+    ui.ask_yes_no = lambda title, msg, cb: cb(False)
+    ctl.forget_target("x1")
+    ctx["client"].forget_agent.assert_not_called()
+
+
+def test_online_relay_agent_cannot_be_deleted():
+    ctl, ctx, ui, _ = direct_ctl()
+    relay_rows(ctl, ctx, online=True)
+    ui.ask_yes_no = MagicMock()
+    assert ctl.forget_target("x1") is False
+    ui.ask_yes_no.assert_not_called()
+    assert "켜져 있는" in ui.last("show_info")[1]
+
+
+def test_delete_failure_is_reported():
+    ctl, ctx, ui, _ = direct_ctl()
+    relay_rows(ctl, ctx)
+    ctx["client"].forget_agent.side_effect = WanError("안내 서버에 연결되어 있지 않습니다")
+    ui.ask_yes_no = lambda t, m, cb: cb(True)
+    ctl.forget_target("x1")
+    assert "연결되어 있지 않" in ui.last("show_error")[1]
+
+
+def test_rename_address_target_is_local_and_relay_agent_goes_through_config():
+    ctl, ctx, ui, _ = direct_ctl()
+    ctx["cfg"].d["direct_targets"] = {"10.0.0.5:9102": {"name": "a", "code": "c", "last": 0}}
+    assert ctl.rename_target("d:10.0.0.5:9102", " 사무실 ") is True
+    assert ctx["cfg"].get("direct_targets")["10.0.0.5:9102"]["name"] == "사무실"
+    assert dict(ctl.rows_with_ids())["d:10.0.0.5:9102"][0] == "사무실"
+    relay_rows(ctl, ctx)
+    assert ctl.rename_target("x1", "CCW-2") is True
+    assert ctx["client"].calls[-1] == ("cfg", "x1", {"name": "CCW-2"})
+
+
+def test_rename_rejects_empty_long_or_unknown():
+    ctl, ctx, ui, _ = direct_ctl()
+    assert ctl.rename_target("x1", "  ") is False
+    assert ctl.rename_target("x1", "가" * 41) is False
+    assert ctl.rename_target("nope", "이름") is False
+    assert len(ui.all("show_error")) == 3
