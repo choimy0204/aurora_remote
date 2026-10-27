@@ -535,6 +535,7 @@ class _DesktopDup:
     모든 메서드는 호출하는 쪽(RemoteHost._cap_lock)에서 한 번에 하나씩만 부른다."""
     RETRY = 1.0          # 보안 화면 등으로 복제를 못 열었을 때 다시 시도하는 간격
     ROUGH_MAX = 3.0      # 화면 전체가 계속 바뀌어도 이 시간마다 한 번은 선명하게 읽음
+    BURST = 0.4          # 크게 바뀐 뒤 이 시간 안에 또 크게 바뀌면 '계속 바뀌는 중' → 그때부터 거칠게 (한 번만 바뀐 건 바로 선명하게)
 
     def __init__(self):
         self._devs = []   # [(device, context)]
@@ -622,7 +623,7 @@ class _DesktopDup:
                                    "rect": (r.left, r.top, r.right - r.left, r.bottom - r.top),
                                    "rot": desc.Rotation, "dup": None, "stage": None,
                                    "sysmem": False, "img": None, "full": True, "retry": 0.0,
-                                   "stale": 0.0, "rough": None})
+                                   "stale": 0.0, "rough": None, "big": 0.0})
             finally:
                 _rel(out)
 
@@ -689,8 +690,7 @@ class _DesktopDup:
                 if rects == []:
                     rects = "same"
                 elif rects is None:                                # 화면 대부분이 바뀜 → 거칠게 먼저
-                    rough = rough_ok and not o["sysmem"] and \
-                        (not o["stale"] or time.monotonic() - o["stale"] < self.ROUGH_MAX)
+                    rough = self._rough_wanted(o, rough_ok, time.monotonic())
                 elif o["stale"]:                                   # 잠잠해짐 → 선명하게 통째로
                     rects = None
             if rects == "same":
@@ -765,6 +765,13 @@ class _DesktopDup:
         finally:
             _com(o["ctx"], 15, _P, wt.UINT, res=None)(o["ctx"], o["stage"], 0)    # Unmap
         return True
+
+    def _rough_wanted(self, o: dict, rough_ok: bool, now: float) -> bool:
+        """화면 대부분이 바뀜 → 거친 화면으로 먼저 보낼지.  창 전환처럼 한 번만 크게 바뀐 건 바로 선명하게 읽는 편이
+        (거친 화면 → 선명한 화면 두 번보다) 덜 번지고 비용도 비슷함.  계속 바뀌는 중(영상 · 스크롤)일 때만 거칠게"""
+        burst = now - o["big"] < self.BURST
+        o["big"] = now
+        return bool(rough_ok and burst and not o["sysmem"] and (not o["stale"] or now - o["stale"] < self.ROUGH_MAX))
 
     def _sharpen(self, o: dict) -> list:
         """거칠게만 읽어 둔 화면을 GPU 사본에서 선명하게 다시 읽음 (그 뒤 새 화면이 없을 때)"""
@@ -949,6 +956,7 @@ class RemoteHost:
     IDLE_INTERVAL = 0.3     # 화면이 그대로일 때 캡처 간격
     MAX_FRESH_GAP = 1.0     # 처음 여는 캡처(준비 비용 포함) 뒤 쉬는 시간 상한
     ROUGH_Q      = 45       # 화면 전체가 바뀌는 동안 보내는 거친 화면의 화질 상한
+    ROUGH_Q_WAN  = 65       # 보는 쪽이 rough=2 로 요청하면(WAN) 거친 화면도 덜 번지게 — 작은 그림이라 데이터 차이는 적음
     IDLE_RELEASE = 3.0      # 입력 소식이 이만큼 없으면 눌린 키·버튼을 뗌
     SESSION_END  = 15.0     # 보는 쪽 소식이 이만큼 없으면 세션 종료
     MAX_EVENTS   = 200      # 입력 요청 1개에 담을 수 있는 최대 이벤트
@@ -1161,15 +1169,15 @@ class RemoteHost:
                     return _pack(meta)                    # 화면 그대로 → 압축·전송 생략
                 ss = _fit(fr["img"].size, box)
                 rough = fr.get("rough")
-                small = rough is not None and q.get("rough") == "1"   # 보는 쪽이 거친 화면을 직접 키울 수 있음
-                key = (fr["seq"], -2 if rough is not None else last, None if small else ss, qual)
+                small = rough is not None and q.get("rough") in ("1", "2")   # 보는 쪽이 거친 화면을 직접 키울 수 있음
+                key = (fr["seq"], -2 if rough is not None else last, None if small else ss, qual, q.get("rough") == "2")
                 hit = self._jpeg.get(key)
                 if hit is None:
                     t0 = time.perf_counter()
                     with low_priority(-2):
                         if rough is not None:
                             im = rough if small else rough.resize(ss, Image.BILINEAR)
-                            j = _jpeg(im, min(qual, self.ROUGH_Q))
+                            j = _jpeg(im, min(qual, self.ROUGH_Q_WAN if q.get("rough") == "2" else self.ROUGH_Q))
                             hit = [[0, 0, im.width, im.height, len(j)]], j, None
                         else:
                             hit = self._encode(fr, ss, qual, last)
@@ -1780,7 +1788,7 @@ class RemoteViewer:
             if im.mode != "RGB":
                 im = im.convert("RGB")
             if meta.get("rough") and base is None and len(size) == 2 and im.size != size:
-                im = im.resize(size, Image.BILINEAR)   # 장비가 작게 보낸 거친 화면 → 여기서 키움
+                im = im.resize(size, Image.BICUBIC)    # 장비가 작게 보낸 거친 화면 → 여기서 키움 (BILINEAR 보다 덜 번짐)
             if base is None:                           # 통째로 — UI 에는 사본을 넘김 (이후 조각은 _base 에 붙음)
                 self._base = im
                 ops = [("full", im.copy())]

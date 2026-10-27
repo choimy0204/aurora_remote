@@ -300,3 +300,25 @@ def test_saver_overlaps_requests_only_when_the_link_is_slow(env):
     env["run"](4.0)
     assert sess.peak_inflight == 2                      # 왕복이 느리면 절약도 겹쳐 보냄
     settle(env, v, host, stop)
+
+
+# ── 거친 화면(모자이크) 줄이기 ──
+def test_one_off_big_change_is_read_sharp_but_continuous_change_goes_rough(env):
+    ar = env["ar"]
+    dup = ar._DesktopDup()
+    o = {"big": 0.0, "stale": 0.0, "sysmem": False}
+    assert dup._rough_wanted(o, True, 10.0) is False       # 처음 크게 바뀜(창 전환 등) → 바로 선명하게
+    assert dup._rough_wanted(o, True, 10.2) is True        # 0.4초 안에 또 → 계속 바뀌는 중 → 거칠게
+    assert dup._rough_wanted(o, True, 11.0) is False       # 한참 잠잠했다가 다시 → 다시 선명하게 시작
+    assert dup._rough_wanted(o, False, 11.1) is False      # 거친 화면을 못 쓰는 경우(여러 모니터 등)
+    o["sysmem"] = True
+    assert dup._rough_wanted(o, True, 11.2) is False
+    o.update(sysmem=False, stale=11.2)
+    assert dup._rough_wanted(o, True, 11.3 + dup.ROUGH_MAX) is False   # 너무 오래 거칠었으면 한 번은 선명하게
+
+
+def test_wan_viewer_asks_for_better_rough_frames(env):
+    v, host, sess, stop = env["start"](rtt=0.0, quality="보통", fast=False)
+    env["run"](0.6)
+    stop.set()
+    assert all(p.get("rough") == 2 for p in frame_requests(sess))

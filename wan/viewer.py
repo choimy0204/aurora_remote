@@ -140,7 +140,7 @@ def make_viewer_class(base):
                 t0 = time.monotonic()
                 try:
                     r = self._req("/remote/frame", {"mon": self._mon, "w": self._want[0], "h": self._want[1],
-                                                    "q": q, "last": last, "rough": 1, "pipe": int(depth > 1)},
+                                                    "q": q, "last": last, "rough": 2, "pipe": int(depth > 1)},
                                   timeout=(3, 8))
                 except Exception:
                     self._lost_since = self._lost_since or time.monotonic()
