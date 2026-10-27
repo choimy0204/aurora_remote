@@ -114,6 +114,15 @@ def test_pipelined_request_skips_changes_already_sent(win):
     assert plain.get("parts")
 
 
+def test_wan_viewer_request_makes_host_rest_less(win):
+    """rough=2(WAN 보는 쪽) 요청이면 캡처 뒤 쉬는 배수가 DUTY_WAN, 아니면 DUTY (LAN 은 그대로)"""
+    ar, host = win["ar"], win["host"]
+    host.frame({"sid": "d1", "mon": -1, "w": 800, "h": 600, "q": 60, "last": -1, "rough": 2}, "시험")
+    assert host._duty == host.DUTY_WAN < host.DUTY
+    host.frame({"sid": "d2", "mon": -1, "w": 800, "h": 600, "q": 60, "last": -1, "rough": 1}, "시험")
+    assert host._duty == host.DUTY
+
+
 def test_unchanged_screen_returns_no_parts(win):
     meta1, _ = grab(win)
     time.sleep(1.0)

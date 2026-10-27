@@ -952,6 +952,7 @@ def _qint(q: dict, name: str, default: int, lo: int, hi: int) -> int:
 class RemoteHost:
     MIN_INTERVAL = 1 / 20   # 캡처 최소 간격 (초)
     DUTY         = 4.0      # 캡처·압축에 걸린 시간의 이 배수만큼 쉼 → 한 코어의 1/5 이하 (Radmin·원격 데스크톱 수준)
+    DUTY_WAN     = 2.5      # 보는 쪽이 rough=2 로 요청하면(WAN) 인터넷 지연 때문에 화면 수가 모자라므로 덜 쉼 → 계속 움직일 때 한 코어의 약 2/7
     HISTORY      = 300      # 바뀐 영역 기록 개수 (보는 쪽이 이보다 뒤처지면 통째로 보냄)
     IDLE_INTERVAL = 0.3     # 화면이 그대로일 때 캡처 간격
     MAX_FRESH_GAP = 1.0     # 처음 여는 캡처(준비 비용 포함) 뒤 쉬는 시간 상한
@@ -977,6 +978,7 @@ class RemoteHost:
         self._streams  = {}                  # (영역, 줄인 크기) → 줄인 화면 (바뀐 칸만 다시 줄임)
         self._seq      = int(time.time() * 1000)   # 클라이언트를 다시 켜도 번호가 겹치지 않게
         self._next_cap = 0.0
+        self._duty = self.DUTY          # 마지막 요청에 맞춘 쉬는 배수 (WAN 보는 쪽이면 DUTY_WAN)
         self._mons     = (0.0, [])
 
     # ── 세션 ─────────────────────────────
@@ -1091,8 +1093,8 @@ class RemoteHost:
             # 띠 사이에 쉬거나 GPU 복사를 기다린 시간은 CPU 를 안 쓰므로 뺌. 처음 여는 준비 비용(한 번뿐)은 1초까지만 쉼
             cost -= _slept[0] - s0
             if fresh:
-                cost = min(cost, self.MAX_FRESH_GAP / self.DUTY)
-            gap = max(self.IDLE_INTERVAL if same else self.MIN_INTERVAL, cost * self.DUTY)
+                cost = min(cost, self.MAX_FRESH_GAP / self._duty)
+            gap = max(self.IDLE_INTERVAL if same else self.MIN_INTERVAL, cost * self._duty)
         self._next_cap = time.monotonic() + gap
         return fr
 
@@ -1145,6 +1147,7 @@ class RemoteHost:
         box  = (_qint(q, "w", 1280, 64, 7680), _qint(q, "h", 720, 64, 4320))
         qual = _qint(q, "q", 60, 20, 90)
         last = _qint(q, "last", -1, -1, 1 << 62)
+        self._duty = self.DUTY_WAN if str(q.get("rough")) == "2" else self.DUTY
         pipe = _qint(q, "pipe", 0, 0, 1)    # 1 = 보는 쪽이 요청을 겹쳐 보냄 → 방금 보낸 번호 이후의 변경분만 (같은 조각을 두 번 안 보냄)
         meta = {}
         if not self._cap_lock.acquire(timeout=self.LOCK_WAIT):
@@ -1184,7 +1187,7 @@ class RemoteHost:
                     if len(self._jpeg) >= 8:
                         self._jpeg = {}
                     self._jpeg[key] = hit
-                    spent = (time.perf_counter() - t0) * self.DUTY
+                    spent = (time.perf_counter() - t0) * self._duty
                     if not self._hist:                     # 처음 한 장(압축기 준비 비용 포함)
                         spent = min(spent, self.MAX_FRESH_GAP)
                     self._next_cap += spent
