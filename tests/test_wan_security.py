@@ -12,7 +12,7 @@ from wan import netutil
 from wan.agent import CODE_FAILS, WanAgent
 from wan.config import DEFAULT_RELAY_KEY
 from wan.server import KEY_FAILS, KEY_LOCK, RelayServer
-from wan_helpers import FakeCfg
+from wan_helpers import FakeCfg, patch_ui
 from test_wan_ui import make_ctl, FakeCfg as UiCfg
 
 
@@ -126,9 +126,9 @@ def test_relay_path_lockout_is_still_global():
 
 # ── 자동 설정 ──
 def setup_ctl(monkeypatch, **cfg):
-    monkeypatch.setattr(wui, "is_admin", lambda: True)
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.140"])
-    monkeypatch.setattr(wui, "open_firewall", lambda port: (True, "열었습니다"))
+    patch_ui(monkeypatch, "is_admin", lambda: True)
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["192.168.0.140"])
+    patch_ui(monkeypatch, "open_firewall", lambda port: (True, "열었습니다"))
     ctl, ctx, ui = make_ctl(cfg=UiCfg(relay_port=9100, **cfg), relay_available=True,
                             set_relay_host=MagicMock(), restart_relay=MagicMock(), relay_state=lambda: {"state": "stopped"})
     ctx["client"] = MagicMock()

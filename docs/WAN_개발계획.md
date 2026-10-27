@@ -35,7 +35,7 @@
 | `wan/agent.py` | 현장 에이전트: 상시 연결·재접속·접속 코드 확인·ID 중복 처리 |
 | `wan/client.py` | 사용자 쪽: 목록·설정 보내기·연결(직접→중계)·끊기면 자동 재연결 |
 | `wan/supervisor.py` · `runtime.py` | 에이전트 프로세스 감독 · AuroraClient와의 단일 접점 |
-| `wan/ui.py` · `viewer.py` | "WAN 원격" 탭 · `WanRemoteViewer`(항상 절약으로 시작, 사용량 표시) |
+| `wan/ui.py`(입구) · `ui_base/controller/relay/field/targets/tab.py` · `viewer.py` | "WAN 원격" 탭 · `WanRemoteViewer`(항상 절약으로 시작, 사용량 표시) |
 | `wan/update.py` | 안내 서버에서 새 버전 내려받기(SHA-256 검증) |
 
 수정한 기존 파일: `aurora_client.py`(연결점만, 아래 3절), `AuroraClient.spec`(hiddenimports), `build.bat`(WAN 패키지 선택 설치), `.gitignore`.

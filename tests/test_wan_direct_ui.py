@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from wan_helpers import patch_ui
 
 import wan.ui as wui
 from wan import connect_code as cc
@@ -186,7 +187,7 @@ def test_access_code_too_long_rejected():
 
 def test_field_address_text_and_direct_code(monkeypatch):
     ctl, ctx, ui, _ = direct_ctl(direct_port=9555)
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.5", "10.1.1.1"])
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["192.168.0.5", "10.1.1.1"])
     assert ctl.field_address_text() == "192.168.0.5:9555"
     ctl._public = "211.1.2.3"
     assert ctl.field_address_text() == "192.168.0.5:9555  ·  공인 211.1.2.3:9555"
@@ -198,13 +199,13 @@ def test_field_address_text_and_direct_code(monkeypatch):
 
 def test_field_address_without_network(monkeypatch):
     ctl, _, _, _ = direct_ctl()
-    monkeypatch.setattr(wui, "lan_addresses", lambda: [])
+    patch_ui(monkeypatch, "lan_addresses", lambda: [])
     assert "찾지 못" in ctl.field_address_text() and ctl.field_direct_code() == ""
 
 
 def test_copy_field_code_goes_through_ui(monkeypatch):
     ctl, ctx, ui, _ = direct_ctl()
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.5"])
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["192.168.0.5"])
     ctl.copy_field_code()
     text, msg = ui.last("copy_text")
     assert cc.kind_of(text) == "direct" and "연결 추가" in msg
@@ -265,7 +266,7 @@ def test_field_status_survives_broken_agent_info():
 # ── 설정 파일 ──
 def test_save_connection_file_writes_relay_code(tmp_path, monkeypatch):
     ctl, ctx, ui, _ = direct_ctl(relay_port=9100, relay_external="")
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.140"])
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["192.168.0.140"])
     path = str(tmp_path / "x.conn")
     assert ctl.save_connection_file(path) is True
     assert cc.decode(connfile.read(path)) == (["ws://192.168.0.140:9100"], "공용키")
@@ -274,17 +275,17 @@ def test_save_connection_file_writes_relay_code(tmp_path, monkeypatch):
 
 def test_save_connection_file_without_code_or_bad_path(tmp_path, monkeypatch):
     ctl, ctx, ui, _ = direct_ctl(relay_port=9100)
-    monkeypatch.setattr(wui, "lan_addresses", lambda: [])
+    patch_ui(monkeypatch, "lan_addresses", lambda: [])
     assert ctl.save_connection_file(str(tmp_path / "x.conn")) is False
     assert "자동 설정" in ui.last("show_error")[1]
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.140"])
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["192.168.0.140"])
     assert ctl.save_connection_file(str(tmp_path / "no_such_dir" / "x.conn")) is False
     assert "저장하지 못했습니다" in ui.last("show_error")[1]
 
 
 def test_save_connection_dialog_asks_path_then_saves(tmp_path, monkeypatch):
     ctl, ctx, ui, _ = direct_ctl(relay_port=9100)
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.140"])
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["192.168.0.140"])
     ctx["conn_dirs"] = [str(tmp_path)]
     asked = []
     ui.ask_save_path = lambda directory, name, cb: (asked.append((directory, name)), cb(str(tmp_path / name)))
@@ -368,7 +369,7 @@ def test_field_on_tries_to_open_direct_port_in_firewall(monkeypatch, ok, expect)
     ctl, ctx, ui, _ = direct_ctl()
     calls = []
     monkeypatch.setattr(wui.os, "name", "nt")
-    monkeypatch.setattr(wui, "open_firewall",
+    patch_ui(monkeypatch, "open_firewall",
                         lambda port, direct=False: (calls.append((port, direct)), (ok, "방화벽에서 TCP 9102 를 열었습니다"))[1])
     ctl.field_toggled(True)
     assert calls == [(9102, True)]
@@ -380,14 +381,14 @@ def test_field_on_tries_to_open_direct_port_in_firewall(monkeypatch, ok, expect)
 
 def test_field_on_does_not_touch_firewall_off_windows(monkeypatch):
     ctl, ctx, ui, _ = direct_ctl()
-    monkeypatch.setattr(wui, "open_firewall", MagicMock(side_effect=AssertionError("부르면 안 됨")))
+    patch_ui(monkeypatch, "open_firewall", MagicMock(side_effect=AssertionError("부르면 안 됨")))
     ctl.field_toggled(True)
 
 
 # ── 인증서 지문 ──
 def test_relay_code_uses_wss_and_fingerprint_when_encryption_is_available(monkeypatch):
     ctl, ctx, ui, _ = direct_ctl(relay_port=9100, relay_external="203.0.113.5")
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.140"])
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["192.168.0.140"])
     assert cc.decode_full(ctl.relay_code()) == (["ws://203.0.113.5:9100", "ws://192.168.0.140:9100"], "공용키", "")
     ctx["relay_fp"] = lambda: "ab" * 32
     urls, key, fp = cc.decode_full(ctl.relay_code())
@@ -654,7 +655,7 @@ def test_refresh_code_unavailable_without_runtime_support():
 
 
 def test_publish_git_needs_address_and_code(monkeypatch):
-    monkeypatch.setattr(wui, "lan_addresses", lambda: [])
+    patch_ui(monkeypatch, "lan_addresses", lambda: [])
     ctl, ctx, ui = git_ctl()
     assert ctl.publish_git("  ") is False and "주소" in ui.last("show_error")[1]
     ctx["cfg"].d.update(relay_port=9100)

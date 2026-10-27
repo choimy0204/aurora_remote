@@ -7,6 +7,7 @@ import sys
 import threading
 
 import pytest
+from wan_helpers import patch_ui
 
 tkinter = pytest.importorskip("tkinter")
 
@@ -155,13 +156,13 @@ def test_auto_button_and_connect_dialog_with_real_widgets(app, monkeypatch):
     tab.set_relay_code("AW1-test")
     assert tab.relay_code_var.get() == "AW1-test"
     from wan import ui as wan_ui
-    monkeypatch.setattr(wan_ui, "is_admin", lambda: False)             # 주기 갱신이 관리자 여부를 다시 계산하므로 값을 고정
+    patch_ui(monkeypatch, "is_admin", lambda: False)             # 주기 갱신이 관리자 여부를 다시 계산하므로 값을 고정
     tab.controller.refresh_relay()
     app.root.update()
     tab._relay_expand(True)
     app.root.update()
     assert tab.admin_btn.winfo_ismapped()                               # 관리자가 아니면 '관리자로 다시 시작' 버튼이 보임
-    monkeypatch.setattr(wan_ui, "is_admin", lambda: True)
+    patch_ui(monkeypatch, "is_admin", lambda: True)
     tab.controller.refresh_relay()
     app.root.update()
     assert not tab.admin_btn.winfo_ismapped()

@@ -380,3 +380,15 @@ def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def patch_ui(monkeypatch, name, value):
+    """wan.ui 가 여러 파일(ui_relay · ui_field · …)로 나뉘어 있어서, 그 이름을 쓰는 모든 조각에서 같이 바꿈"""
+    import importlib
+    hit = 0
+    for mod in ("ui_base", "ui_controller", "ui_relay", "ui_field", "ui_targets", "ui_tab"):
+        m = importlib.import_module(f"wan.{mod}")
+        if hasattr(m, name):
+            monkeypatch.setattr(m, name, value)
+            hit += 1
+    assert hit, f"wan.ui_* 어디에도 {name} 이(가) 없음"

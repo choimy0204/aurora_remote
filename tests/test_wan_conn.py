@@ -10,7 +10,7 @@ import pytest
 from wan import connect_code, connfile, netutil
 from wan.config import WanConfig
 from wan.runtime import WanRuntime
-from wan_helpers import eventually, free_port
+from wan_helpers import eventually, free_port, patch_ui
 
 RELAY_CODE = connect_code.encode(["ws://127.0.0.1:9100"], "k1")
 DIRECT_CODE = connect_code.encode_direct(["ws://192.168.0.5:9102"], "c0de")
@@ -283,7 +283,7 @@ def test_relay_pc_does_not_apply_other_relays_file(tmp_path, monkeypatch):
 def test_saving_file_on_this_pc_marks_it_as_already_applied(tmp_path, monkeypatch):
     """중계 PC 가 exe 옆에 저장한 파일을 다음 실행 때 자기 자신에게 다시 적용하지 않는다"""
     import wan.ui as wui
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.140"])
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["192.168.0.140"])
     from test_wan_ui import make_ctl, FakeCfg
     ctl, ctx, ui = make_ctl(cfg=FakeCfg(relay_key="k", relay_port=9100))
     path = str(tmp_path / connfile.FILE_NAME)

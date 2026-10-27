@@ -24,7 +24,7 @@ a = Analysis(
     datas=[('aurora_client.ico', '.'), ('assets', 'assets')],
     # WAN 원격(wan 패키지) — 함수 안에서 늦게 불러오는 모듈들이라 명시. 설치되지 않은 것은 빌드 때 경고만 나고
     # 건너뜀(aiortc 가 없으면 직접 연결 없이 비상 중계만, websockets 도 없으면 WAN 탭만 "사용할 수 없음")
-    hiddenimports=['wan.runtime', 'wan.ui', 'wan.viewer', 'wan.supervisor', 'wan.update', 'wan.client',
+    hiddenimports=['wan.runtime', 'wan.ui', 'wan.ui_base', 'wan.ui_controller', 'wan.ui_relay', 'wan.ui_field', 'wan.ui_targets', 'wan.ui_tab', 'wan.viewer', 'wan.supervisor', 'wan.update', 'wan.client',
                    'wan.agent', 'wan.server', 'wan.bridge', 'wan.mux', 'wan.links', 'wan.config', 'wan.usage',
                    'wan.protocol', 'wan.relay_run', 'wan.netutil', 'wan.direct', 'wan.connfile', 'wan.connect_code',
                    'websockets.asyncio.client', 'websockets.asyncio.server',

@@ -4,6 +4,7 @@ import socket
 from unittest.mock import MagicMock
 
 import pytest
+from wan_helpers import patch_ui
 
 from wan import connect_code as cc
 from wan.config import DEFAULT_RELAY_KEY, WanConfig
@@ -57,9 +58,9 @@ def test_pick_reachable_prefers_first_that_connects():
 
 # ── 자동 설정 ──
 def with_ctx(monkeypatch, admin=True, lan=("192.168.0.140",), firewall=(True, "열었습니다 9100"), **cfg):
-    monkeypatch.setattr(wui, "is_admin", lambda: admin)
-    monkeypatch.setattr(wui, "lan_addresses", lambda: list(lan))
-    monkeypatch.setattr(wui, "open_firewall", lambda port: firewall)
+    patch_ui(monkeypatch, "is_admin", lambda: admin)
+    patch_ui(monkeypatch, "lan_addresses", lambda: list(lan))
+    patch_ui(monkeypatch, "open_firewall", lambda port: firewall)
     ctl, ctx, ui = make_ctl(**cfg)
     ctx["client"] = MagicMock()
     ctl.client = ctx["client"]
@@ -189,8 +190,8 @@ def test_is_admin_true_off_windows_and_relaunch_unsupported():
 def test_auto_setup_then_paste_connects_for_real(host, tmp_path, monkeypatch):
     from test_wan_relay_host import health
     from wan_helpers import eventually
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["127.0.0.1"])
-    monkeypatch.setattr(wui, "open_firewall", lambda port: (True, "열었습니다"))
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["127.0.0.1"])
+    patch_ui(monkeypatch, "open_firewall", lambda port: (True, "열었습니다"))
     relay_pc = host()
     relay_pc.cfg.update(relay_key="")                                     # 키 없이 시작 → 기본 공용 키가 들어가야 함
     ctl1 = wui.WanTabController(relay_pc.tab_context(lambda *a: None, relaunch_admin=None), lambda f: f(),

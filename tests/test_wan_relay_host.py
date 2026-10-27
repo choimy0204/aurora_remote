@@ -13,7 +13,7 @@ from wan import netutil
 from wan import ui as wui
 from wan.client import WanClient
 from wan.config import RELAY_EXIT_PORT_BUSY, WanConfig
-from wan_helpers import eventually
+from wan_helpers import eventually, patch_ui
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KEY = "비밀-key-123"
@@ -225,7 +225,7 @@ def test_toggle_off_needs_no_valid_port():
 
 
 def test_info_warns_when_key_missing_and_shows_addresses(monkeypatch):
-    monkeypatch.setattr(wui, "lan_addresses", lambda: ["192.168.0.140"])
+    patch_ui(monkeypatch, "lan_addresses", lambda: ["192.168.0.140"])
     ctl, *_ = make_ctl(relay_port=9100)
     port, hint, warn = ctl.relay_info()
     assert port == "9100" and "ws://192.168.0.140:9100" in hint and "포트포워딩" in hint and "공용 키" in warn
@@ -251,10 +251,10 @@ def test_old_ctx_without_relay_keys_still_works():
 
 def test_open_firewall_reports_result(monkeypatch):
     ctl, _, ui = make_ctl(relay_port=9300)
-    monkeypatch.setattr(wui, "open_firewall", lambda port: (False, f"실패 {port}\n명령"))
+    patch_ui(monkeypatch, "open_firewall", lambda port: (False, f"실패 {port}\n명령"))
     ctl.open_firewall()
     assert ui.last("show_error") == ("방화벽", "실패 9300\n명령")
-    monkeypatch.setattr(wui, "open_firewall", lambda port: (True, f"열었습니다 {port}"))
+    patch_ui(monkeypatch, "open_firewall", lambda port: (True, f"열었습니다 {port}"))
     ctl.open_firewall()
     assert ui.last("show_info")[1] == "열었습니다 9300"
 
