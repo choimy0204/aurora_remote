@@ -5,7 +5,7 @@ WAN 원격 화면 창 — 기존 RemoteViewer 를 그대로 쓰되 WAN 에 맞�
 - "절약" 이면 요청하는 화면 크기를 SAVER_BOX 로 제한 (현장 PC 도 같은 제한을 걸지만 미리 줄여 데이터 절약)
 - 툴바 오른쪽에 연결 종류 · 이번 연결 사용량 · 현재 속도 · 화질을 1초마다 표시
 - 창을 닫으면 Session 도 함께 닫음 (close_session=False 로 끌 수 있음)
-- 인터넷 지연 대응: "빠르게" 를 켜면 화질에 따라 화면을 2장씩 동시에 요청 (config.PREFETCH).
+- 인터넷 지연 대응: 화면을 화질에 따라 1~2장씩 겹쳐 요청 (config.PREFETCH) — 같은 조각이 두 번 오지 않게 장비에 알림. "빠르게" 는 한 장 더.
   초당 화면 수는 거의 2배가 되지만 **데이터도 약 1.9배** 쓴다(겹친 요청이 같은 변화를 두 번 받음) → 기본은 꺼짐.
   현장은 "보는 쪽이 보낸 last 번호 이후의 누적 변경분" 을 돌려주므로(직전에 보낸 화면 기준이 아님)
   요청이 겹쳐도 안전하다 — 이미 더 새 화면이 있으면 늦게 온 응답은 버리고, 기준이 내 화면보다 오래된 조각은
@@ -21,8 +21,10 @@ import threading
 import time
 from collections import deque
 
-from .config import MAX_PREFETCH, PREFETCH, QUALITY, QUALITY_DEFAULT, SAVER_BOX
+from .config import MAX_PREFETCH, PREFETCH, PREFETCH_FAST, QUALITY, QUALITY_DEFAULT, SAVER_BOX
 from .usage import fmt_bytes
+
+SLOW_RTT = 0.15      # 요청 하나의 왕복이 이보다 길면 겹쳐 보냄 (초)
 
 SAVER_NAME = "절약"          # 이 화질일 때만 화면 크기를 제한
 REFRESH_MS = 1000            # 정보 줄 갱신 간격
@@ -100,6 +102,7 @@ def make_viewer_class(base):
             self._pf_lock = threading.RLock()      # 화면 상태(_base · _pf_*)를 건드리는 스레드가 여럿
             self._pf_key, self._pf_gen, self._pf_last = None, 0, -1
             self._pf_rtt = 0.0
+            self._pending = []                      # 앞선 응답을 기다리는 응답 [(meta, 본문)]
             self._fast = bool(fast)                 # "빠르게" — 데이터를 더 쓰고 화면을 더 부드럽게
             super().__init__(root, title, session.viewer_request, px=px, quality=QUALITY_DEFAULT,
                              on_quality=None, on_closed=on_closed, font=font,
@@ -118,7 +121,7 @@ def make_viewer_class(base):
             unpack = sys.modules[base.__module__]._unpack
             staggered_for = None
             while self.alive:
-                depth = max(1, min(MAX_PREFETCH, self.PREFETCH.get(self._quality, 1) if self._fast else 1))
+                depth = self._depth()
                 if slot >= depth:                      # 이 화질에서는 쉬는 슬롯
                     staggered_for = None
                     self._sleep(0.25)
@@ -128,7 +131,7 @@ def make_viewer_class(base):
                     key = (self._mon, self._want, q)
                     if key != self._pf_key:            # 화면·크기·화질이 바뀌면 처음부터 (이전 요청의 응답은 버림)
                         self._pf_key, self._pf_gen = key, self._pf_gen + 1
-                        self._pf_last, self._base = -1, None
+                        self._pf_last, self._base, self._pending = -1, None, []
                     gen, last = self._pf_gen, self._pf_last
                 if slot and staggered_for != gen:      # 슬롯끼리 시작을 엇갈리게 — 한꺼번에 요청하지 않도록
                     staggered_for = gen
@@ -137,7 +140,8 @@ def make_viewer_class(base):
                 t0 = time.monotonic()
                 try:
                     r = self._req("/remote/frame", {"mon": self._mon, "w": self._want[0], "h": self._want[1],
-                                                    "q": q, "last": last, "rough": 1}, timeout=(3, 8))
+                                                    "q": q, "last": last, "rough": 1, "pipe": int(depth > 1)},
+                                  timeout=(3, 8))
                 except Exception:
                     self._lost_since = self._lost_since or time.monotonic()
                     self._error = f"연결 끊김 — 다시 연결 중… ({int(time.monotonic() - self._lost_since)}초)"
@@ -157,13 +161,13 @@ def make_viewer_class(base):
                         if not meta.get("err") and not meta.get("busy"):
                             ops = self._apply(meta, jpeg)
                             if ops is None:            # 가진 화면과 조각이 안 맞음 → 통째로 다시 받음
-                                self._base, self._pf_last = None, -1
+                                self._base, self._pf_last, self._pending = None, -1, []
                             else:
-                                self._pf_last = max(self._pf_last, meta.get("seq", -1))
+                                self._pf_last = max(self._pf_last, self._base_seq if self._base is not None else -1)   # 실제로 붙인 번호까지만 (보관 중인 응답은 제외)
                 except Exception:
                     self._error = "받은 화면을 읽지 못했습니다"
                     with self._pf_lock:
-                        self._base, self._pf_last = None, -1
+                        self._base, self._pf_last, self._pending = None, -1, []
                     self._sleep(1.0)
                     continue
                 if meta.get("err"):
@@ -187,8 +191,19 @@ def make_viewer_class(base):
                     nxt = min(max(float(meta.get("next", 0.15)), 0.0), 1.0)
                 except (TypeError, ValueError):
                     nxt = 0.15
+                if meta.get("rough"):                  # 거친 화면은 잠깐용 — 선명한 화면을 바로 받으러 감 (fps 간격을 기다리지 않음)
+                    self._sleep(nxt)
+                    continue
                 # 슬롯이 depth 개이므로 슬롯 하나당 주기는 depth/fps → 전체로는 fps 를 넘지 않음
                 self._sleep(max(depth / fps - elapsed, nxt) if jpeg else max(nxt, 0.04))
+
+        def _depth(self) -> int:
+            """동시에 날릴 요청 수 — 겹쳐 보내도 같은 조각이 두 번 오지 않으므로(장비가 'pipe' 를 알아봄) 기본으로 겹쳐 보냄"""
+            table = PREFETCH_FAST if self._fast else self.PREFETCH
+            depth = table.get(self._quality, 1)
+            if depth == 1 and self._pf_rtt > SLOW_RTT:     # 왕복이 느리면 "절약" 도 겹쳐 보내야 목표 fps 에 닿음 (데이터는 안 늘어남)
+                depth = 2
+            return max(1, min(MAX_PREFETCH, depth))
 
         def _push_ops(self, ops, meta) -> bool:
             """기반 클래스 _frame_loop 와 같은 방식으로 그릴 작업을 UI 에 넘김. 창이 없어졌으면 False"""
@@ -212,7 +227,7 @@ def make_viewer_class(base):
             return True
 
         def _apply(self, meta, data):
-            """겹쳐 날아온 응답을 안전하게 적용 (위 설명 참고). 기준 화면이 모자라면 None → 통째로 다시"""
+            """겹쳐 날아온 응답을 순서에 맞게 적용. 앞선 응답이 아직 안 왔으면 잠시 보관 (모자라면 None → 통째로 다시)"""
             if not data or not meta.get("parts"):
                 return []
             seq, base = meta.get("seq", -1), meta.get("base")
@@ -220,9 +235,26 @@ def make_viewer_class(base):
             if self._base is not None and self._base.size == size:
                 if seq <= self._base_seq:
                     return []                          # 이미 더 새 화면이 있음 — 늦게 온 응답
+                if base is not None and base > self._base_seq:
+                    self._pending.append((meta, data)) # 이 조각이 붙을 화면(앞선 응답)이 아직 안 옴
+                    if len(self._pending) > MAX_PREFETCH:
+                        self._pending.clear()
+                        return None
+                    return []
                 if base is not None and base < self._base_seq:
                     self._base_seq = base              # 누적 변경분이라 더 새 화면 위에 붙여도 맞음 (기반 클래스 검사 통과용)
-            return super()._apply(meta, data)
+            ops = super()._apply(meta, data)
+            while ops is not None and self._pending:   # 보관해 둔 뒤따르는 응답 중 이제 붙일 수 있는 것
+                self._pending = [p for p in self._pending if p[0].get("seq", -1) > self._base_seq]
+                ready = next((p for p in self._pending if p[0].get("base", -1) <= self._base_seq), None)
+                if ready is None:
+                    break
+                self._pending.remove(ready)
+                more = super()._apply(*ready)
+                if more is None:
+                    return None
+                ops = ops + more
+            return ops
 
         # ── 요청: 절약 화질이면 화면 크기 제한 ──
         def _req(self, route, params, timeout):
@@ -237,7 +269,7 @@ def make_viewer_class(base):
             row = self._info_row = tk.Frame(self.win, bg=self.BG)
             row.pack(fill="x", padx=px(10), pady=(0, px(4)), before=self._area)
             self._fast_var = tk.BooleanVar(value=self._fast)
-            tk.Checkbutton(row, text="빠르게 (화면이 부드러워지지만 데이터를 약 2배 씀)", variable=self._fast_var,
+            tk.Checkbutton(row, text="빠르게 (요청을 더 겹쳐 지연을 줄임 · 데이터를 조금 더 씀)", variable=self._fast_var,
                            command=self._fast_changed, bg=self.BG, fg=self.FG, selectcolor=self.BG,
                            activebackground=self.BG, activeforeground=self.FG, font=font).pack(side="left")
             self._info = tk.Label(row, text="", bg=self.BG, fg=self.DIM, font=font, anchor="e")

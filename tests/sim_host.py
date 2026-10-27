@@ -26,6 +26,7 @@ class SimHost:
         self.snap = {1: self.screen.copy()}
         self._lock = threading.Lock()
         self.bytes_sent = 0
+        self.sent = -1                 # pipe=1 요청에 마지막으로 응답한 번호 (진짜 장비의 세션별 sent)
         self.full_frames = self.diff_frames = 0
 
     # ── 화면이 바뀜 ──
@@ -53,6 +54,9 @@ class SimHost:
         with self._lock:
             seq, img = self.seq, self.screen.copy()
             meta = {"seq": seq, "mons": [], "next": 0.02}
+            pipe = int(q.get("pipe", 0))
+            if pipe and 0 <= last < self.sent <= seq and self.sent >= self.hist_base:
+                last = self.sent
             if last == seq:
                 return self.ar._pack(meta)
             rects = self._tiles_since(last) if self.hist_base <= last < seq else None
@@ -71,6 +75,8 @@ class SimHost:
                 body = j
                 self.full_frames += 1
             out = self.ar._pack(meta, body)
+            if pipe:
+                self.sent = seq
             self.bytes_sent += len(out)
             return out
 

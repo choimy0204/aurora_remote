@@ -1132,11 +1132,12 @@ class RemoteHost:
         return [[0, 0, ss[0], ss[1], len(j)]], j, None
 
     def frame(self, q: dict, who: str) -> bytes:
-        self._session(q, who)
+        sess = self._session(q, who)
         mon  = _qint(q, "mon", -1, -1, 32)
         box  = (_qint(q, "w", 1280, 64, 7680), _qint(q, "h", 720, 64, 4320))
         qual = _qint(q, "q", 60, 20, 90)
         last = _qint(q, "last", -1, -1, 1 << 62)
+        pipe = _qint(q, "pipe", 0, 0, 1)    # 1 = 보는 쪽이 요청을 겹쳐 보냄 → 방금 보낸 번호 이후의 변경분만 (같은 조각을 두 번 안 보냄)
         meta = {}
         if not self._cap_lock.acquire(timeout=self.LOCK_WAIT):
             meta["busy"] = True
@@ -1148,6 +1149,9 @@ class RemoteHost:
                 meta.update(mons=[list(m) for m in mons], rect=list(rect), cursor=self._cursor(rect))
                 fr = self._capture(rect, mons)
                 meta["seq"] = fr["seq"]
+                sent = sess.get("sent", -1)
+                if pipe and 0 <= last < sent <= fr["seq"] and sent >= self._hist_base:
+                    last = sent                           # 앞선 요청의 응답에 이미 실린 변경은 빼고
                 if self._screen.note:
                     meta["note"] = self._screen.note
                 if self._screen.gdi:
@@ -1178,6 +1182,8 @@ class RemoteHost:
                     self._next_cap += spent
                 meta["size"] = list(ss)
                 meta["parts"] = hit[0]
+                if pipe:
+                    sess["sent"] = fr["seq"]
                 if rough is not None:
                     meta["rough"] = 1                     # 잠깐 보여 줄 거친 화면 — 곧 선명한 화면이 옴
                 if hit[2] is not None:

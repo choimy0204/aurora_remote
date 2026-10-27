@@ -112,10 +112,11 @@ def frame_requests(sess):
     return [p for r, p in sess.requests if r == "/remote/frame"]
 
 
-def test_prefetch_roughly_doubles_frame_rate_on_slow_links(env):
+def test_prefetch_roughly_doubles_frame_rate_on_slow_links(env, monkeypatch):
+    monkeypatch.setattr("wan.viewer.SLOW_RTT", 99)          # 절약의 자동 겹침을 꺼서 한 장씩일 때와 비교
     results = {}
     for quality in ("절약", "보통"):
-        v, host, sess, stop = env["start"](rtt=0.4, quality=quality)
+        v, host, sess, stop = env["start"](rtt=0.4, quality=quality, fast=False)
         env["run"](5.0)
         results[quality] = len(frame_requests(sess))
         stop.set()
@@ -124,26 +125,26 @@ def test_prefetch_roughly_doubles_frame_rate_on_slow_links(env):
     assert results["절약"] <= 5.0 / 0.4 + 2                           # 절약은 1장씩 (왕복 한 번에 한 장)
 
 
-def test_saver_never_has_two_requests_in_flight_but_normal_does_when_fast(env):
-    v, host, sess, stop = env["start"](rtt=0.3, quality="절약")
+def test_saver_never_has_two_requests_in_flight_but_normal_does(env, monkeypatch):
+    monkeypatch.setattr("wan.viewer.SLOW_RTT", 99)
+    v, host, sess, stop = env["start"](rtt=0.3, quality="절약", fast=False)
     env["run"](3.0)
     assert sess.peak_inflight == 1                      # 절약은 데이터를 아끼려고 한 장씩
-    v2, host2, sess2, stop2 = env["start"](rtt=0.3, quality="보통")
+    v2, host2, sess2, stop2 = env["start"](rtt=0.3, quality="보통", fast=False)
     env["run"](3.0)
     assert sess2.peak_inflight == 2                     # 보통은 두 장씩 (그 이상은 아님)
 
 
 def test_prefetch_data_overhead_is_bounded(env):
-    """겹친 요청은 같은 변화를 두 번 받을 수 있다 — 얼마나 더 쓰는지 상한을 확인"""
+    """겹친 요청도 같은 변화를 두 번 받지 않는다 (pipe) — 요청당 바이트가 늘지 않음"""
     sent = {}
     for quality in ("절약", "보통"):
-        v, host, sess, stop = env["start"](rtt=0.4, quality=quality, paint_every=0.1)
+        v, host, sess, stop = env["start"](rtt=0.4, quality=quality, paint_every=0.1, fast=False)
         env["run"](5.0)
         stop.set()
         sent[quality] = host.bytes_sent / max(1, len(frame_requests(sess)))      # 요청당 바이트
         v.close()
-    # 요청 한 번당 받는 양이 절약(1장)과 비슷해야 총량이 요청 수만큼만 늘어남 (같은 변화를 3배 넘게 받지 않음)
-    assert sent["보통"] < 3.0 * sent["절약"], sent
+    assert sent["보통"] < 1.5 * sent["절약"], sent
 
 
 def test_saver_caps_requested_frame_size_but_normal_does_not(env):
@@ -161,21 +162,21 @@ def test_saver_caps_requested_frame_size_but_normal_does_not(env):
     assert max(p["w"] for p in frame_requests(sess)[-5:]) > 1280
 
 
-def test_fast_mode_is_off_by_default_and_never_prefetches(env):
+def test_fast_mode_is_off_by_default_and_prefetches_two(env):
     v, host, sess, stop = env["start"](rtt=0.3, quality="고화질", fast=False)
     env["run"](2.5)
-    assert v._fast is False and sess.peak_inflight == 1          # 기본은 데이터를 아끼려고 한 장씩
+    assert v._fast is False and sess.peak_inflight == 2          # 기본도 두 장 (겹쳐도 같은 조각은 한 번만)
     settle(env, v, host, stop)
 
 
 def test_fast_checkbox_turns_prefetch_on_and_off_midrun(env):
     v, host, sess, stop = env["start"](rtt=0.3, quality="보통", fast=False)
     env["run"](2.0)
-    assert sess.peak_inflight == 1
+    assert sess.peak_inflight == 2
     v._fast_var.set(True)
     v._fast_changed()
     env["run"](2.5)
-    assert v._fast is True and sess.peak_inflight == 2
+    assert v._fast is True and sess.peak_inflight == 3
     v._fast_var.set(False)
     v._fast_changed()
     env["run"](1.0)
@@ -234,3 +235,68 @@ def test_apply_rule_requests_full_frame_when_base_is_missing(env):
     assert meta.get("base") == 1
     v._base = None
     assert v._apply(meta, body) is None
+
+
+# ── 겹친 요청(pipe): 같은 조각을 두 번 안 받고, 순서가 뒤바뀌어도 화면이 맞음 ──
+def test_pipelined_requests_do_not_repeat_changes(env):
+    v, host, sess, stop = env["start"](rtt=5.0)
+    stop.set()
+    time.sleep(0.1)
+    ar = env["ar"]
+    host.paint((10, 10, 100, 100), (255, 0, 0))
+    base_seq = host.seq
+    host.paint((200, 200, 300, 300), (0, 255, 0))
+    first, _ = ar._unpack(host.frame({"last": base_seq, "q": 60, "pipe": 1}))
+    host.paint((400, 20, 500, 120), (0, 0, 255))
+    second, _ = ar._unpack(host.frame({"last": base_seq, "q": 60, "pipe": 1}))     # 같은 last — 첫 응답이 아직 안 온 상태
+    assert second["base"] == first["seq"]                                           # 첫 응답 이후 변경분만
+    plain, _ = ar._unpack(host.frame({"last": base_seq, "q": 60}))
+    assert plain["base"] == base_seq                                                 # pipe 가 없으면 예전처럼 누적
+
+
+def test_out_of_order_pipelined_responses_still_give_correct_screen(env):
+    v, host, sess, stop = env["start"](rtt=5.0)
+    stop.set()
+    time.sleep(0.1)
+    ar = env["ar"]
+    host.paint((10, 10, 100, 100), (255, 0, 0))
+    full = ar._unpack(host.frame({"last": -1, "q": 60, "pipe": 1}))
+    v._base = None
+    assert v._apply(*full)
+    host.paint((200, 200, 300, 300), (0, 255, 0))
+    r1 = ar._unpack(host.frame({"last": v._base_seq, "q": 60, "pipe": 1}))
+    host.paint((400, 20, 500, 120), (0, 0, 255))
+    r2 = ar._unpack(host.frame({"last": v._base_seq, "q": 60, "pipe": 1}))
+    assert r2[0]["base"] == r1[0]["seq"]
+    assert v._apply(*r2) == []                           # 앞선 응답(r1)이 아직 — 보관
+    ops = v._apply(*r1)                                  # r1 이 오면 r2 까지 이어서 붙음
+    assert ops and v._base_seq == r2[0]["seq"] and not v._pending
+    assert error_vs_host(v, host) < 8
+
+
+def test_rough_frame_is_followed_by_sharp_request_without_waiting(env):
+    """거친 화면(모자이크)을 받으면 fps 간격을 기다리지 않고 바로 선명한 화면을 요청"""
+    v, host, sess, stop = env["start"](rtt=0.0, quality="절약", fast=False)
+    stop.set()
+    real, times = host.frame, []
+
+    def frame(q):
+        times.append(time.monotonic())
+        out = real(q)
+        meta, body = env["ar"]._unpack(out)
+        if len(times) == 2:                               # 두 번째 응답을 "거친 화면" 으로 표시
+            meta["rough"] = 1
+            return env["ar"]._pack(meta, body)
+        return out
+    host.frame = frame
+    host.paint((10, 10, 100, 100), (255, 0, 0))
+    env["run"](1.5)
+    assert len(times) >= 4
+    assert times[2] - times[1] < 0.5 * (1.0 / v.QUALITY["절약"][1]), times[:4]    # 절약 fps(5) 간격(0.2초)을 안 기다림
+
+
+def test_saver_overlaps_requests_only_when_the_link_is_slow(env):
+    v, host, sess, stop = env["start"](rtt=0.5, quality="절약", fast=False)
+    env["run"](4.0)
+    assert sess.peak_inflight == 2                      # 왕복이 느리면 절약도 겹쳐 보냄
+    settle(env, v, host, stop)

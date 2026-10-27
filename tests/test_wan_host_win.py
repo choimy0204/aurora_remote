@@ -89,6 +89,31 @@ def test_diff_frame_after_screen_change_is_smaller_and_references_base(win):
         assert count_color(img, (0, 0, 208)) > 100
 
 
+def test_pipelined_request_skips_changes_already_sent(win):
+    """pipe=1: 앞 요청의 응답에 실린 변경은 빼고 그 번호 이후만 — 같은 조각을 두 번 보내지 않음. pipe 가 없으면 예전처럼 누적"""
+    ar, host = win["ar"], win["host"]
+
+    def ask(last, pipe):
+        q = {"sid": "pipe1", "mon": -1, "w": 1400, "h": 1000, "q": 80, "last": last}
+        if pipe:
+            q["pipe"] = 1
+        return ar._unpack(host.frame(q, "시험"))
+    meta0, _ = ask(-1, True)
+    for color in ("#0000d0", "#d0d000"):
+        win["label"].configure(bg=color)
+        win["root"].update()
+        time.sleep(0.8)
+        win["root"].update()
+        first, _ = ask(meta0["seq"], True)
+        if first["seq"] != meta0["seq"]:
+            break
+    assert first["seq"] != meta0["seq"], "화면이 바뀌었는데 번호가 그대로"
+    again, body = ask(meta0["seq"], True)            # 같은 last 로 겹쳐 온 요청
+    assert again["seq"] == first["seq"] and not again.get("parts") and not body    # 새로 바뀐 게 없으니 빈 응답
+    plain, _ = ask(meta0["seq"], False)              # pipe 없이는 누적
+    assert plain.get("parts")
+
+
 def test_unchanged_screen_returns_no_parts(win):
     meta1, _ = grab(win)
     time.sleep(1.0)
