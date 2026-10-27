@@ -25,6 +25,12 @@ from .config import MAX_PREFETCH, PREFETCH, PREFETCH_FAST, QUALITY, QUALITY_DEFA
 from .usage import fmt_bytes
 
 SLOW_RTT = 0.15      # 요청 하나의 왕복이 이보다 길면 겹쳐 보냄 (초)
+ACT_SECONDS = 1.0    # 입력을 보낸 뒤 이 시간 동안은 화면 요청을 서두름
+SMALL_REPLY = 2048      # 이보다 작은 응답 = 화면 변화 없음 (왕복 시간 재는 용도)
+BIG_REPLY = 16384       # 이보다 큰 응답만 회선 속도 계산에 씀
+FULL_FRAME_BYTES = 60000   # 화면 전체 한 장의 대략적인 크기 (WebP 기준)
+SLOW_FULL_S = 0.40      # 전체 한 장이 이보다 오래 걸리면 느린 회선 → 거친 화면 허용
+ACT_POLL = 0.05      # 조작 중 화면 요청 사이 최대 간격 (변화가 없는 응답은 100바이트 안팎이라 데이터는 거의 안 듦)
 
 SAVER_NAME = "절약"          # 이 화질일 때만 화면 크기를 제한
 REFRESH_MS = 1000            # 정보 줄 갱신 간격
@@ -103,6 +109,10 @@ def make_viewer_class(base):
             self._pf_key, self._pf_gen, self._pf_last = None, 0, -1
             self._pf_rtt = 0.0
             self._pending = []                      # 앞선 응답을 기다리는 응답 [(meta, 본문)]
+            self._act_until = 0.0                   # 이 시각까지는 조작 중 — 화면 요청을 서두름
+            self._rtt_floor, self._bps, self._slow = 0.0, 0.0, False   # 회선 추정: 변화 없는 응답의 시간 · 초당 바이트 · 느린 회선 여부
+            self._fmt_param = {"fmt": "webp"} if getattr(sys.modules[base.__module__], "WEBP_OK", False) else {}     # WebP 로 받을 수 있으면 요청 (같은 화질에서 데이터 40~60%)
+            self._wake_gen = 0                      # 입력을 보낼 때마다 올림 — 쉬는 중인 화면 요청이 이 값이 바뀌면 깨어남
             self._fast = bool(fast)                 # "빠르게" — 데이터를 더 쓰고 화면을 더 부드럽게
             super().__init__(root, title, session.viewer_request, px=px, quality=QUALITY_DEFAULT,
                              on_quality=None, on_closed=on_closed, font=font,
@@ -140,7 +150,8 @@ def make_viewer_class(base):
                 t0 = time.monotonic()
                 try:
                     r = self._req("/remote/frame", {"mon": self._mon, "w": self._want[0], "h": self._want[1],
-                                                    "q": q, "last": last, "rough": 2, "pipe": int(depth > 1)},
+                                                    "q": q, "last": last, "wan": 1, "rough": int(self._rough_allowed()),
+                                                    "pipe": int(depth > 1), **self._fmt_param},
                                   timeout=(3, 8))
                 except Exception:
                     self._lost_since = self._lost_since or time.monotonic()
@@ -183,6 +194,7 @@ def make_viewer_class(base):
                 self._note, self._gdi = meta.get("note", ""), bool(meta.get("gdi"))
                 elapsed = time.monotonic() - t0
                 self._pf_rtt = elapsed if not self._pf_rtt else 0.7 * self._pf_rtt + 0.3 * elapsed
+                self._note_transfer(len(r.content), elapsed)
                 if jpeg:
                     self._net = f"{max(1, len(jpeg) // 1024)} KB · {int(elapsed * 1000)} ms"
                 if not self._push_ops(ops, meta):
@@ -192,10 +204,46 @@ def make_viewer_class(base):
                 except (TypeError, ValueError):
                     nxt = 0.15
                 if meta.get("rough"):                  # 거친 화면은 잠깐용 — 선명한 화면을 바로 받으러 감 (fps 간격을 기다리지 않음)
-                    self._sleep(nxt)
+                    self._nap(nxt)
                     continue
                 # 슬롯이 depth 개이므로 슬롯 하나당 주기는 depth/fps → 전체로는 fps 를 넘지 않음
-                self._sleep(max(depth / fps - elapsed, nxt) if jpeg else max(nxt, 0.04))
+                self._nap(max(depth / fps - elapsed, nxt) if jpeg else max(nxt, 0.04))
+
+        def _note_transfer(self, nbytes: int, elapsed: float):
+            """응답 하나로 회선 속도를 어림 — 작은 응답(변화 없음)은 왕복 바닥값, 큰 응답은 초당 바이트"""
+            if nbytes < SMALL_REPLY:
+                # 가장 짧았던 응답을 기준으로, 회선이 느려지면 조금씩 따라 올라감 (가끔 느린 응답 하나에 끌려가지 않게)
+                self._rtt_floor = elapsed if not self._rtt_floor else min(elapsed, self._rtt_floor * 1.02)
+                return
+            if nbytes < BIG_REPLY:
+                return
+            bps = nbytes / max(0.02, elapsed - self._rtt_floor)
+            self._bps = bps if not self._bps else 0.6 * self._bps + 0.4 * bps
+            full = FULL_FRAME_BYTES / self._bps            # 화면 전체 한 장이 걸릴 시간
+            if full > SLOW_FULL_S:
+                self._slow = True
+            elif full < SLOW_FULL_S * 0.6:
+                self._slow = False
+
+        def _rough_allowed(self) -> bool:
+            """거친(작은) 화면을 받아도 되는지. 절약은 늘 허용(데이터 우선), 그 밖에는 회선이 느릴 때만 — 빠른 회선이면 바로 선명하게"""
+            return self._quality == SAVER_NAME or self._slow
+
+        def _after_input(self, ok):
+            """입력을 장비에 보낸 직후 — 결과(글자 · 메뉴)가 바로 보이도록 잠깐 동안 화면 요청을 서두름"""
+            self._act_until = time.monotonic() + ACT_SECONDS
+            self._wake_gen += 1
+
+        def _nap(self, sec: float):
+            """화면 요청 사이 쉬기. 조작 중이면 짧게(ACT_POLL), 입력이 나가면 바로 깨어남"""
+            if time.monotonic() < self._act_until:
+                sec = min(sec, ACT_POLL)
+            gen, end = self._wake_gen, time.monotonic() + sec
+            while self.alive and self._wake_gen == gen:
+                left = end - time.monotonic()
+                if left <= 0:
+                    break
+                time.sleep(min(0.01, left))
 
         def _depth(self) -> int:
             """동시에 날릴 요청 수 — 겹쳐 보내도 같은 조각이 두 번 오지 않으므로(장비가 'pipe' 를 알아봄) 기본으로 겹쳐 보냄"""

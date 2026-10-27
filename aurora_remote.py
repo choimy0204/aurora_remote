@@ -484,9 +484,10 @@ class _D3D11_BOX(ctypes.Structure):
                 ("right", wt.UINT), ("bottom", wt.UINT), ("back", wt.UINT)]
 
 
-DIRTY_TILE = 64         # 바뀐 영역을 모으는 격자 크기 (장비 화면 픽셀)
+DIRTY_TILE = 32         # 바뀐 영역을 모으는 격자 크기 (장비 화면 픽셀) — 글자 하나 바뀐 걸 64 칸으로 잡으면 4배를 보내게 됨
 DIRTY_FULL = 0.6        # 바뀐 칸이 이 비율을 넘으면 통째로 복사 (조각이 더 비쌈)
 PATCH_TILE = 64         # 보내는 조각의 격자 크기 (줄인 화면 픽셀, JPEG 블록 16 의 배수)
+PATCH_TILE_WEBP = 32    # WebP 는 조각마다 붙는 머리말이 작아서(JPEG 는 약 650바이트) 더 잘게 나눠도 이득
 
 
 _HR = ctypes.c_long
@@ -833,8 +834,9 @@ class _DesktopDup:
             o["img"].paste(_bgrx_at(addr, pitch, x0, y0, x1 - x0, y1 - y0), (x0, y0))
 
     # ── 영역 ──
-    def grab(self, rect: tuple, sig) -> tuple:
+    def grab(self, rect: tuple, sig, rough_ok: bool = True) -> tuple:
         """(화면, 바뀐 사각형 [(x0, y0, x1, y1)] — rect 기준, 그대로면 []). 이 PC 에서 복제를 못 쓰면 _Unsupported.
+        rough_ok 가 거짓이면(보는 쪽이 거친 화면을 원하지 않음) 크게 바뀌어도 바로 선명하게 읽음.
         화면 이미지는 제자리에서 고쳐지므로 호출하는 쪽 잠금 안에서만 읽을 것"""
         if sig != self._sig or not self._outs:
             self._build(sig)
@@ -850,7 +852,7 @@ class _DesktopDup:
         self.note = ""
         single = len(parts) == 1 and parts[0]["rect"] == rect
         fresh = self._last_rect != rect
-        changes = [(o, self._grab_out(o, rough_ok=single and not fresh)) for o in parts]
+        changes = [(o, self._grab_out(o, rough_ok=single and not fresh and rough_ok)) for o in parts]
         whole = [(0, 0, w, h)]
         self._last_rect = rect
         if single and parts[0]["img"] is not None:
@@ -897,11 +899,11 @@ class _Screen:
         self._gdi_prev = None
         self._gdi_only = False   # 다음 세션에서 DXGI 다시 시도
 
-    def grab(self, rect: tuple, sig) -> tuple:
+    def grab(self, rect: tuple, sig, rough_ok: bool = True) -> tuple:
         """(화면, 바뀐 사각형 목록, 거친 화면 또는 None) — _DesktopDup.grab 과 같음"""
         if not self._gdi_only:
             try:
-                return self._dxgi.grab(rect, sig)
+                return self._dxgi.grab(rect, sig, rough_ok)
             except _Unsupported as e:
                 self._dxgi.close()
                 self._gdi_only = True
@@ -925,6 +927,27 @@ class _Screen:
 def _jpeg(im: Image.Image, quality: int) -> bytes:
     buf = io.BytesIO()
     im.save(buf, "JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def _webp_ok() -> bool:
+    try:
+        from PIL import features
+        return bool(features.check("webp"))
+    except Exception:
+        return False
+
+
+WEBP_OK = _webp_ok()      # 이 PC 의 Pillow 가 WebP 를 쓸 수 있는지 (보는 쪽은 열기, 장비는 만들기)
+WEBP_QUALITY_SHIFT = 5    # 같은 화질 숫자라면 WebP 는 JPEG 보다 조금 더 좋게 나오므로 낮춰서 비슷하게 맞춤 (JPEG 75 ≈ WebP 70)
+
+
+def _encode_img(im: Image.Image, quality: int, webp: bool = False) -> bytes:
+    """화면 그림 → 바이트.  webp 이면 같은 화질에서 JPEG 의 40~60% 크기 (UI 화면 실측) — 보는 쪽은 Image.open 이 알아서 구분"""
+    if not webp:
+        return _jpeg(im, quality)
+    buf = io.BytesIO()
+    im.save(buf, "WEBP", quality=max(10, quality - WEBP_QUALITY_SHIFT), method=0)
     return buf.getvalue()
 
 
@@ -955,6 +978,7 @@ class RemoteHost:
     DUTY_WAN     = 2.5      # 보는 쪽이 rough=2 로 요청하면(WAN) 인터넷 지연 때문에 화면 수가 모자라므로 덜 쉼 → 계속 움직일 때 한 코어의 약 2/7
     HISTORY      = 300      # 바뀐 영역 기록 개수 (보는 쪽이 이보다 뒤처지면 통째로 보냄)
     IDLE_INTERVAL = 0.3     # 화면이 그대로일 때 캡처 간격
+    ACT_WINDOW   = 1.0      # 입력을 받은 뒤 이 시간 동안은 '지금 조작 중' — 그대로일 때도 자주 확인 (입력 결과가 바로 보이게)
     MAX_FRESH_GAP = 1.0     # 처음 여는 캡처(준비 비용 포함) 뒤 쉬는 시간 상한
     ROUGH_Q      = 45       # 화면 전체가 바뀌는 동안 보내는 거친 화면의 화질 상한
     ROUGH_Q_WAN  = 65       # 보는 쪽이 rough=2 로 요청하면(WAN) 거친 화면도 덜 번지게 — 작은 그림이라 데이터 차이는 적음
@@ -979,6 +1003,7 @@ class RemoteHost:
         self._seq      = int(time.time() * 1000)   # 클라이언트를 다시 켜도 번호가 겹치지 않게
         self._next_cap = 0.0
         self._duty = self.DUTY          # 마지막 요청에 맞춘 쉬는 배수 (WAN 보는 쪽이면 DUTY_WAN)
+        self._act_until = 0.0           # 이 시각까지는 조작 중 (note_input)
         self._mons     = (0.0, [])
 
     # ── 세션 ─────────────────────────────
@@ -1061,14 +1086,15 @@ class RemoteHost:
             return tuple(mons[mon][:4])
         return _virtual_screen()
 
-    def _capture(self, rect: tuple, mons: list) -> dict:
-        """직전 캡처 후 쉬는 시간이 안 지났으면 직전 화면을 그대로 씀 (보는 쪽이 여럿이어도 캡처는 한 번)"""
+    def _capture(self, rect: tuple, mons: list, rough_ok: bool = True) -> dict:
+        """직전 캡처 후 쉬는 시간이 안 지났으면 직전 화면을 그대로 씀 (보는 쪽이 여럿이어도 캡처는 한 번).
+        단, 직전 화면이 거친 화면인데 이 보는 쪽은 그걸 원하지 않으면 선명하게 다시 읽음"""
         fr = self._frame
-        if fr and fr["rect"] == rect and time.monotonic() < self._next_cap:
+        if fr and fr["rect"] == rect and time.monotonic() < self._next_cap and (rough_ok or fr["rough"] is None):
             return fr
         t0, s0 = time.perf_counter(), _slept[0]
         with low_priority(-2):
-            img, dirty, rough = self._screen.grab(rect, tuple(mons))
+            img, dirty, rough = self._screen.grab(rect, tuple(mons), rough_ok)
         same = bool(fr) and fr["rect"] == rect and fr["img"] is img and not dirty
         fresh = not fr or fr["rect"] != rect or fr["img"] is not img
         if fresh:
@@ -1094,21 +1120,22 @@ class RemoteHost:
             cost -= _slept[0] - s0
             if fresh:
                 cost = min(cost, self.MAX_FRESH_GAP / self._duty)
-            gap = max(self.IDLE_INTERVAL if same else self.MIN_INTERVAL, cost * self._duty)
+            idle = self.MIN_INTERVAL if time.monotonic() < self._act_until else self.IDLE_INTERVAL
+            gap = max(idle if same else self.MIN_INTERVAL, cost * self._duty)
         self._next_cap = time.monotonic() + gap
         return fr
 
     def _dirty_since(self, seq: int) -> list:
         return [r for s, rs in self._hist if s > seq for r in rs]
 
-    def _tiles(self, fr: dict, ss: tuple, since: int):
+    def _tiles(self, fr: dict, ss: tuple, since: int, tile: int = PATCH_TILE):
         """seq 이후 바뀐 곳 → 줄인 화면(ss) 기준 격자 사각형. 너무 넓으면 None (통째로가 쌈)"""
         w, h = fr["img"].size
-        tiles = _tiles_of(self._dirty_since(since), PATCH_TILE, ss[0], ss[1],
+        tiles = _tiles_of(self._dirty_since(since), tile, ss[0], ss[1],
                           w / ss[0], h / ss[1], margin=2)   # 축소 보간이 주변 1~2 픽셀에 번짐
-        if len(tiles) > (-(-ss[0] // PATCH_TILE)) * (-(-ss[1] // PATCH_TILE)) * DIRTY_FULL:
+        if len(tiles) > (-(-ss[0] // tile)) * (-(-ss[1] // tile)) * DIRTY_FULL:
             return None
-        return _merge_tiles(tiles, PATCH_TILE, ss[0], ss[1])
+        return _merge_tiles(tiles, tile, ss[0], ss[1])
 
     def _stream(self, fr: dict, ss: tuple) -> Image.Image:
         """보는 쪽 창 크기(ss)로 줄인 화면 — 바뀐 칸만 다시 줄여 최신으로 유지"""
@@ -1127,18 +1154,19 @@ class RemoteHost:
         st["seq"], st["used"] = fr["seq"], time.monotonic()
         return st["img"]
 
-    def _encode(self, fr: dict, ss: tuple, qual: int, last: int) -> tuple:
+    def _encode(self, fr: dict, ss: tuple, qual: int, last: int, webp: bool = False) -> tuple:
         """(조각 목록 [[x, y, w, h, 길이]], JPEG 들, 기준 번호 또는 None=통째로)"""
         img = self._stream(fr, ss)
-        rects = self._tiles(fr, ss, last) if self._hist_base <= last < fr["seq"] else None
+        rects = (self._tiles(fr, ss, last, PATCH_TILE_WEBP if webp else PATCH_TILE)
+                 if self._hist_base <= last < fr["seq"] else None)
         if rects is not None:
             parts, chunks = [], []
             for r in rects:
-                j = _jpeg(img.crop(r), qual)
+                j = _encode_img(img.crop(r), qual, webp)
                 parts.append([r[0], r[1], r[2] - r[0], r[3] - r[1], len(j)])
                 chunks.append(j)
             return parts, b"".join(chunks), last
-        j = _jpeg(img, qual)
+        j = _encode_img(img, qual, webp)
         return [[0, 0, ss[0], ss[1], len(j)]], j, None
 
     def frame(self, q: dict, who: str) -> bytes:
@@ -1147,7 +1175,9 @@ class RemoteHost:
         box  = (_qint(q, "w", 1280, 64, 7680), _qint(q, "h", 720, 64, 4320))
         qual = _qint(q, "q", 60, 20, 90)
         last = _qint(q, "last", -1, -1, 1 << 62)
-        self._duty = self.DUTY_WAN if str(q.get("rough")) == "2" else self.DUTY
+        wan = str(q.get("wan")) == "1" or str(q.get("rough")) == "2"      # WAN 보는 쪽 (rough=2 는 옛 WAN 보는 쪽)
+        want_rough = str(q.get("rough")) in ("1", "2")                  # 거친 화면을 받아도 되는지
+        self._duty = self.DUTY_WAN if wan else self.DUTY
         pipe = _qint(q, "pipe", 0, 0, 1)    # 1 = 보는 쪽이 요청을 겹쳐 보냄 → 방금 보낸 번호 이후의 변경분만 (같은 조각을 두 번 안 보냄)
         meta = {}
         if not self._cap_lock.acquire(timeout=self.LOCK_WAIT):
@@ -1158,7 +1188,7 @@ class RemoteHost:
                 mons = self._monitor_list()
                 rect = self._rect(mon, mons)
                 meta.update(mons=[list(m) for m in mons], rect=list(rect), cursor=self._cursor(rect))
-                fr = self._capture(rect, mons)
+                fr = self._capture(rect, mons, want_rough)
                 meta["seq"] = fr["seq"]
                 sent = sess.get("sent", -1)
                 if pipe and 0 <= last < sent <= fr["seq"] and sent >= self._hist_base:
@@ -1172,18 +1202,19 @@ class RemoteHost:
                     return _pack(meta)                    # 화면 그대로 → 압축·전송 생략
                 ss = _fit(fr["img"].size, box)
                 rough = fr.get("rough")
-                small = rough is not None and q.get("rough") in ("1", "2")   # 보는 쪽이 거친 화면을 직접 키울 수 있음
-                key = (fr["seq"], -2 if rough is not None else last, None if small else ss, qual, q.get("rough") == "2")
+                small = rough is not None and want_rough   # 보는 쪽이 거친 화면을 직접 키울 수 있음
+                webp = WEBP_OK and str(q.get("fmt")) == "webp"       # 보는 쪽이 WebP 를 원함 (옛 보는 쪽은 안 보냄 → JPEG)
+                key = (fr["seq"], -2 if rough is not None else last, None if small else ss, qual, wan, webp)
                 hit = self._jpeg.get(key)
                 if hit is None:
                     t0 = time.perf_counter()
                     with low_priority(-2):
                         if rough is not None:
                             im = rough if small else rough.resize(ss, Image.BILINEAR)
-                            j = _jpeg(im, min(qual, self.ROUGH_Q_WAN if q.get("rough") == "2" else self.ROUGH_Q))
+                            j = _encode_img(im, min(qual, self.ROUGH_Q_WAN if wan else self.ROUGH_Q), webp)
                             hit = [[0, 0, im.width, im.height, len(j)]], j, None
                         else:
-                            hit = self._encode(fr, ss, qual, last)
+                            hit = self._encode(fr, ss, qual, last, webp)
                     if len(self._jpeg) >= 8:
                         self._jpeg = {}
                     self._jpeg[key] = hit
@@ -1212,6 +1243,11 @@ class RemoteHost:
             return _pack(meta)
         finally:
             self._cap_lock.release()
+
+    def note_input(self):
+        """입력(키 · 마우스)을 받음 → 다음 화면 요청에서 바로 캡처하고, 잠시 동안 자주 확인 (결과가 늦게 보이지 않게)"""
+        self._next_cap = 0.0
+        self._act_until = time.monotonic() + self.ACT_WINDOW
 
     def _until_next(self) -> float:
         """다음 캡처까지 남은 초 — 보는 쪽이 그때 맞춰 요청하도록 (헛걸음 줄임)"""
@@ -1275,6 +1311,8 @@ class RemoteHost:
                     s["ctl"] = True
                     self._log(f"🖱 원격 조작 시작: {s['who']}")
                 sent = self._send(inputs)
+            if inputs:
+                self.note_input()
             if sent < len(inputs):
                 return {"ok": False, "err": "장비가 입력을 거부했습니다"}
             return {"ok": True}
@@ -1667,6 +1705,9 @@ class RemoteViewer:
         if r.status_code == 404 or "허용되지 않은 경로" in err or err == "not found":
             return "장비의 클라이언트가 원격을 지원하지 않습니다 (v2.11 이상 필요)"
         return err or f"HTTP {r.status_code}"
+
+    def _after_input(self, ok: bool):
+        """입력을 장비에 보내기 시작할 때 (WAN 파생 클래스가 화면 요청을 서두르는 데 씀 — LAN 은 아무 것도 안 함)"""
 
     def _sleep(self, sec: float):
         end = time.monotonic() + sec
@@ -2177,6 +2218,7 @@ class RemoteViewer:
             dropped = len(batch) - len(events)
             events.append(["s", keys, btns])
             ok, err = True, ""
+            self._after_input(True)                    # 보내는 동안 화면 요청도 서둘러 — 결과가 돌아오는 시간을 아낌
             for i in range(0, len(events), 150):
                 n += 1
                 try:

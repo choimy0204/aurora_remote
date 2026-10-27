@@ -317,8 +317,45 @@ def test_one_off_big_change_is_read_sharp_but_continuous_change_goes_rough(env):
     assert dup._rough_wanted(o, True, 11.3 + dup.ROUGH_MAX) is False   # 너무 오래 거칠었으면 한 번은 선명하게
 
 
-def test_wan_viewer_asks_for_better_rough_frames(env):
+def test_wan_viewer_marks_requests_as_wan_and_asks_for_webp(env):
     v, host, sess, stop = env["start"](rtt=0.0, quality="보통", fast=False)
     env["run"](0.6)
     stop.set()
-    assert all(p.get("rough") == 2 for p in frame_requests(sess))
+    reqs = frame_requests(sess)
+    assert reqs and all(p.get("wan") == 1 for p in reqs)
+    assert all(p.get("fmt") == "webp" for p in reqs) == env["ar"].WEBP_OK
+
+
+def test_rough_frames_only_when_saver_or_link_is_slow(env):
+    v, host, sess, stop = env["start"](rtt=5.0, quality="보통", fast=False)
+    stop.set()
+    assert v._rough_allowed() is False                     # 보통 + 회선 정보 없음 → 바로 선명하게
+    v._quality = "절약"
+    assert v._rough_allowed() is True                      # 절약은 데이터 우선
+    v._quality = "보통"
+    v._note_transfer(100, 0.05)                            # 변화 없는 작은 응답 → 왕복 바닥값 50ms
+    v._note_transfer(60000, 0.25)                          # 60KB 가 0.2초(+왕복) → 300KB/s → 화면 한 장 0.2초: 빠름
+    assert v._rough_allowed() is False
+    for _ in range(6):
+        v._note_transfer(40000, 1.05)                      # 40KB 가 1초 → 40KB/s → 화면 한 장 1.5초: 느림
+    assert v._rough_allowed() is True
+    for _ in range(12):
+        v._note_transfer(60000, 0.2)                       # 다시 빨라지면 되돌아옴 (히스테리시스)
+    assert v._rough_allowed() is False
+
+
+def test_input_wakes_frame_requests_and_polls_faster_for_a_while(env):
+    v, host, sess, stop = env["start"](rtt=0.0, quality="보통", fast=False)
+    stop.set()
+    time.sleep(0.2)
+    t = time.monotonic()
+    done = []
+    threading.Thread(target=lambda: (v._nap(5.0), done.append(time.monotonic() - t)), daemon=True).start()
+    time.sleep(0.1)
+    v._after_input(True)
+    time.sleep(0.2)
+    assert done and done[0] < 1.0                         # 5초를 쉬려던 요청이 입력이 나가자 바로 깨어남
+    v._act_until = time.monotonic() + 2.0
+    t = time.monotonic()
+    v._nap(5.0)
+    assert time.monotonic() - t < 0.2                     # 조작 중에는 쉬는 시간이 ACT_POLL 로 짧아짐
