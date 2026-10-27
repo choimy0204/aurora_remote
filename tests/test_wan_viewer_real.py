@@ -359,3 +359,38 @@ def test_input_wakes_frame_requests_and_polls_faster_for_a_while(env):
     t = time.monotonic()
     v._nap(5.0)
     assert time.monotonic() - t < 0.2                     # 조작 중에는 쉬는 시간이 ACT_POLL 로 짧아짐
+
+
+def test_small_window_size_changes_do_not_restart_the_screen_stream(env):
+    v, host, sess, stop = env["start"](rtt=0.0, quality="보통", fast=False)
+    env["run"](0.8)
+    first = v._want
+    assert first[0] % 16 == 0 and first[1] % 16 == 0          # 16 단위로 맞춤
+    keys = []
+    base_gen = v._pf_gen
+    for dh in (1, 2, 3, 1):                                   # 도구 막대 글자가 바뀌어 캔버스가 몇 픽셀씩 흔들리는 상황
+        e = type("E", (), {"width": v._view[0], "height": v._view[1] + dh})()
+        v._resized(e)
+        env["run"](0.05)
+    env["run"](0.6)
+    assert v._want == first and v._pf_gen == base_gen         # 같은 16 칸 안이라 처음부터 다시 받지 않음
+    e = type("E", (), {"width": v._view[0] + 200, "height": v._view[1]})()
+    v._resized(e)
+    assert v._want == first                                   # 끌고 있는 동안은 아직 반영 안 함
+    env["run"](0.7)
+    assert v._want[0] > first[0]                              # 멈추면 반영
+    settle(env, v, host, stop, seconds=2.0)
+
+
+def test_idle_screen_is_polled_less_often_but_input_or_change_restores_speed(env):
+    v, host, sess, stop = env["start"](rtt=0.0, quality="절약", fast=False)
+    stop.set()
+    time.sleep(0.2)
+    v._changed_at = time.monotonic()
+    assert v._idle_wait(0.3) == 0.3                           # 방금 바뀜 → 그대로
+    v._changed_at = time.monotonic() - 10
+    assert v._idle_wait(0.3) == 1.0                           # 절약: 한참 그대로 → 1초 간격
+    v._quality = "보통"
+    assert v._idle_wait(0.3) == 0.6
+    v._act_until = time.monotonic() + 1.0
+    assert v._idle_wait(0.3) == 0.3                           # 조작 중에는 바로 원래대로

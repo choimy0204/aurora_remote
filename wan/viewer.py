@@ -30,6 +30,10 @@ SMALL_REPLY = 2048      # 이보다 작은 응답 = 화면 변화 없음 (왕복
 BIG_REPLY = 16384       # 이보다 큰 응답만 회선 속도 계산에 씀
 FULL_FRAME_BYTES = 60000   # 화면 전체 한 장의 대략적인 크기 (WebP 기준)
 SLOW_FULL_S = 0.40      # 전체 한 장이 이보다 오래 걸리면 느린 회선 → 거친 화면 허용
+IDLE_AFTER = 3.0        # 화면이 이 시간(초) 동안 그대로면 확인 간격을 늘림
+IDLE_POLL = 0.6         # 그때의 확인 간격 (보통 · 고화질)
+IDLE_POLL_SAVER = 1.0   # (절약)
+RESIZE_SETTLE_MS = 250   # 창 크기가 이 시간 동안 안 바뀌면 그 크기로 화면을 다시 요청
 ACT_POLL = 0.05      # 조작 중 화면 요청 사이 최대 간격 (변화가 없는 응답은 100바이트 안팎이라 데이터는 거의 안 듦)
 
 SAVER_NAME = "절약"          # 이 화질일 때만 화면 크기를 제한
@@ -110,6 +114,8 @@ def make_viewer_class(base):
             self._pf_rtt = 0.0
             self._pending = []                      # 앞선 응답을 기다리는 응답 [(meta, 본문)]
             self._act_until = 0.0                   # 이 시각까지는 조작 중 — 화면 요청을 서두름
+            self._want_job, self._sized_once = None, False   # 창 크기 반영을 미루는 예약 · 첫 크기를 받았는지
+            self._changed_at = time.monotonic()      # 마지막으로 화면이 바뀐 것을 받은 시각
             self._rtt_floor, self._bps, self._slow = 0.0, 0.0, False   # 회선 추정: 변화 없는 응답의 시간 · 초당 바이트 · 느린 회선 여부
             self._fmt_param = {"fmt": "webp"} if getattr(sys.modules[base.__module__], "WEBP_OK", False) else {}     # WebP 로 받을 수 있으면 요청 (같은 화질에서 데이터 40~60%)
             self._wake_gen = 0                      # 입력을 보낼 때마다 올림 — 쉬는 중인 화면 요청이 이 값이 바뀌면 깨어남
@@ -207,7 +213,18 @@ def make_viewer_class(base):
                     self._nap(nxt)
                     continue
                 # 슬롯이 depth 개이므로 슬롯 하나당 주기는 depth/fps → 전체로는 fps 를 넘지 않음
-                self._nap(max(depth / fps - elapsed, nxt) if jpeg else max(nxt, 0.04))
+                if jpeg:
+                    self._changed_at = time.monotonic()
+                    self._nap(max(depth / fps - elapsed, nxt))
+                else:
+                    self._nap(self._idle_wait(max(nxt, 0.04)))
+
+        def _idle_wait(self, nxt: float) -> float:
+            """화면이 한참 그대로면 확인 간격을 늘림 (변화 없는 응답도 한 번에 수백 바이트 — 켜 둔 채 보기만 해도 쌓임).
+            변화가 생기거나 입력을 보내면(조작 중) 바로 원래 간격으로 돌아옴"""
+            if time.monotonic() < self._act_until or time.monotonic() - self._changed_at < IDLE_AFTER:
+                return nxt
+            return max(nxt, IDLE_POLL_SAVER if self._quality == SAVER_NAME else IDLE_POLL)
 
         def _note_transfer(self, nbytes: int, elapsed: float):
             """응답 하나로 회선 속도를 어림 — 작은 응답(변화 없음)은 왕복 바닥값, 큰 응답은 초당 바이트"""
@@ -228,6 +245,29 @@ def make_viewer_class(base):
         def _rough_allowed(self) -> bool:
             """거친(작은) 화면을 받아도 되는지. 절약은 늘 허용(데이터 우선), 그 밖에는 회선이 느릴 때만 — 빠른 회선이면 바로 선명하게"""
             return self._quality == SAVER_NAME or self._slow
+
+        def _resized(self, e):
+            """창 크기가 조금씩 바뀔 때마다(도구 막대 글자 길이 · 창 끌기) 화면을 처음부터 다시 받지 않도록,
+            요청하는 크기는 16 픽셀 단위로 맞추고 크기가 멈춘 뒤에 반영한다 (첫 크기는 바로)"""
+            self._view = (max(64, e.width), max(64, e.height))
+            self._layout()
+            if self._want_job is not None:
+                self.win.after_cancel(self._want_job)
+                self._want_job = None
+            if not self._sized_once:
+                self._sized_once = True
+                self._commit_want()
+            else:
+                self._want_job = self.win.after(RESIZE_SETTLE_MS, self._commit_want)
+
+        def _commit_want(self):
+            self._want_job = None
+            if self._actual:
+                return
+            w, h = self._view
+            want = (max(64, w // 16 * 16), max(64, h // 16 * 16))
+            if want != self._want:
+                self._want = want
 
         def _after_input(self, ok):
             """입력을 장비에 보낸 직후 — 결과(글자 · 메뉴)가 바로 보이도록 잠깐 동안 화면 요청을 서두름"""
